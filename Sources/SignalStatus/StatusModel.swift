@@ -31,6 +31,8 @@ final class StatusModel: ObservableObject {
     private let client = VOSClient()
     private let defaults: UserDefaults
     private var pollingTask: Task<Void, Never>?
+    private var pollingGeneration: UInt64 = 0
+    private var refreshCoalescer = RefreshCoalescer()
     private var consecutiveFailures = 0
     private var candidateTitle: String?
     private var candidateTitleCount = 0
@@ -184,9 +186,7 @@ final class StatusModel: ObservableObject {
 
         menuBarTitle = L10n.text("Cellular …", language: language)
 
-        Task { [weak self] in
-            self?.start()
-        }
+        start()
     }
 
     deinit {
@@ -215,13 +215,18 @@ final class StatusModel: ObservableObject {
 
     func start() {
         guard !demoMode, pollingTask == nil else { return }
+        pollingGeneration &+= 1
+        let generation = pollingGeneration
         pollingTask = Task { [weak self] in
-            guard let self else { return }
             while !Task.isCancelled {
-                await self.refresh()
-                let interval = UInt64(max(1, self.refreshInterval) * 1_000_000_000)
-                try? await Task.sleep(nanoseconds: interval)
+                guard let interval = await self?.pollOnceAndNextInterval() else { return }
+                do {
+                    try await Task.sleep(nanoseconds: interval)
+                } catch {
+                    break
+                }
             }
+            self?.pollingDidFinish(generation: generation)
         }
     }
 
@@ -401,7 +406,8 @@ final class StatusModel: ObservableObject {
         Task { [weak self] in
             await self?.runControl(.changingArchitecture(mode)) { model, configuration, operationGuard in
                 let previous = try await model.client.fetchNRSystemSelectionPreferences(configuration: configuration)
-                let target = try model.targetPreferences(for: mode, current: previous)
+                let preferencePlan = try model.targetPreferences(for: mode, current: previous)
+                let target = preferencePlan.target
                 guard let targetMode = target.modePreference else {
                     throw VOSClientError.verificationFailed("Qualcomm NAS did not report a mode preference to preserve.")
                 }
@@ -414,6 +420,7 @@ final class StatusModel: ObservableObject {
                         modePreference: targetMode,
                         saBands: target.saBands,
                         nsaBands: target.nsaBands,
+                        lteBands: preferencePlan.lteBandsToWrite,
                         configuration: configuration
                     )
                 } catch {
@@ -561,7 +568,7 @@ final class StatusModel: ObservableObject {
                       let modePreference = original.modePreference
                 else {
                     throw VOSClientError.verificationFailed(
-                        "No automatic SA/NSA baseline is available for this physical VOS. Power-cycle it, then reopen this panel to capture its defaults."
+                        "No automatic radio baseline is available for this physical VOS. Power-cycle it, then reopen this panel to capture its defaults."
                     )
                 }
                 var failures: [String] = []
@@ -592,7 +599,7 @@ final class StatusModel: ObservableObject {
                     )
                 } catch {
                     guard operationGuard.isValid else { throw error }
-                    failures.append("SA/NSA: \(error.localizedDescription)")
+                    failures.append("radio preference: \(error.localizedDescription)")
                 }
 
                 guard failures.isEmpty else {
@@ -655,7 +662,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.1.0"
+        ) as? String ?? "1.2.0"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -706,8 +713,36 @@ final class StatusModel: ObservableObject {
         NSApplication.shared.terminate(nil)
     }
 
+    private func pollOnceAndNextInterval() async -> UInt64 {
+        await refresh()
+        let seconds = StatusPollingPolicy.interval(
+            userInterval: refreshInterval,
+            connectionState: connectionState
+        )
+        return UInt64(seconds * 1_000_000_000)
+    }
+
+    private func pollingDidFinish(generation: UInt64) {
+        guard pollingGeneration == generation else { return }
+        pollingTask = nil
+    }
+
     private func refresh() async {
-        guard !isRefreshing, !isControlBusy else { return }
+        guard refreshCoalescer.request(
+            isRefreshing: isRefreshing,
+            isControlBusy: isControlBusy
+        ) else { return }
+
+        repeat {
+            refreshCoalescer.beginRefresh()
+            await performRefresh()
+        } while refreshCoalescer.shouldDrain(
+            isRefreshing: isRefreshing,
+            isControlBusy: isControlBusy
+        )
+    }
+
+    private func performRefresh() async {
         isRefreshing = true
         defer { isRefreshing = false }
 
@@ -720,11 +755,26 @@ final class StatusModel: ObservableObject {
 
         do {
             let latest = try await client.fetchSnapshot(configuration: configuration)
+            let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
+            if snapshot.plmn != latest.plmn {
+                // A powered SIM replacement can leave the USB device and SSH
+                // identity unchanged while registration moves to a different
+                // PLMN (or temporarily disappears). Do not keep presenting a
+                // selection or scan result captured for the previous card.
+                operatorSelection = nil
+                scannedNetworks = []
+                controlError = nil
+                controlNotice = nil
+            }
             snapshot = latest
             consecutiveFailures = 0
-            connectionState = .online
+            // During a physical SIM swap QMI remains reachable but may report
+            // no serving band while the new card initializes. Treat that as a
+            // reconnecting state so polling accelerates to the five-second
+            // recovery cadence instead of waiting the full user interval.
+            connectionState = latest.hasRadioData ? .online : .connecting
             lastError = nil
-            updateMenuTitle(force: snapshot.updatedAt == .distantPast)
+            updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged)
         } catch {
             consecutiveFailures += 1
             lastError = localizedError(error)
@@ -756,10 +806,14 @@ final class StatusModel: ObservableObject {
     ) async {
         guard !demoMode, controlOperation == nil else { return }
         controlOperation = operation
+        defer {
+            controlOperation = nil
+            refreshNow()
+        }
         while isRefreshing {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            if Task.isCancelled {
-                controlOperation = nil
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
                 return
             }
         }
@@ -775,8 +829,6 @@ final class StatusModel: ObservableObject {
         } catch {
             controlError = localizedError(error)
         }
-        controlOperation = nil
-        await refresh()
     }
 
     private var currentConfiguration: DeviceConfiguration {
@@ -799,60 +851,23 @@ final class StatusModel: ObservableObject {
     private func targetPreferences(
         for mode: NRArchitectureMode,
         current: NRSystemSelectionPreferences
-    ) throws -> NRSystemSelectionPreferences {
+    ) throws -> RadioAccessPreferencePlan {
         rememberOriginalPreferencesIfAutomatic(current)
         nrSelectionPreferences = current
         guard let original = originalNRPreferences,
               original.modePreference != nil
         else {
             throw VOSClientError.verificationFailed(
-                "The original automatic SA/NSA masks were not captured. Power-cycle VOS, then open Network & radio controls before changing the mode."
+                "The original automatic radio masks were not captured. Power-cycle VOS, then open Network & radio controls before changing the mode."
             )
         }
 
-        if mode == .unavailable {
-            throw VOSClientError.verificationFailed("SA/NSA preference control is unavailable.")
-        }
-
-        let plan: NRBandLockPlan?
-        if let activeNRBandLock {
-            guard let requested = NRBandMask(bands: activeNRBandLock) else {
-                throw NRBandLockPlanError.emptyRequest
-            }
-            plan = try NRBandLockPlan.make(
-                requested: requested,
-                baseline: original,
-                architecture: mode
-            )
-        } else {
-            plan = nil
-        }
-
-        switch mode {
-        case .automatic:
-            return NRSystemSelectionPreferences(
-                modePreference: original.modePreference,
-                saBands: plan?.saBands ?? original.saBands,
-                nsaBands: plan?.nsaBands ?? original.nsaBands,
-                lteBands: original.lteBands
-            )
-        case .saOnly:
-            return NRSystemSelectionPreferences(
-                modePreference: 0x0040,
-                saBands: plan?.saBands ?? original.saBands,
-                nsaBands: .zero,
-                lteBands: original.lteBands
-            )
-        case .nsaOnly:
-            return NRSystemSelectionPreferences(
-                modePreference: 0x0050,
-                saBands: .zero,
-                nsaBands: plan?.nsaBands ?? original.nsaBands,
-                lteBands: original.lteBands
-            )
-        case .unavailable:
-            throw VOSClientError.verificationFailed("SA/NSA preference control is unavailable.")
-        }
+        return try RadioAccessPreferencePlan.make(
+            mode: mode,
+            baseline: original,
+            current: current,
+            activeNRBandLock: activeNRBandLock
+        )
     }
 
     private func rollbackNRPreferences(
@@ -912,7 +927,7 @@ final class StatusModel: ObservableObject {
             operationGuard: operationGuard
         ) {
             throw VOSClientError.verificationFailed(
-                "The operator operation was verified, but restoring its pre-operation SA/NSA preference failed: \(rollbackFailure). Power-cycle VOS before another control operation."
+                "The operator operation was verified, but restoring its pre-operation radio preference failed: \(rollbackFailure). Power-cycle VOS before another control operation."
             )
         }
         return result

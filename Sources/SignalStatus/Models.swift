@@ -20,6 +20,40 @@ enum ConnectionState: Equatable, Sendable {
     }
 }
 
+enum StatusPollingPolicy {
+    static let reconnectInterval: TimeInterval = 5
+
+    static func interval(
+        userInterval: TimeInterval,
+        connectionState: ConnectionState
+    ) -> TimeInterval {
+        let configured = max(1, userInterval)
+        return connectionState == .online
+            ? configured
+            : min(configured, reconnectInterval)
+    }
+}
+
+struct RefreshCoalescer: Equatable, Sendable {
+    private(set) var isPending = false
+
+    mutating func request(isRefreshing: Bool, isControlBusy: Bool) -> Bool {
+        guard !isRefreshing, !isControlBusy else {
+            isPending = true
+            return false
+        }
+        return true
+    }
+
+    mutating func beginRefresh() {
+        isPending = false
+    }
+
+    func shouldDrain(isRefreshing: Bool, isControlBusy: Bool) -> Bool {
+        isPending && !isRefreshing && !isControlBusy
+    }
+}
+
 enum NRSystemMode: String, Equatable, Sendable {
     case sa = "SA"
     case nsa = "NSA"
@@ -237,6 +271,7 @@ enum NRArchitectureMode: String, CaseIterable, Identifiable, Equatable, Sendable
     case automatic
     case saOnly
     case nsaOnly
+    case lteOnly
     case unavailable
 
     var id: String { rawValue }
@@ -246,6 +281,7 @@ enum NRArchitectureMode: String, CaseIterable, Identifiable, Equatable, Sendable
         case .automatic: return "Auto SA/NSA"
         case .saOnly: return "SA only"
         case .nsaOnly: return "NSA only"
+        case .lteOnly: return "LTE only"
         case .unavailable: return "Unavailable"
         }
     }
@@ -364,10 +400,124 @@ struct NRSystemSelectionPreferences: Equatable, Sendable {
         let hasLTE = modePreference & 0x0010 != 0
         let hasNR = modePreference & 0x0040 != 0
 
+        // LTE-only is the exact LTE RAT mask written by this app. Other
+        // no-NR combinations may still include legacy RATs and must not be
+        // presented as LTE only.
+        if modePreference == 0x0010 { return .lteOnly }
         if hasNR, !hasLTE, !saBands.isEmpty { return .saOnly }
         if hasNR, hasLTE, saBands.isEmpty, !nsaBands.isEmpty { return .nsaOnly }
         if hasNR, hasLTE, !saBands.isEmpty, !nsaBands.isEmpty { return .automatic }
         return .unavailable
+    }
+}
+
+struct RadioAccessPreferencePlan: Equatable, Sendable {
+    let target: NRSystemSelectionPreferences
+    /// Architecture changes normally leave the current LTE mask untouched.
+    /// LTE-only writes it explicitly when the extended mask is available so
+    /// the read-back verifies that disabling NR did not alter an LTE lock.
+    let lteBandsToWrite: LTEBandMask?
+
+    static func make(
+        mode: NRArchitectureMode,
+        baseline: NRSystemSelectionPreferences,
+        current: NRSystemSelectionPreferences,
+        activeNRBandLock: Set<Int>? = nil
+    ) throws -> RadioAccessPreferencePlan {
+        guard let automaticMode = baseline.modePreference,
+              baseline.architectureMode == .automatic
+        else { throw RadioAccessPreferencePlanError.baselineUnavailable }
+        guard mode != .unavailable else {
+            throw RadioAccessPreferencePlanError.architectureUnavailable
+        }
+
+        let nrPlan: NRBandLockPlan?
+        if mode != .lteOnly, let activeNRBandLock {
+            guard let requested = NRBandMask(bands: activeNRBandLock) else {
+                throw NRBandLockPlanError.emptyRequest
+            }
+            nrPlan = try NRBandLockPlan.make(
+                requested: requested,
+                baseline: baseline,
+                architecture: mode
+            )
+        } else {
+            nrPlan = nil
+        }
+
+        switch mode {
+        case .automatic:
+            return RadioAccessPreferencePlan(
+                target: NRSystemSelectionPreferences(
+                    modePreference: automaticMode,
+                    saBands: nrPlan?.saBands ?? baseline.saBands,
+                    nsaBands: nrPlan?.nsaBands ?? baseline.nsaBands,
+                    lteBands: current.lteBands
+                ),
+                lteBandsToWrite: nil
+            )
+        case .saOnly:
+            return RadioAccessPreferencePlan(
+                target: NRSystemSelectionPreferences(
+                    modePreference: 0x0040,
+                    saBands: nrPlan?.saBands ?? baseline.saBands,
+                    nsaBands: .zero,
+                    lteBands: current.lteBands
+                ),
+                lteBandsToWrite: nil
+            )
+        case .nsaOnly:
+            return RadioAccessPreferencePlan(
+                target: NRSystemSelectionPreferences(
+                    modePreference: 0x0050,
+                    saBands: .zero,
+                    nsaBands: nrPlan?.nsaBands ?? baseline.nsaBands,
+                    lteBands: current.lteBands
+                ),
+                lteBandsToWrite: nil
+            )
+        case .lteOnly:
+            let lteBands: LTEBandMask?
+            if let currentLTE = current.lteBands, !currentLTE.isEmpty {
+                lteBands = currentLTE
+            } else if let baselineLTE = baseline.lteBands, !baselineLTE.isEmpty {
+                lteBands = baselineLTE
+            } else if current.lteBands?.isEmpty == true || baseline.lteBands?.isEmpty == true {
+                throw RadioAccessPreferencePlanError.emptyLTEBandMask
+            } else {
+                // Some firmware omits the extended LTE mask. Leaving the TLV
+                // out preserves the modem's existing LTE band preference.
+                lteBands = nil
+            }
+            return RadioAccessPreferencePlan(
+                target: NRSystemSelectionPreferences(
+                    modePreference: 0x0010,
+                    saBands: .zero,
+                    nsaBands: .zero,
+                    lteBands: lteBands
+                ),
+                lteBandsToWrite: lteBands
+            )
+        case .unavailable:
+            throw RadioAccessPreferencePlanError.architectureUnavailable
+        }
+    }
+}
+
+enum RadioAccessPreferencePlanError: LocalizedError, Equatable, Sendable {
+    case baselineUnavailable
+    case architectureUnavailable
+    case emptyLTEBandMask
+
+    var errorDescription: String? {
+        switch self {
+        case .baselineUnavailable:
+            return "The original automatic radio preference was not captured."
+        case .architectureUnavailable:
+            return "Radio access preference control is unavailable."
+        case .emptyLTEBandMask:
+            return "The modem reported an empty LTE band mask; LTE-only mode was not applied."
+        }
     }
 }
 
@@ -392,6 +542,8 @@ struct NRBandLockPlan: Equatable, Sendable {
         case .nsaOnly:
             usesSA = false
             usesNSA = true
+        case .lteOnly:
+            throw NRBandLockPlanError.architectureUnavailable
         case .unavailable:
             throw NRBandLockPlanError.architectureUnavailable
         }

@@ -4,6 +4,7 @@ import XCTest
 final class SignalStatusTests: XCTestCase {
     private let lteBand = "02010031002400020400000000000106000108790084031108000108790084030000120600010805000000"
     private let nrAndLTE = "0201003100270002040000000000110f00020c0d0180ac090008790084030000120b00020c0d0000000805000000"
+    private let noActiveBand = "0201003100070002040000000000"
     private let dsdNSA = "02010024001b000204000000000010110001000000000600000000000000000a0000"
     private let dsdSA = "02010024001b00020400000000001011000100000000060000000000000000120000"
     private let dsdLTE = "02010024001b00020400000000001011000100000000030000000010000000000000"
@@ -55,6 +56,7 @@ final class SignalStatusTests: XCTestCase {
                 .localizedLabel(language: .simplifiedChinese),
             "正在应用 仅 SA…"
         )
+        XCTAssertEqual(NRArchitectureMode.lteOnly.localizedLabel(language: .simplifiedChinese), "仅 LTE")
     }
 
     func testLanguageDisplayNamesAndLocales() {
@@ -82,6 +84,77 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertFalse(operationGuard.isValid)
     }
 
+    func testPollingUsesConfiguredIntervalOnlineAndFastRetryOtherwise() {
+        XCTAssertEqual(
+            StatusPollingPolicy.interval(userInterval: 30, connectionState: .online),
+            30
+        )
+        for state in [
+            ConnectionState.connecting,
+            .stale,
+            .disconnected,
+            .authenticationFailed,
+            .qmiUnavailable
+        ] {
+            XCTAssertEqual(
+                StatusPollingPolicy.interval(userInterval: 60, connectionState: state),
+                5
+            )
+            XCTAssertEqual(
+                StatusPollingPolicy.interval(userInterval: 1, connectionState: state),
+                1,
+                "Reconnect polling must not be slower than the selected interval"
+            )
+        }
+    }
+
+    func testRefreshCoalescerRetainsInFlightAndControlBusyRequests() {
+        var coalescer = RefreshCoalescer()
+        XCTAssertTrue(coalescer.request(isRefreshing: false, isControlBusy: false))
+
+        coalescer.beginRefresh()
+        XCTAssertFalse(coalescer.request(isRefreshing: true, isControlBusy: false))
+        XCTAssertTrue(coalescer.isPending)
+        XCTAssertTrue(coalescer.shouldDrain(isRefreshing: false, isControlBusy: false))
+
+        coalescer.beginRefresh()
+        XCTAssertFalse(coalescer.request(isRefreshing: false, isControlBusy: true))
+        XCTAssertTrue(coalescer.isPending)
+        XCTAssertFalse(coalescer.shouldDrain(isRefreshing: false, isControlBusy: true))
+        XCTAssertTrue(coalescer.shouldDrain(isRefreshing: false, isControlBusy: false))
+    }
+
+    func testVOSInterfaceSelectionPrefersActiveRouteAndRejectsStaleInterface() {
+        let candidates = [
+            LocalInterfaceCandidate(name: "en12", address: "192.168.225.10", isActive: false),
+            LocalInterfaceCandidate(name: "en13", address: "10.0.0.2", isActive: true),
+            LocalInterfaceCandidate(name: "en14", address: "192.168.225.20", isActive: true),
+            LocalInterfaceCandidate(name: "en15", address: "192.168.225.30", isActive: true)
+        ]
+
+        XCTAssertEqual(
+            LocalInterface.selectVOSInterface(
+                candidates: candidates,
+                routedSourceAddress: "192.168.225.30"
+            ),
+            candidates[3]
+        )
+        XCTAssertEqual(
+            LocalInterface.selectVOSInterface(
+                candidates: candidates,
+                routedSourceAddress: "192.168.225.10"
+            ),
+            candidates[3]
+        )
+        XCTAssertEqual(
+            LocalInterface.selectVOSInterface(
+                candidates: candidates,
+                routedSourceAddress: nil
+            ),
+            candidates[3]
+        )
+    }
+
     func testLTEBandChannelAndBandwidth() throws {
         let radios = try QMIParser.activeRadios(from: data(lteBand))
         XCTAssertEqual(radios, [QMIRadioReading(kind: .lte, band: "B2", channel: 900, bandwidthMHz: 20)])
@@ -92,6 +165,48 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(radios.map(\.band), ["n78", "B2"])
         XCTAssertEqual(radios.map(\.channel), [633_984, 900])
         XCTAssertEqual(radios.map(\.bandwidthMHz), [50, 20])
+    }
+
+    func testNoActiveBandBecomesReachableNoServiceSnapshot() throws {
+        XCTAssertThrowsError(try QMIParser.activeRadios(from: data(noActiveBand))) { error in
+            XCTAssertEqual(error as? QMIParserError, .noActiveBand)
+        }
+
+        let snapshot = try VOSClient.makeSnapshot(
+            host: "192.168.225.1",
+            interfaceName: "en13",
+            probe: VOSProbeOutput(
+                band: data(noActiveBand), signal: data(signal), serving: nil, ca: data(ca),
+                location: data(nrCellLocation), dsd: data(dsdNSA),
+                modemVersion: nil, deviceFirmware: nil
+            )
+        )
+
+        XCTAssertFalse(snapshot.hasRadioData)
+        XCTAssertEqual(snapshot.modeLabel, "Searching")
+        XCTAssertNil(snapshot.nrBand)
+        XCTAssertNil(snapshot.lteBand)
+        XCTAssertEqual(snapshot.nrSignal, .empty)
+        XCTAssertEqual(snapshot.lteSignal, .empty)
+        XCTAssertNil(snapshot.nrGlobalCellID)
+        XCTAssertNil(snapshot.ltePrimaryCell)
+        XCTAssertTrue(snapshot.lteSecondaryCells.isEmpty)
+    }
+
+    func testMalformedBandResponseStillFailsClosed() {
+        XCTAssertThrowsError(try VOSClient.makeSnapshot(
+            host: "192.168.225.1",
+            interfaceName: "en13",
+            probe: VOSProbeOutput(
+                band: Data([0x02, 0x01]), signal: nil, serving: nil, ca: nil,
+                dsd: nil, modemVersion: nil, deviceFirmware: nil
+            )
+        )) { error in
+            guard let clientError = error as? VOSClientError,
+                  case .qmiUnavailable = clientError else {
+                return XCTFail("Malformed data must remain a QMI failure")
+            }
+        }
     }
 
     func testCellMapperLinksUseStablePublicPages() {
@@ -569,6 +684,23 @@ final class SignalStatusTests: XCTestCase {
         let enabled = try XCTUnwrap(NRBandMask(Data(repeating: 0x55, count: NRBandMask.byteCount)))
         XCTAssertEqual(
             NRSystemSelectionPreferences(
+                modePreference: 0x0010,
+                saBands: enabled,
+                nsaBands: enabled
+            ).architectureMode,
+            .lteOnly
+        )
+        XCTAssertEqual(
+            NRSystemSelectionPreferences(
+                modePreference: 0x001C,
+                saBands: enabled,
+                nsaBands: enabled
+            ).architectureMode,
+            .unavailable,
+            "LTE plus legacy RAT bits must not be labeled LTE only"
+        )
+        XCTAssertEqual(
+            NRSystemSelectionPreferences(
                 modePreference: 0x0040,
                 saBands: enabled,
                 nsaBands: enabled
@@ -591,6 +723,131 @@ final class SignalStatusTests: XCTestCase {
             ).architectureMode,
             .automatic
         )
+    }
+
+    func testRadioAccessPreferencePlansPreserveExistingModesAndAddLTEOnly() throws {
+        let baselineLTE = try XCTUnwrap(LTEBandMask(bands: [2, 4, 25, 66]))
+        let currentLTE = try XCTUnwrap(LTEBandMask(bands: [2, 66]))
+        let baseline = NRSystemSelectionPreferences(
+            modePreference: 0x0050,
+            saBands: try XCTUnwrap(NRBandMask(bands: [77, 78])),
+            nsaBands: try XCTUnwrap(NRBandMask(bands: [77, 78])),
+            lteBands: baselineLTE
+        )
+        let current = NRSystemSelectionPreferences(
+            modePreference: 0x0050,
+            saBands: baseline.saBands,
+            nsaBands: baseline.nsaBands,
+            lteBands: currentLTE
+        )
+
+        let automatic = try RadioAccessPreferencePlan.make(
+            mode: .automatic,
+            baseline: baseline,
+            current: current
+        )
+        XCTAssertEqual(automatic.target.modePreference, 0x0050)
+        XCTAssertEqual(automatic.target.saBands, baseline.saBands)
+        XCTAssertEqual(automatic.target.nsaBands, baseline.nsaBands)
+        XCTAssertEqual(automatic.target.lteBands, currentLTE)
+        XCTAssertNil(automatic.lteBandsToWrite)
+
+        let saOnly = try RadioAccessPreferencePlan.make(
+            mode: .saOnly,
+            baseline: baseline,
+            current: current
+        )
+        XCTAssertEqual(saOnly.target.modePreference, 0x0040)
+        XCTAssertEqual(saOnly.target.saBands, baseline.saBands)
+        XCTAssertTrue(saOnly.target.nsaBands.isEmpty)
+        XCTAssertNil(saOnly.lteBandsToWrite)
+
+        let nsaOnly = try RadioAccessPreferencePlan.make(
+            mode: .nsaOnly,
+            baseline: baseline,
+            current: current
+        )
+        XCTAssertEqual(nsaOnly.target.modePreference, 0x0050)
+        XCTAssertTrue(nsaOnly.target.saBands.isEmpty)
+        XCTAssertEqual(nsaOnly.target.nsaBands, baseline.nsaBands)
+        XCTAssertNil(nsaOnly.lteBandsToWrite)
+
+        let lteOnly = try RadioAccessPreferencePlan.make(
+            mode: .lteOnly,
+            baseline: baseline,
+            current: current
+        )
+        XCTAssertEqual(lteOnly.target.modePreference, 0x0010)
+        XCTAssertTrue(lteOnly.target.saBands.isEmpty)
+        XCTAssertTrue(lteOnly.target.nsaBands.isEmpty)
+        XCTAssertEqual(lteOnly.target.lteBands, currentLTE)
+        XCTAssertEqual(lteOnly.lteBandsToWrite, currentLTE)
+        XCTAssertEqual(lteOnly.target.architectureMode, .lteOnly)
+    }
+
+    func testLTEOnlyPlanFallsBackToCapturedLTEAndIgnoresDormantNRLock() throws {
+        let baselineLTE = try XCTUnwrap(LTEBandMask(bands: [2, 4]))
+        let baseline = NRSystemSelectionPreferences(
+            modePreference: 0x0050,
+            saBands: try XCTUnwrap(NRBandMask(bands: [78])),
+            nsaBands: try XCTUnwrap(NRBandMask(bands: [77])),
+            lteBands: baselineLTE
+        )
+        let current = NRSystemSelectionPreferences(
+            modePreference: 0x0050,
+            saBands: baseline.saBands,
+            nsaBands: baseline.nsaBands,
+            lteBands: .zero
+        )
+
+        let plan = try RadioAccessPreferencePlan.make(
+            mode: .lteOnly,
+            baseline: baseline,
+            current: current,
+            activeNRBandLock: [78]
+        )
+        XCTAssertEqual(plan.lteBandsToWrite, baselineLTE)
+        XCTAssertTrue(plan.target.saBands.isEmpty)
+        XCTAssertTrue(plan.target.nsaBands.isEmpty)
+
+        XCTAssertThrowsError(try NRBandLockPlan.make(
+            requested: try XCTUnwrap(NRBandMask(bands: [78])),
+            baseline: baseline,
+            architecture: .lteOnly
+        )) { error in
+            XCTAssertEqual(error as? NRBandLockPlanError, .architectureUnavailable)
+        }
+    }
+
+    func testLTEOnlyPlanHandlesMissingAndExplicitlyEmptyLTEMasks() throws {
+        let nr = try XCTUnwrap(NRBandMask(bands: [77, 78]))
+        let baselineWithoutLTE = NRSystemSelectionPreferences(
+            modePreference: 0x0050,
+            saBands: nr,
+            nsaBands: nr,
+            lteBands: nil
+        )
+        let plan = try RadioAccessPreferencePlan.make(
+            mode: .lteOnly,
+            baseline: baselineWithoutLTE,
+            current: baselineWithoutLTE
+        )
+        XCTAssertNil(plan.lteBandsToWrite)
+        XCTAssertNil(plan.target.lteBands)
+
+        let currentWithExplicitEmptyLTE = NRSystemSelectionPreferences(
+            modePreference: 0x0050,
+            saBands: nr,
+            nsaBands: nr,
+            lteBands: .zero
+        )
+        XCTAssertThrowsError(try RadioAccessPreferencePlan.make(
+            mode: .lteOnly,
+            baseline: baselineWithoutLTE,
+            current: currentWithExplicitEmptyLTE
+        )) { error in
+            XCTAssertEqual(error as? RadioAccessPreferencePlanError, .emptyLTEBandMask)
+        }
     }
 
     func testNRBandLockPlanValidatesSAOnlyAndNSAOnlySeparately() throws {
@@ -778,6 +1035,29 @@ final class SignalStatusTests: XCTestCase {
         )
 
         XCTAssertEqual(request, expected)
+    }
+
+    func testQMISetSystemSelectionBuildsLTEOnlyWithPreservedLTEMask() throws {
+        let lte = try XCTUnwrap(LTEBandMask(bands: [2, 4, 25, 66]))
+        let request = QMIParser.setNRSystemSelectionRequest(
+            modePreference: 0x0010,
+            saBands: .zero,
+            nsaBands: .zero,
+            lteBands: lte,
+            transaction: 0x1234
+        )
+
+        XCTAssertEqual(request, qmiRequest(
+            message: 0x0033,
+            transaction: 0x1234,
+            tlvs: [
+                (0x17, Data([0x00])),
+                (0x11, le16(0x0010)),
+                (0x24, lte.bytes),
+                (0x2F, NRBandMask.zero.bytes),
+                (0x30, NRBandMask.zero.bytes)
+            ]
+        ))
     }
 
     func testQMISetSystemSelectionResponseValidation() {

@@ -8,7 +8,7 @@
 
 应用通过 SSH 调用 VOS 内的 Qualcomm QRTR/QMI 服务读取 modem。常规状态轮询
 只读；只有用户主动展开 **Network & radio controls**、确认操作后，应用才会修改
-运营商注册、临时 SA/NSA 偏好或临时 LTE/NR 频段掩码。
+运营商注册、临时无线接入偏好或临时 LTE/NR 频段掩码。
 
 <p align="center">
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor 显示 5G SA n78 连接">
@@ -32,11 +32,14 @@
 - 提供英文和简体中文界面；macOS 系统语言为中文时默认使用简体中文，
   其他系统语言默认使用英文，也可在设置中即时切换
 - 支持手动刷新、1/5/10/15/30/60 秒刷新间隔及登录时启动
+- USB modem 拔出再插入后会自动恢复连接；设备离线期间使用更快的重试周期
+- 单卡槽带电换卡会在下一轮刷新时识别：清除旧运营商和旧无线数据，并使用更快
+  的恢复周期等待新 SIM 注册
 - 可复制诊断信息，便于排查问题
 - 扫描网络并显示运营商名称、MCC-MNC、可用状态和扫描报告的 LTE/NR 接入能力
 - 手动选择 PLMN（不强制制式）、恢复自动选网，并通过 `AT+COPS?` 读回验证
-- Auto SA/NSA、SA only、NSA only，精确读回 Qualcomm mode/掩码；失败自动回滚，
-  并可一键恢复
+- Auto SA/NSA、SA only、NSA only、LTE only，精确读回 Qualcomm mode/掩码；
+  失败自动回滚，并可一键恢复
 - 临时锁定 NR/LTE 频段：按原始允许掩码校验、精确读回，并可恢复
 - 读取 Qualcomm NAS 当前报告的 LTE 邻区测量
 
@@ -126,7 +129,7 @@ composition、carrier policy、APN、注册模式或任何持久配置。
 <p align="center">
   <img src="assets/cellular-modem-monitor-radio-controls.png" width="360" alt="Cellular Modem Monitor 网络与无线控制界面，NR 与 LTE 锁频输入已对齐">
   <br>
-  <sub>运营商、SA/NSA 与临时锁频控制；示例使用虚构 Cell ID。</sub>
+  <sub>运营商、无线接入模式与临时锁频控制；示例使用虚构 Cell ID。</sub>
 </p>
 
 - **Scan Networks** 执行 `AT+COPS=?`。完整扫描可能持续两分钟，并可能暂时中断
@@ -136,10 +139,11 @@ composition、carrier policy、APN、注册模式或任何持久配置。
   **Automatic Selection** 执行 `AT+COPS=0`。操作后应用都会重新读取
   `AT+COPS?` 验证。由于 0R05 上的 COPS 操作也可能改变 Qualcomm mode，应用
   会在扫描/选网前保存当前 QMI mode 和掩码，并在操作后精确恢复。
-- **Auto SA/NSA**、**SA only**、**NSA only** 通过 Qualcomm NAS 设置系统选择
+- **Auto SA/NSA**、**SA only**、**NSA only**、**LTE only** 通过 Qualcomm NAS 设置系统选择
   偏好，生效范围固定为“到下次断电”。首次切换前，应用会在内存中保存原始 mode
   和两份 64 字节 SA/NSA 掩码。每次写入后精确读回这三项；验证失败时尝试恢复
-  原始值。
+  原始值。LTE only 会关闭 NR，并保留、验证当前扩展 LTE 频段掩码；切回 NR
+  模式时会恢复已捕获的 SA/NSA 掩码，并重新应用仍处于活动状态的 NR 锁频。
 - **Restore automatic defaults** 会恢复上述原始 SA/NSA 值、扩展 LTE 掩码，
   并恢复自动选网。
   基线会绑定到当前 VOS USB serial 的哈希；即使另一台设备使用同一 IP，热插拔
@@ -153,6 +157,10 @@ composition、carrier policy、APN、注册模式或任何持久配置。
 
 这些控制不会修改 `carrier_policy.xml`、OEM 文件、硬件频段过滤、USB
 composition 或 APN。
+
+物理换卡不会擅自重置手动选网、SA/NSA/LTE 偏好或锁频。如果这些临时 modem
+设置排除了新 SIM 可用的网络，请明确点击 **Automatic Selection** 或
+**Restore automatic defaults**。
 
 ## 连接与安全说明
 
@@ -198,7 +206,7 @@ dist/Cellular-Modem-Monitor-macOS.zip
   数据冒充。
 - 当前界面显示一个主要 NR 频段以及详细的 LTE PCell/SCell；此后端采用的公开
   QMI 路径暂不能枚举多个 NR 组成载波。
-- 本应用不会解锁频段，也不会编辑持久 modem policy 文件；选网和 SA/NSA 控制
+- 本应用不会解锁频段，也不会编辑持久 modem policy 文件；选网和无线接入控制
   只影响注册状态及持续到断电的无线偏好。
 
 ## 致谢

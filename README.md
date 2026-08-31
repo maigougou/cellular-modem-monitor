@@ -9,7 +9,7 @@ additional modem backends can be added in future releases.
 It reads the modem through SSH and the Qualcomm QRTR/QMI services available on
 VOS. Normal status polling is read-only. The optional, explicitly opened
 **Network & radio controls** panel can change operator registration, temporary
-SA/NSA preferences and temporary LTE/NR band masks after confirmation.
+radio-access preferences and temporary LTE/NR band masks after confirmation.
 
 <p align="center">
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
@@ -34,13 +34,18 @@ SA/NSA preferences and temporary LTE/NR band masks after confirmation.
   Simplified Chinese, while other system languages default to English. The
   language can be changed instantly in Settings.
 - Manual refresh, adjustable 1/5/10/15/30/60-second polling and launch at login
+- Automatic recovery after unplugging and reconnecting the USB modem, with
+  faster retry while the modem is unavailable
+- Powered replacement of the single physical SIM is recognized at the next
+  poll: stale operator/radio details are cleared and registration is retried
+  on the faster recovery cadence until the new SIM has service
 - Copyable diagnostics for troubleshooting
 - Network scanning with operator name, MCC-MNC, availability and reported
   LTE/NR access technology
 - Manual PLMN selection without forcing an access technology, automatic
   operator selection, and `AT+COPS?` read-back verification
-- Auto SA/NSA, SA only and NSA only controls with exact Qualcomm mode/mask
-  read-back, failure rollback and one-click restoration
+- Auto SA/NSA, SA only, NSA only and LTE only controls with exact Qualcomm
+  mode/mask read-back, failure rollback and one-click restoration
 - Temporary NR and LTE band locks with allowlist validation, exact QMI read-back
   and restoration of the masks captured from the attached modem
 - Read-only LTE neighbor measurements reported by Qualcomm NAS
@@ -136,7 +141,7 @@ Expand **Network & radio controls** only when you want to change registration:
 <p align="center">
   <img src="assets/cellular-modem-monitor-radio-controls.png" width="360" alt="Cellular Modem Monitor network and radio controls with aligned NR and LTE band-lock fields">
   <br>
-  <sub>Operator, SA/NSA and temporary band controls; demo values use synthetic Cell IDs.</sub>
+  <sub>Operator, radio-access and temporary band controls; demo values use synthetic Cell IDs.</sub>
 </p>
 
 - **Scan Networks** runs `AT+COPS=?`. A full scan may take up to two minutes and
@@ -148,11 +153,13 @@ Expand **Network & radio controls** only when you want to change registration:
   verifies either operation by reading `AT+COPS?` afterwards. Because COPS can
   also alter Qualcomm's mode preference on 0R05, the app snapshots and restores
   the current QMI mode and masks around scan/selection operations.
-- **Auto SA/NSA**, **SA only** and **NSA only** write Qualcomm NAS system
+- **Auto SA/NSA**, **SA only**, **NSA only** and **LTE only** write Qualcomm NAS system
   selection preferences with change duration set to *power cycle*. Before the
   first switch, the app keeps the original mode plus both 64-byte SA/NSA masks
-  in memory. It reads all three fields back after every write and attempts to
-  restore the original tuple if verification fails.
+  in memory. It reads those three fields back after every write and attempts to
+  restore the original tuple if verification fails. LTE only disables NR while
+  preserving and verifying the current extended LTE band mask. Returning to an
+  NR mode restores the captured SA/NSA masks and reapplies any active NR band lock.
 - **Restore automatic defaults** restores that captured SA/NSA tuple and
   extended LTE mask plus automatic operator selection. The baseline is bound to a hash of the current
   VOS USB serial, so hot-swapping another unit at the same IP discards the old
@@ -167,6 +174,11 @@ Expand **Network & radio controls** only when you want to change registration:
 
 These controls do not edit `carrier_policy.xml`, OEM files, the hardware band
 filter, USB composition or APN settings.
+
+Replacing the physical SIM does not silently reset manual operator selection,
+SA/NSA/LTE preference or band locks. If those temporary modem settings exclude
+the new SIM's network, explicitly choose **Automatic Selection** or **Restore
+automatic defaults**.
 
 ## Connection and security notes
 
@@ -218,8 +230,8 @@ hardware on 2026-08-31.
   the public QMI path used by this backend does not enumerate multiple NR
   component carriers.
 - This app does not unlock bands or edit persistent modem policy files. Its
-  operator and SA/NSA controls affect registration and power-cycle-scoped radio
-  preferences only.
+  operator-selection and radio-access controls affect registration and
+  power-cycle-scoped radio preferences only.
 
 ## Acknowledgements
 

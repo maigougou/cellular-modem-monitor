@@ -3,6 +3,7 @@ import Foundation
 @main
 enum DirectTests {
     private static let lteBand = "02010031002400020400000000000106000108790084031108000108790084030000120600010805000000"
+    private static let noActiveBand = "0201003100070002040000000000"
     private static let signal = "0202004f001c0002040000000000140600b7f394ff2e00170400008000801802000080"
     private static let completeSignal = "0202004f001c0002040000000000140600b7f394ff2e00170400acff7b00180200f5ff"
     private static let serving = "02030024004c000204000000000001060001010102010810010001110200010b120a002e01dc000554454c55531503000108011b0100011d040001000000210500000000000024020001002705002e01dc0001"
@@ -43,6 +44,8 @@ enum DirectTests {
                 "localized operation label",
                 failures: &failures
             )
+            check(NRArchitectureMode.lteOnly.localizedLabel(language: .simplifiedChinese) == "仅 LTE",
+                  "localized LTE-only label", failures: &failures)
 
             let operationGuard = ControlOperationDeviceGuard(expectedFingerprint: "device-a")
             try operationGuard.validate(currentFingerprint: "device-a")
@@ -65,6 +68,87 @@ enum DirectTests {
                 try operationGuard.validate(currentFingerprint: "device-a")
             }
 
+            check(
+                StatusPollingPolicy.interval(userInterval: 30, connectionState: .online) == 30,
+                "online polling uses the configured interval",
+                failures: &failures
+            )
+            for state in [
+                ConnectionState.connecting,
+                .stale,
+                .disconnected,
+                .authenticationFailed,
+                .qmiUnavailable
+            ] {
+                check(
+                    StatusPollingPolicy.interval(userInterval: 60, connectionState: state) == 5,
+                    "non-online polling retries every five seconds",
+                    failures: &failures
+                )
+                check(
+                    StatusPollingPolicy.interval(userInterval: 1, connectionState: state) == 1,
+                    "reconnect polling is not slower than the configured interval",
+                    failures: &failures
+                )
+            }
+
+            var refreshCoalescer = RefreshCoalescer()
+            check(
+                refreshCoalescer.request(isRefreshing: false, isControlBusy: false),
+                "idle refresh starts immediately",
+                failures: &failures
+            )
+            refreshCoalescer.beginRefresh()
+            check(
+                !refreshCoalescer.request(isRefreshing: true, isControlBusy: false) &&
+                    refreshCoalescer.isPending,
+                "in-flight refresh is coalesced",
+                failures: &failures
+            )
+            check(
+                refreshCoalescer.shouldDrain(isRefreshing: false, isControlBusy: false),
+                "coalesced refresh drains when idle",
+                failures: &failures
+            )
+            refreshCoalescer.beginRefresh()
+            check(
+                !refreshCoalescer.request(isRefreshing: false, isControlBusy: true) &&
+                    refreshCoalescer.isPending,
+                "control-busy refresh is retained",
+                failures: &failures
+            )
+
+            let interfaceCandidates = [
+                LocalInterfaceCandidate(name: "en12", address: "192.168.225.10", isActive: false),
+                LocalInterfaceCandidate(name: "en13", address: "10.0.0.2", isActive: true),
+                LocalInterfaceCandidate(name: "en14", address: "192.168.225.20", isActive: true),
+                LocalInterfaceCandidate(name: "en15", address: "192.168.225.30", isActive: true)
+            ]
+            check(
+                LocalInterface.selectVOSInterface(
+                    candidates: interfaceCandidates,
+                    routedSourceAddress: "192.168.225.30"
+                ) == interfaceCandidates[3],
+                "VOS interface selection prefers the active routed source",
+                failures: &failures
+            )
+            check(
+                LocalInterface.selectVOSInterface(
+                    candidates: interfaceCandidates,
+                    routedSourceAddress: "192.168.225.10"
+                ) == interfaceCandidates[3],
+                "VOS interface selection rejects stale routes and prefers the newest active interface",
+                failures: &failures
+            )
+            check(
+                LocalInterface.selectVOSInterface(
+                    candidates: interfaceCandidates,
+                    routedSourceAddress: nil
+                ) == interfaceCandidates[3],
+                "VOS interface selection prefers the newest active interface without a route",
+                failures: &failures
+            )
+
             let radios = try QMIParser.activeRadios(from: data(lteBand))
             check(radios.count == 1, "LTE RF count", failures: &failures)
             check(radios.first?.band == "B2", "LTE B2", failures: &failures)
@@ -75,6 +159,22 @@ enum DirectTests {
             check(combined.map(\.band) == ["n78", "B2"], "NR/LTE bands", failures: &failures)
             check(combined.map(\.channel) == [633_984, 900], "NR/LTE channels", failures: &failures)
             check(combined.map(\.bandwidthMHz) == [50, 20], "parallel bandwidths", failures: &failures)
+
+            let noServiceSnapshot = try VOSClient.makeSnapshot(
+                host: "192.168.225.1",
+                interfaceName: "en13",
+                probe: VOSProbeOutput(
+                    band: data(noActiveBand), signal: data(completeSignal), serving: nil, ca: data(ca),
+                    location: data(nrCellLocation), dsd: data(dsdNSA),
+                    modemVersion: nil, deviceFirmware: nil
+                )
+            )
+            check(!noServiceSnapshot.hasRadioData, "no-band response is reachable no-service", failures: &failures)
+            check(noServiceSnapshot.modeLabel == "Searching", "no-band response is searching", failures: &failures)
+            check(noServiceSnapshot.nrSignal == .empty && noServiceSnapshot.lteSignal == .empty,
+                  "no-band response clears radio metrics", failures: &failures)
+            check(noServiceSnapshot.nrGlobalCellID == nil && noServiceSnapshot.ltePrimaryCell == nil,
+                  "no-band response clears stale cell details", failures: &failures)
             check(
                 CellMapperLink.destination(
                     for: 385_739_387,
@@ -271,6 +371,16 @@ enum DirectTests {
             check(lteMask.enabledBands == [2, 4, 25, 66], "LTE band-mask bit mapping", failures: &failures)
             check(NRBandMask(bands: [77, 78])?.enabledBands == [77, 78], "NR band-mask bit mapping", failures: &failures)
             check(
+                NRSystemSelectionPreferences(modePreference: 0x0010, saBands: saMask, nsaBands: nsaMask).architectureMode == .lteOnly,
+                "LTE mode bit without NR is LTE-only",
+                failures: &failures
+            )
+            check(
+                NRSystemSelectionPreferences(modePreference: 0x001C, saBands: saMask, nsaBands: nsaMask).architectureMode == .unavailable,
+                "LTE plus legacy RAT bits is not mislabeled LTE-only",
+                failures: &failures
+            )
+            check(
                 NRSystemSelectionPreferences(modePreference: 0x0040, saBands: saMask, nsaBands: nsaMask).architectureMode == .saOnly,
                 "NR-only mode cannot be misclassified as automatic",
                 failures: &failures
@@ -283,8 +393,95 @@ enum DirectTests {
             let asymmetricBaseline = NRSystemSelectionPreferences(
                 modePreference: 0x0050,
                 saBands: NRBandMask(bands: [78, 79])!,
-                nsaBands: NRBandMask(bands: [77, 78])!
+                nsaBands: NRBandMask(bands: [77, 78])!,
+                lteBands: lteMask
             )
+            let currentLTELock = LTEBandMask(bands: [2, 66])!
+            let currentPreferences = NRSystemSelectionPreferences(
+                modePreference: 0x0050,
+                saBands: asymmetricBaseline.saBands,
+                nsaBands: asymmetricBaseline.nsaBands,
+                lteBands: currentLTELock
+            )
+            let automaticPreference = try RadioAccessPreferencePlan.make(
+                mode: .automatic,
+                baseline: asymmetricBaseline,
+                current: currentPreferences
+            )
+            check(automaticPreference.target.modePreference == 0x0050 &&
+                  automaticPreference.target.saBands == asymmetricBaseline.saBands &&
+                  automaticPreference.target.nsaBands == asymmetricBaseline.nsaBands &&
+                  automaticPreference.lteBandsToWrite == nil,
+                  "automatic preference plan remains unchanged", failures: &failures)
+            let saPreference = try RadioAccessPreferencePlan.make(
+                mode: .saOnly,
+                baseline: asymmetricBaseline,
+                current: currentPreferences
+            )
+            check(saPreference.target.modePreference == 0x0040 &&
+                  saPreference.target.saBands == asymmetricBaseline.saBands &&
+                  saPreference.target.nsaBands.isEmpty &&
+                  saPreference.lteBandsToWrite == nil,
+                  "SA-only preference plan remains unchanged", failures: &failures)
+            let nsaPreference = try RadioAccessPreferencePlan.make(
+                mode: .nsaOnly,
+                baseline: asymmetricBaseline,
+                current: currentPreferences
+            )
+            check(nsaPreference.target.modePreference == 0x0050 &&
+                  nsaPreference.target.saBands.isEmpty &&
+                  nsaPreference.target.nsaBands == asymmetricBaseline.nsaBands &&
+                  nsaPreference.lteBandsToWrite == nil,
+                  "NSA-only preference plan remains unchanged", failures: &failures)
+            let ltePreference = try RadioAccessPreferencePlan.make(
+                mode: .lteOnly,
+                baseline: asymmetricBaseline,
+                current: currentPreferences,
+                activeNRBandLock: [79]
+            )
+            check(ltePreference.target.modePreference == 0x0010 &&
+                  ltePreference.target.saBands.isEmpty &&
+                  ltePreference.target.nsaBands.isEmpty &&
+                  ltePreference.target.lteBands == currentLTELock &&
+                  ltePreference.lteBandsToWrite == currentLTELock &&
+                  ltePreference.target.architectureMode == .lteOnly,
+                  "LTE-only plan disables NR and preserves the current LTE mask", failures: &failures)
+            checkThrows("NR band lock is unavailable in LTE-only mode", failures: &failures) {
+                _ = try NRBandLockPlan.make(
+                    requested: NRBandMask(bands: [78])!,
+                    baseline: asymmetricBaseline,
+                    architecture: .lteOnly
+                )
+            }
+            let baselineWithoutLTE = NRSystemSelectionPreferences(
+                modePreference: 0x0050,
+                saBands: asymmetricBaseline.saBands,
+                nsaBands: asymmetricBaseline.nsaBands,
+                lteBands: nil
+            )
+            let lteWithoutReportedMask = try RadioAccessPreferencePlan.make(
+                mode: .lteOnly,
+                baseline: baselineWithoutLTE,
+                current: baselineWithoutLTE
+            )
+            check(
+                lteWithoutReportedMask.lteBandsToWrite == nil &&
+                    lteWithoutReportedMask.target.lteBands == nil,
+                "LTE-only omits an unavailable extended LTE mask",
+                failures: &failures
+            )
+            checkThrows("LTE-only rejects an explicitly empty LTE mask", failures: &failures) {
+                _ = try RadioAccessPreferencePlan.make(
+                    mode: .lteOnly,
+                    baseline: baselineWithoutLTE,
+                    current: NRSystemSelectionPreferences(
+                        modePreference: 0x0050,
+                        saBands: asymmetricBaseline.saBands,
+                        nsaBands: asymmetricBaseline.nsaBands,
+                        lteBands: .zero
+                    )
+                )
+            }
             let saOnlyPlan = try NRBandLockPlan.make(
                 requested: NRBandMask(bands: [78])!,
                 baseline: asymmetricBaseline,
@@ -436,6 +633,25 @@ enum DirectTests {
                     (0x30, nsaMask.bytes)
                 ]
             ), "QMI NSA-only request", failures: &failures)
+
+            let setLTEOnly = QMIParser.setNRSystemSelectionRequest(
+                modePreference: 0x0010,
+                saBands: .zero,
+                nsaBands: .zero,
+                lteBands: currentLTELock,
+                transaction: 0x1234
+            )
+            check(setLTEOnly == qmiRequest(
+                message: 0x0033,
+                transaction: 0x1234,
+                tlvs: [
+                    (0x17, Data([0x00])),
+                    (0x11, le16(0x0010)),
+                    (0x24, currentLTELock.bytes),
+                    (0x2F, NRBandMask.zero.bytes),
+                    (0x30, NRBandMask.zero.bytes)
+                ]
+            ), "QMI LTE-only request", failures: &failures)
 
             let setAutomatic = QMIParser.setNRSystemSelectionRequest(
                 modePreference: 0x0050,

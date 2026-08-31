@@ -234,7 +234,7 @@ actor VOSClient {
         }
         let suffix = lastReadBack == nil ? " No readable preference response was returned." : ""
         throw VOSClientError.verificationFailed(
-            "The modem accepted the SA/NSA request but its mode and band-mask read-back did not match.\(suffix)"
+            "The modem accepted the radio-access request but its mode and band-mask read-back did not match.\(suffix)"
         )
     }
 
@@ -290,8 +290,40 @@ actor VOSClient {
         let radios: [QMIRadioReading]
         do {
             radios = try QMIParser.activeRadios(from: probe.band)
+        } catch QMIParserError.noActiveBand {
+            // A valid NAS response without a serving band is normal while the
+            // single SIM slot is empty or a newly inserted SIM is registering.
+            // Preserve it as a reachable no-service snapshot so stale carrier
+            // and radio data can be cleared without misreporting a QMI fault.
+            radios = []
         } catch {
             throw VOSClientError.qmiUnavailable(error.localizedDescription)
+        }
+
+        if radios.isEmpty {
+            return DeviceSnapshot(
+                host: host,
+                interfaceName: interfaceName,
+                operatorName: nil,
+                mcc: nil,
+                mnc: nil,
+                nrSystemMode: nil,
+                nrBand: nil,
+                nrChannel: nil,
+                nrBandwidthMHz: nil,
+                nrRaw: nil,
+                nrSignal: .empty,
+                lteBand: nil,
+                lteChannel: nil,
+                lteBandwidthMHz: nil,
+                lteRaw: nil,
+                lteSignal: .empty,
+                ltePrimaryCell: nil,
+                lteSecondaryCells: [],
+                moduleVersion: cleanModemVersion(probe.modemVersion),
+                deviceFirmware: cleanVOSVersion(probe.deviceFirmware),
+                updatedAt: now
+            )
         }
 
         let nrReadings = radios.filter { $0.kind == .nr }
@@ -1060,15 +1092,47 @@ final class SystemSSHExecutor: @unchecked Sendable {
     }
 }
 
+struct LocalInterfaceCandidate: Equatable, Sendable {
+    let name: String
+    let address: String
+    let isActive: Bool
+}
+
 enum LocalInterface {
     static func vosInterfaceName() -> String? { vosInterface()?.name }
     static func vosSourceAddress() -> String? { vosInterface()?.address }
 
-    private static func vosInterface() -> (name: String, address: String)? {
+    static func selectVOSInterface(
+        candidates: [LocalInterfaceCandidate],
+        routedSourceAddress: String?
+    ) -> LocalInterfaceCandidate? {
+        let active = candidates.filter {
+            $0.isActive && $0.address.hasPrefix("192.168.225.") && $0.address != "192.168.225.1"
+        }
+        if let routedSourceAddress,
+           let routed = active.first(where: { $0.address == routedSourceAddress }) {
+            return routed
+        }
+        return active.max { lhs, rhs in
+            let lhsIndex = interfaceIndex(lhs.name)
+            let rhsIndex = interfaceIndex(rhs.name)
+            if lhsIndex != rhsIndex { return lhsIndex < rhsIndex }
+            if lhs.name != rhs.name { return lhs.name < rhs.name }
+            return lhs.address < rhs.address
+        }
+    }
+
+    private static func interfaceIndex(_ name: String) -> Int {
+        let suffix = name.reversed().prefix(while: { $0.isNumber }).reversed()
+        return Int(String(suffix)) ?? -1
+    }
+
+    private static func vosInterface() -> LocalInterfaceCandidate? {
         var pointer: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&pointer) == 0, let first = pointer else { return nil }
         defer { freeifaddrs(pointer) }
 
+        var candidates: [LocalInterfaceCandidate] = []
         var current: UnsafeMutablePointer<ifaddrs>? = first
         while let interface = current {
             defer { current = interface.pointee.ifa_next }
@@ -1090,8 +1154,51 @@ enum LocalInterface {
             guard result == 0 else { continue }
             let ip = String(cString: host)
             guard ip.hasPrefix("192.168.225."), ip != "192.168.225.1" else { continue }
-            return (String(cString: interface.pointee.ifa_name), ip)
+            let flags = interface.pointee.ifa_flags
+            let isActive = flags & UInt32(IFF_UP) != 0 && flags & UInt32(IFF_RUNNING) != 0
+            candidates.append(LocalInterfaceCandidate(
+                name: String(cString: interface.pointee.ifa_name),
+                address: ip,
+                isActive: isActive
+            ))
         }
-        return nil
+        return selectVOSInterface(
+            candidates: candidates,
+            routedSourceAddress: routedSourceAddress(to: "192.168.225.1")
+        )
+    }
+
+    private static func routedSourceAddress(to destination: String) -> String? {
+        let descriptor = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
+        guard descriptor >= 0 else { return nil }
+        defer { Darwin.close(descriptor) }
+
+        var remote = sockaddr_in()
+        remote.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        remote.sin_family = sa_family_t(AF_INET)
+        remote.sin_port = in_port_t(22).bigEndian
+        guard destination.withCString({ inet_pton(AF_INET, $0, &remote.sin_addr) }) == 1 else {
+            return nil
+        }
+        let connected = withUnsafePointer(to: &remote) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+
+        var local = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let resolved = withUnsafeMutablePointer(to: &local) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.getsockname(descriptor, $0, &length)
+            }
+        }
+        guard resolved == 0 else { return nil }
+
+        var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        var address = local.sin_addr
+        guard inet_ntop(AF_INET, &address, &text, socklen_t(text.count)) != nil else { return nil }
+        return String(cString: text)
     }
 }

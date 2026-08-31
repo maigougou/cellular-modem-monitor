@@ -99,6 +99,14 @@ struct StatusPanel: View {
                         }
                     }
                 }
+                .onChange(of: model.snapshot.plmn) { plmn in
+                    // A replacement SIM can register on a different PLMN
+                    // without changing the USB device. Refresh the expanded
+                    // read-only control summary once the new registration is
+                    // available; do not probe while the modem has no PLMN.
+                    guard showNetworkControls, plmn != nil else { return }
+                    model.loadNetworkControls()
+                }
             }
             panelSeparator
             footer
@@ -174,7 +182,7 @@ struct StatusPanel: View {
             .buttonStyle(.borderless)
             .help(L10n.text("Refresh now", language: language))
             .accessibilityLabel(L10n.text("Refresh now", language: language))
-            .disabled(model.isRefreshing)
+            .disabled(model.isRefreshing || model.isControlBusy)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
@@ -364,19 +372,23 @@ struct StatusPanel: View {
 
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(L10n.text("5G architecture preference", language: language))
+                    Text(L10n.text("Radio access preference", language: language))
                         .font(.caption.weight(.semibold))
-                    HStack(spacing: 6) {
+                    LazyVGrid(
+                        columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible())],
+                        spacing: 6
+                    ) {
                         architectureButton(.automatic)
                         architectureButton(.saOnly)
                         architectureButton(.nsaOnly)
+                        architectureButton(.lteOnly)
                     }
-                    Text(L10n.text("These Qualcomm preferences last until VOS loses power. Auto restores the SA and NSA masks captured before the first switch in this app session.", language: language))
+                    Text(L10n.text("These Qualcomm preferences last until VOS loses power. Auto restores the captured SA/NSA masks; LTE only disables NR while preserving the current LTE band mask.", language: language))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     if model.nrSelectionPreferences != nil, !model.canRestoreNRDefaults {
                         Label(
-                            L10n.text("Automatic defaults were not available to capture. Power-cycle VOS, then close and reopen this panel before changing SA/NSA mode.", language: language),
+                            L10n.text("Automatic defaults were not available to capture. Power-cycle VOS, then close and reopen this panel before changing radio access mode.", language: language),
                             systemImage: "info.circle"
                         )
                         .font(.caption2)
@@ -417,7 +429,7 @@ struct StatusPanel: View {
                 compact: true
             )
             DetailRow(
-                label: L10n.text("5G preference", language: language),
+                label: L10n.text("Radio preference", language: language),
                 value: model.nrSelectionPreferences.map { L10n.text($0.architectureMode.label, language: language) } ?? L10n.text("Reading…", language: language),
                 compact: true
             )
@@ -431,8 +443,11 @@ struct StatusPanel: View {
 
     private func architectureButton(_ mode: NRArchitectureMode) -> some View {
         let isSelected = model.nrSelectionPreferences?.architectureMode == mode
-        return Button(L10n.text(mode.label, language: language)) {
+        return Button {
             pendingControl = .architecture(mode)
+        } label: {
+            Text(L10n.text(mode.label, language: language))
+                .frame(maxWidth: .infinity)
         }
         .buttonStyle(.bordered)
         .tint(isSelected ? AppPalette.blue : Color.gray)
@@ -461,6 +476,7 @@ struct StatusPanel: View {
                         .frame(width: 62)
                 }
                 .buttonStyle(.bordered)
+                .disabled(model.nrSelectionPreferences?.architectureMode == .lteOnly)
             }
             HStack(spacing: 7) {
                 TextField("LTE: 2,4,25,66", text: $lteBandLockText)
@@ -816,7 +832,7 @@ private enum ControlConfirmation: Identifiable {
         case .automaticNetwork:
             return L10n.text("VOS will return to automatic operator selection and the result will be verified with AT+COPS?.", language: language)
         case .architecture:
-            return L10n.text("This temporarily changes the Qualcomm SA/NSA mode and band masks. The exact values will be read back; a failed change triggers an automatic rollback. Selected operator settings are not changed.", language: language)
+            return L10n.text("This temporarily changes the Qualcomm radio access mode and band masks. LTE only disables NR and preserves the current LTE mask. Exact values are read back; a failed change triggers an automatic rollback. Selected operator settings are not changed.", language: language)
         case let .nrBandLock(bands):
             return bands.isEmpty
                 ? L10n.text("The NR band list is invalid.", language: language)
