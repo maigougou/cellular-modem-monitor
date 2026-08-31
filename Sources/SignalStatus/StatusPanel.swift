@@ -50,8 +50,10 @@ struct StatusPanel: View {
                         }
                         deviceDetailsCard
                             .id("device-details")
-                        networkControlsCard
-                            .id("network-controls")
+                        if model.supportsVOSControls {
+                            networkControlsCard
+                                .id("network-controls")
+                        }
                         if showSettings {
                             settingsCard
                                 .id("settings")
@@ -106,6 +108,11 @@ struct StatusPanel: View {
                     // available; do not probe while the modem has no PLMN.
                     guard showNetworkControls, plmn != nil else { return }
                     model.loadNetworkControls()
+                }
+                .onChange(of: model.supportsVOSControls) { isSupported in
+                    guard !isSupported else { return }
+                    showNetworkControls = false
+                    pendingControl = nil
                 }
             }
             panelSeparator
@@ -294,15 +301,16 @@ struct StatusPanel: View {
     private var deviceDetailsCard: some View {
         DisclosureGroup(isExpanded: $showDeviceDetails) {
             VStack(spacing: 9) {
-                DetailRow(label: L10n.text("USB network", language: language), value: model.snapshot.interfaceName ?? L10n.text("Not detected", language: language))
-                DetailRow(label: L10n.text("Device", language: language), value: "VOS 5G")
-                DetailRow(label: L10n.text("Management", language: language), value: model.snapshot.host)
-                DetailRow(label: L10n.text("Source", language: language), value: "SSH → QRTR/QMI")
+                DetailRow(label: L10n.text("Device", language: language), value: model.activeModemName)
+                DetailRow(label: L10n.text("Management", language: language), value: model.activeManagementEndpoint)
+                DetailRow(label: L10n.text("Interface", language: language), value: model.activeInterfaceName)
+                DetailRow(label: L10n.text("Connection path", language: language), value: model.activeConnectionPath)
+                DetailRow(label: L10n.text("Source", language: language), value: model.activeDataSource)
                 if let version = model.snapshot.moduleVersion {
                     DetailRow(label: L10n.text("Modem firmware", language: language), value: version)
                 }
                 if let firmware = model.snapshot.deviceFirmware {
-                    DetailRow(label: L10n.text("VOS firmware", language: language), value: firmware)
+                    DetailRow(label: L10n.text("Device firmware", language: language), value: firmware)
                 }
             }
             .padding(.top, 9)
@@ -564,21 +572,53 @@ struct StatusPanel: View {
             Text(L10n.text("Connection", language: language))
                 .font(.subheadline.weight(.semibold))
 
-            LabeledContent(L10n.text("Address", language: language)) {
-                TextField("192.168.225.1", text: $model.host)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 190)
+            LabeledContent(L10n.text("Modem", language: language)) {
+                Picker("", selection: $model.modemSelection) {
+                    Text(L10n.text("Automatic", language: language)).tag(ModemSelection.automatic)
+                    Text("VOS 5G").tag(ModemSelection.vos5G)
+                    Text("ZTE MC7530CA / G5 MAX").tag(ModemSelection.zteMC7530CA)
+                }
+                .labelsHidden()
+                .frame(width: 190)
             }
-            LabeledContent(L10n.text("SSH user", language: language)) {
-                TextField("root", text: $model.username)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 190)
+
+            if model.modemSelection != .zteMC7530CA {
+                modemSettingsHeading("VOS 5G")
+                LabeledContent(L10n.text("Address", language: language)) {
+                    TextField("192.168.225.1", text: $model.host)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 190)
+                }
+                LabeledContent(L10n.text("SSH user", language: language)) {
+                    TextField("root", text: $model.username)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 190)
+                }
+                LabeledContent(L10n.text("SSH password", language: language)) {
+                    SecureField("oelinux123", text: $model.password)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 190)
+                }
             }
-            LabeledContent(L10n.text("SSH password", language: language)) {
-                SecureField("oelinux123", text: $model.password)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 190)
+
+            if model.modemSelection != .vos5G {
+                modemSettingsHeading("ZTE MC7530CA / G5 MAX")
+                LabeledContent(L10n.text("Address", language: language)) {
+                    TextField("192.168.254.1", text: $model.zteHost)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 190)
+                }
+                LabeledContent(L10n.text("Web admin password", language: language)) {
+                    SecureField(L10n.text("Required for status", language: language), text: $model.ztePassword)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 190)
+                }
             }
+
+            Text(L10n.text("Passwords are stored in macOS Keychain. Addresses, selection and display preferences are stored in app settings.", language: language))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
             LabeledContent(L10n.text("Refresh", language: language)) {
                 Picker("", selection: $model.refreshInterval) {
                     Text(L10n.text("1 second", language: language)).tag(1.0)
@@ -631,20 +671,41 @@ struct StatusPanel: View {
                     .foregroundStyle(.red)
             }
 
-            HStack {
-                Text(L10n.text("Factory VOS SSH: root / oelinux123", language: language))
+            if let settingsError = model.settingsError {
+                Text(settingsError)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                if model.modemSelection != .zteMC7530CA {
+                    Text(L10n.text("Factory VOS SSH: root / oelinux123", language: language))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button(L10n.text("Save", language: language)) {
-                    model.saveSettings()
-                    showSettings = false
+                    if model.saveSettings() {
+                        showSettings = false
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.isControlBusy)
             }
         }
         .cardStyle()
+    }
+
+    private func modemSettingsHeading(_ title: String) -> some View {
+        HStack(spacing: 8) {
+            Divider()
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Divider()
+        }
+        .padding(.vertical, 2)
     }
 
     private func errorCard(_ message: String) -> some View {
@@ -711,7 +772,18 @@ struct StatusPanel: View {
     }
 
     private var headerSubtitle: String {
-        operatorIdentity.formatted ?? L10n.text("Local modem", language: language)
+        let operatorName = operatorIdentity.formatted
+        let modemName = model.activeModem?.identity.displayName
+        switch (operatorName, modemName) {
+        case let (.some(carrier), .some(modem)):
+            return "\(carrier) · \(modem)"
+        case let (.some(carrier), nil):
+            return carrier
+        case let (nil, .some(modem)):
+            return modem
+        case (nil, nil):
+            return L10n.text("Local modem", language: language)
+        }
     }
 
     private var operatorIdentity: OperatorDisplayIdentity {
@@ -1400,7 +1472,7 @@ private extension View {
 }
 
 private struct ContentHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
@@ -1408,7 +1480,7 @@ private struct ContentHeightPreferenceKey: PreferenceKey {
 }
 
 private struct ChromeHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value += nextValue()

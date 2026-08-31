@@ -15,10 +15,15 @@ final class StatusModel: ObservableObject {
     @Published private(set) var controlOperation: NetworkControlOperation?
     @Published private(set) var controlError: String?
     @Published private(set) var controlNotice: String?
+    @Published private(set) var activeModem: ActiveModem?
+    @Published private(set) var settingsError: String?
 
+    @Published var modemSelection: ModemSelection
     @Published var host: String
     @Published var username: String
     @Published var password: String
+    @Published var zteHost: String
+    @Published var ztePassword: String
     @Published var refreshInterval: Double
     @Published var menuBarStyle: MenuBarStyle
     @Published var language: AppLanguage {
@@ -28,7 +33,10 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    private let client = VOSClient()
+    private let client: VOSClient
+    private let coordinator: ModemCoordinator?
+    private let credentialStore: any CredentialStoring
+    private let backendSetupError: Error?
     private let defaults: UserDefaults
     private var pollingTask: Task<Void, Never>?
     private var pollingGeneration: UInt64 = 0
@@ -40,11 +48,18 @@ final class StatusModel: ObservableObject {
     private var controlDeviceFingerprint: String?
     private var originalNRPreferences: NRSystemSelectionPreferences?
     private var activeNRBandLock: Set<Int>?
+    private var lastSuccessfulScopeKey: String?
+    private var lastSuccessfulEndpoint: ModemEndpointPreference?
 
     private enum Key {
         static let host = "deviceHost"
         static let username = "sshUsername"
+        // Legacy only. New versions migrate this value to Keychain and delete it.
         static let password = "sshPassword"
+        static let zteHost = "zteDeviceHost"
+        static let modemSelection = "modemSelection"
+        static let lastSuccessfulScopeKey = "lastSuccessfulModemScopeKey"
+        static let lastSuccessfulEndpoint = "lastSuccessfulModemEndpoint"
         static let interval = "refreshInterval"
         static let intervalSchema = "refreshIntervalSchema"
         static let menuStyle = "menuBarStyle"
@@ -53,17 +68,60 @@ final class StatusModel: ObservableObject {
 
     private static let refreshIntervals = [1.0, 5.0, 10.0, 15.0, 30.0, 60.0]
     private static let currentIntervalSchema = 1
+    private static let vosCredentialAccount = "vos-5g-ssh"
+    private static let zteCredentialAccount = "zte-mc7530ca-web-admin"
+    private static let defaultVOSHost = "192.168.225.1"
+    private static let defaultZTEHost = "192.168.254.1"
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        credentialStore: any CredentialStoring = KeychainCredentialStore.shared
+    ) {
         self.defaults = defaults
+        self.credentialStore = credentialStore
+
+        let vosClient = VOSClient()
+        client = vosClient
+        do {
+            let registry = try ModemBackendRegistry.standard(vosClient: vosClient)
+            coordinator = ModemCoordinator(registry: registry)
+            backendSetupError = nil
+        } catch {
+            coordinator = nil
+            backendSetupError = error
+        }
+
         let arguments = ProcessInfo.processInfo.arguments
         let isSADemo = arguments.contains("--demo-sa")
         let showsDemoControls = arguments.contains("--demo-controls")
         demoMode = ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"] == "1" ||
             arguments.contains("--demo") || arguments.contains("--demo-nsa") || isSADemo || showsDemoControls
-        host = defaults.string(forKey: Key.host) ?? "192.168.225.1"
+        modemSelection = ModemSelection(
+            rawValue: defaults.string(forKey: Key.modemSelection) ?? ""
+        ) ?? .automatic
+        host = defaults.string(forKey: Key.host) ?? Self.defaultVOSHost
         username = defaults.string(forKey: Key.username) ?? "root"
-        password = defaults.string(forKey: Key.password) ?? "oelinux123"
+        var credentialLoadErrors: [String] = []
+        do {
+            password = try Self.loadVOSPassword(
+                defaults: defaults,
+                credentialStore: credentialStore
+            )
+        } catch {
+            // A Keychain denial is not the same as a missing item. Do not fall
+            // back to a different password and risk overwriting the stored one.
+            password = ""
+            credentialLoadErrors.append(error.localizedDescription)
+        }
+        zteHost = defaults.string(forKey: Key.zteHost) ?? Self.defaultZTEHost
+        do {
+            ztePassword = try credentialStore.password(for: Self.zteCredentialAccount) ?? ""
+        } catch {
+            ztePassword = ""
+            credentialLoadErrors.append(error.localizedDescription)
+        }
+        lastSuccessfulScopeKey = defaults.string(forKey: Key.lastSuccessfulScopeKey)
+        lastSuccessfulEndpoint = Self.loadLastSuccessfulEndpoint(defaults: defaults)
         let storedInterval = defaults.double(forKey: Key.interval)
         let storedSchema = defaults.integer(forKey: Key.intervalSchema)
         let resolvedInterval = storedSchema < Self.currentIntervalSchema
@@ -79,8 +137,12 @@ final class StatusModel: ObservableObject {
             storedValue: defaults.string(forKey: Key.language),
             preferredLanguages: Locale.preferredLanguages
         )
+        if !credentialLoadErrors.isEmpty {
+            settingsError = credentialLoadErrors.joined(separator: "; ")
+        }
 
         if demoMode {
+            modemSelection = .vos5G
             snapshot = DeviceSnapshot(
                 host: "192.168.225.1",
                 interfaceName: "en12",
@@ -135,6 +197,19 @@ final class StatusModel: ObservableObject {
                 moduleVersion: "0R05",
                 deviceFirmware: "326.73_0R19",
                 updatedAt: Date()
+            )
+            activeModem = ActiveModem(
+                identity: ModemIdentity(
+                    kind: .vos5G,
+                    manufacturer: "VOS",
+                    model: "VOS 5G"
+                ),
+                endpoint: ScopedEndpoint(
+                    baseURL: URL(string: "http://192.168.225.1")!,
+                    interfaceName: "en12",
+                    connectionPath: .directUSB
+                ),
+                capabilities: [.statusRead, .identityRead, .webUI, .vosControls]
             )
             connectionState = .online
             menuBarTitle = snapshot.detailedMenuTitle
@@ -212,6 +287,50 @@ final class StatusModel: ObservableObject {
 
     var isControlBusy: Bool { controlOperation != nil }
     var canRestoreNRDefaults: Bool { originalNRPreferences != nil }
+    var supportsVOSControls: Bool {
+        activeModem?.identity.kind == .vos5G &&
+            activeModem?.capabilities.contains(.vosControls) == true
+    }
+
+    var activeModemName: String {
+        activeModem?.identity.displayName ?? L10n.text("Not detected", language: language)
+    }
+
+    var activeManagementEndpoint: String {
+        if let endpoint = activeModem?.endpoint.baseURL.absoluteString { return endpoint }
+        switch modemSelection {
+        case .zteMC7530CA: return zteHost
+        case .automatic, .vos5G: return snapshot.host
+        }
+    }
+
+    var activeInterfaceName: String {
+        activeModem?.endpoint.interfaceName
+            ?? snapshot.interfaceName
+            ?? L10n.text("Not detected", language: language)
+    }
+
+    var activeConnectionPath: String {
+        guard let path = activeModem?.endpoint.connectionPath else {
+            return L10n.text("Not detected", language: language)
+        }
+        let label: String
+        switch path {
+        case .directUSB: label = "Direct USB"
+        case .directEthernet: label = "Direct Ethernet"
+        case .routed: label = "Routed"
+        case .unknown: label = "Direct link (USB or Ethernet)"
+        }
+        return L10n.text(label, language: language)
+    }
+
+    var activeDataSource: String {
+        switch activeModem?.identity.kind {
+        case .vos5G: return "SSH → QRTR/QMI"
+        case .zteMC7530CA: return L10n.text("Web UBus (read-only)", language: language)
+        case nil: return "—"
+        }
+    }
 
     func start() {
         guard !demoMode, pollingTask == nil else { return }
@@ -621,18 +740,56 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    func saveSettings() {
-        defaults.set(host.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.host)
-        defaults.set(username, forKey: Key.username)
-        defaults.set(password, forKey: Key.password)
+    @discardableResult
+    func saveSettings() -> Bool {
+        settingsError = nil
+        let savedVOSHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedZTEHost = zteHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previousVOSHost = defaults.string(forKey: Key.host) ?? Self.defaultVOSHost
+        let previousZTEHost = defaults.string(forKey: Key.zteHost) ?? Self.defaultZTEHost
+        var changedEndpointKinds: Set<ModemKind> = []
+        if Self.normalizedManagementURL(previousVOSHost) != Self.normalizedManagementURL(savedVOSHost) {
+            changedEndpointKinds.insert(.vos5G)
+        }
+        if Self.normalizedManagementURL(previousZTEHost) != Self.normalizedManagementURL(savedZTEHost) {
+            changedEndpointKinds.insert(.zteMC7530CA)
+        }
+        do {
+            try CredentialTransaction.apply([
+                CredentialUpdate(account: Self.vosCredentialAccount, password: password),
+                CredentialUpdate(account: Self.zteCredentialAccount, password: ztePassword)
+            ], store: credentialStore)
+        } catch {
+            settingsError = localizedError(error)
+            return false
+        }
+
+        defaults.removeObject(forKey: Key.password)
+        defaults.set(modemSelection.rawValue, forKey: Key.modemSelection)
+        defaults.set(savedVOSHost, forKey: Key.host)
+        defaults.set(username.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.username)
+        defaults.set(savedZTEHost, forKey: Key.zteHost)
         defaults.set(refreshInterval, forKey: Key.interval)
         defaults.set(menuBarStyle.rawValue, forKey: Key.menuStyle)
+        if let lastKind = lastSuccessfulEndpoint?.kind {
+            if changedEndpointKinds.contains(lastKind) { clearLastSuccessfulEndpoint() }
+        } else if !changedEndpointKinds.isEmpty {
+            clearLastSuccessfulEndpoint()
+        }
         updateMenuTitle(force: true)
         consecutiveFailures = 0
         connectionState = .connecting
         lastError = nil
+        activeModem = nil
         clearControlState()
-        refreshNow()
+        Task { [weak self] in
+            guard let self else { return }
+            if let coordinator = self.coordinator {
+                await coordinator.invalidateActiveModem()
+            }
+            await self.refresh()
+        }
+        return true
     }
 
     func setLaunchAtLogin(_ enabled: Bool) throws {
@@ -648,11 +805,20 @@ final class StatusModel: ObservableObject {
     func copyDiagnostics() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(snapshot.diagnostics, forType: .string)
+        let diagnostics = [
+            "Backend: \(activeModem?.identity.kind.rawValue ?? "—")",
+            "Device: \(activeModem?.identity.displayName ?? "—")",
+            "Endpoint: \(activeManagementEndpoint)",
+            "Path: \(activeModem?.endpoint.connectionPath.rawValue ?? "—")",
+            snapshot.diagnostics
+        ].joined(separator: "\n")
+        pasteboard.setString(diagnostics, forType: .string)
     }
 
     func openWebUI() {
-        let value = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallback = modemSelection == .zteMC7530CA ? zteHost : host
+        let value = activeModem?.endpoint.baseURL.absoluteString
+            ?? fallback.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidate = value.contains("://") ? value : "http://\(value)"
         if let url = URL(string: candidate) {
             NSWorkspace.shared.open(url)
@@ -662,7 +828,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.2.0"
+        ) as? String ?? "1.3.0"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -715,10 +881,15 @@ final class StatusModel: ObservableObject {
 
     private func pollOnceAndNextInterval() async -> UInt64 {
         await refresh()
-        let seconds = StatusPollingPolicy.interval(
-            userInterval: refreshInterval,
-            connectionState: connectionState
-        )
+        // A rejected credential is actionable in Settings and should not cause
+        // repeated SSH/Web login attempts every five seconds. Saving a corrected
+        // credential still triggers an immediate refresh.
+        let seconds = connectionState == .authenticationFailed
+            ? max(refreshInterval, 60)
+            : StatusPollingPolicy.interval(
+                userInterval: refreshInterval,
+                connectionState: connectionState
+            )
         return UInt64(seconds * 1_000_000_000)
     }
 
@@ -746,15 +917,16 @@ final class StatusModel: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
-        let configuration = DeviceConfiguration(
-            host: host,
-            username: username,
-            password: password,
-            refreshInterval: refreshInterval
-        )
-
         do {
-            let latest = try await client.fetchSnapshot(configuration: configuration)
+            if let backendSetupError { throw backendSetupError }
+            guard let coordinator else {
+                throw ModemCoordinatorError.noMatchingModem
+            }
+            let result = try await coordinator.read(
+                preferences: currentConnectionPreferences,
+                credentials: currentCredentials
+            )
+            let latest = result.snapshot
             let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
             if snapshot.plmn != latest.plmn {
                 // A powered SIM replacement can leave the USB device and SSH
@@ -767,6 +939,8 @@ final class StatusModel: ObservableObject {
                 controlNotice = nil
             }
             snapshot = latest
+            activeModem = result.activeModem
+            persistLastSuccessful(result)
             consecutiveFailures = 0
             // During a physical SIM swap QMI remains reachable but may report
             // no serving band while the new card initializes. Treat that as a
@@ -778,13 +952,18 @@ final class StatusModel: ObservableObject {
         } catch {
             consecutiveFailures += 1
             lastError = localizedError(error)
-            if error as? VOSClientError == .authenticationFailed {
+            if isAuthenticationError(error) {
                 connectionState = .authenticationFailed
-            } else if let clientError = error as? VOSClientError,
-                      case .qmiUnavailable = clientError {
+                activeModem = nil
+                clearControlState()
+            } else if isQMIUnavailableError(error) {
                 connectionState = .qmiUnavailable
+                activeModem = nil
+                clearControlState()
             } else if consecutiveFailures >= 3 {
                 connectionState = .disconnected
+                activeModem = nil
+                clearControlState()
             } else if snapshot.hasRadioData {
                 connectionState = .stale
             } else {
@@ -804,7 +983,7 @@ final class StatusModel: ObservableObject {
             ControlOperationDeviceGuard
         ) async throws -> Void
     ) async {
-        guard !demoMode, controlOperation == nil else { return }
+        guard !demoMode, supportsVOSControls, controlOperation == nil else { return }
         controlOperation = operation
         defer {
             controlOperation = nil
@@ -832,11 +1011,16 @@ final class StatusModel: ObservableObject {
     }
 
     private var currentConfiguration: DeviceConfiguration {
-        DeviceConfiguration(
-            host: host,
+        let endpoint = activeModem?.identity.kind == .vos5G
+            ? activeModem?.endpoint
+            : nil
+        return DeviceConfiguration(
+            host: endpoint?.baseURL.absoluteString ?? host,
             username: username,
             password: password,
-            refreshInterval: refreshInterval
+            refreshInterval: refreshInterval,
+            sourceAddress: endpoint?.sourceAddress,
+            interfaceName: endpoint?.interfaceName
         )
     }
 
@@ -1001,8 +1185,156 @@ final class StatusModel: ObservableObject {
         }
     }
 
+    private var currentConnectionPreferences: ModemConnectionPreferences {
+        var endpoints: [ModemEndpointPreference] = []
+        if !Self.isBuiltInDefault(kind: .vos5G, address: host),
+           let endpoint = endpointPreference(kind: .vos5G, address: host) {
+            endpoints.append(endpoint)
+        }
+        if !Self.isBuiltInDefault(kind: .zteMC7530CA, address: zteHost),
+           let endpoint = endpointPreference(kind: .zteMC7530CA, address: zteHost) {
+            endpoints.append(endpoint)
+        }
+        return ModemConnectionPreferences(
+            selection: modemSelection,
+            manualEndpoints: endpoints,
+            lastSuccessfulScopeKey: lastSuccessfulScopeKey,
+            lastSuccessfulEndpoint: lastSuccessfulEndpoint
+        )
+    }
+
+    private var currentCredentials: ModemConnectionCredentials {
+        var credentials = ModemConnectionCredentials()
+        let vosUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !vosUser.isEmpty, !password.isEmpty {
+            credentials[.vos5G] = .ssh(SSHCredentials(username: vosUser, password: password))
+        }
+        if !ztePassword.isEmpty {
+            credentials[.zteMC7530CA] = .web(WebCredentials(password: ztePassword))
+        }
+        return credentials
+    }
+
+    private func endpointPreference(
+        kind: ModemKind,
+        address: String
+    ) -> ModemEndpointPreference? {
+        let configuration = DeviceConfiguration(
+            host: address,
+            username: "",
+            password: "",
+            refreshInterval: refreshInterval
+        )
+        guard let url = configuration.baseURL else { return nil }
+        return ModemEndpointPreference(kind: kind, baseURL: url)
+    }
+
+    private func persistLastSuccessful(_ result: ModemReadResult) {
+        lastSuccessfulScopeKey = result.lastSuccessfulScopeKey
+        lastSuccessfulEndpoint = result.lastSuccessfulEndpoint
+        defaults.set(result.lastSuccessfulScopeKey, forKey: Key.lastSuccessfulScopeKey)
+        if let data = try? JSONEncoder().encode(result.lastSuccessfulEndpoint) {
+            defaults.set(data, forKey: Key.lastSuccessfulEndpoint)
+        }
+    }
+
+    private func clearLastSuccessfulEndpoint() {
+        lastSuccessfulScopeKey = nil
+        lastSuccessfulEndpoint = nil
+        defaults.removeObject(forKey: Key.lastSuccessfulScopeKey)
+        defaults.removeObject(forKey: Key.lastSuccessfulEndpoint)
+    }
+
+    static func isBuiltInDefault(kind: ModemKind, address: String) -> Bool {
+        let defaultAddress: String
+        switch kind {
+        case .vos5G: defaultAddress = defaultVOSHost
+        case .zteMC7530CA: defaultAddress = defaultZTEHost
+        }
+        return normalizedManagementURL(address) == normalizedManagementURL(defaultAddress)
+    }
+
+    static func normalizedManagementURL(_ address: String) -> URL? {
+        DeviceConfiguration(
+            host: address,
+            username: "",
+            password: "",
+            refreshInterval: 30
+        ).baseURL
+    }
+
+    private static func loadLastSuccessfulEndpoint(
+        defaults: UserDefaults
+    ) -> ModemEndpointPreference? {
+        guard let data = defaults.data(forKey: Key.lastSuccessfulEndpoint) else { return nil }
+        return try? JSONDecoder().decode(ModemEndpointPreference.self, from: data)
+    }
+
+    static func loadVOSPassword(
+        defaults: UserDefaults,
+        credentialStore: any CredentialStoring
+    ) throws -> String {
+        if let stored = try credentialStore.password(for: vosCredentialAccount) {
+            defaults.removeObject(forKey: Key.password)
+            return stored
+        }
+
+        guard let legacy = defaults.string(forKey: Key.password), !legacy.isEmpty else {
+            defaults.removeObject(forKey: Key.password)
+            return "oelinux123"
+        }
+        do {
+            try credentialStore.setPassword(legacy, for: vosCredentialAccount)
+            defaults.removeObject(forKey: Key.password)
+        } catch {
+            // Keep the legacy value for a later migration attempt if Keychain
+            // is temporarily unavailable; never copy it to another preference.
+        }
+        return legacy
+    }
+
+    private func isAuthenticationError(_ error: Error) -> Bool {
+        if error as? VOSClientError == .authenticationFailed { return true }
+        if error as? ZTEUBusError == .authenticationFailed { return true }
+        if let backendError = error as? ModemBackendError {
+            switch backendError {
+            case .credentialsRequired, .incompatibleCredentials: return true
+            default: break
+            }
+        }
+        let message = error.localizedDescription.lowercased()
+        return (message.contains("password") || message.contains("credential")) &&
+            (message.contains("rejected") || message.contains("requires"))
+    }
+
+    private func isQMIUnavailableError(_ error: Error) -> Bool {
+        if let clientError = error as? VOSClientError,
+           case .qmiUnavailable = clientError {
+            return true
+        }
+        return error.localizedDescription.localizedCaseInsensitiveContains("qmi is unavailable")
+    }
+
     private func localizedError(_ error: Error) -> String {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        if message.localizedCaseInsensitiveContains("requires web credentials") {
+            return L10n.text(
+                "Enter the ZTE Web administrator password in Settings.",
+                language: language
+            )
+        }
+        if message.localizedCaseInsensitiveContains("requires ssh credentials") {
+            return L10n.text(
+                "Enter the VOS SSH username and password in Settings.",
+                language: language
+            )
+        }
+        if message.localizedCaseInsensitiveContains("ZTE administrator password was rejected") {
+            return L10n.text("The ZTE administrator password was rejected.", language: language)
+        }
+        if message.localizedCaseInsensitiveContains("SSH username or password was rejected") {
+            return L10n.text("The modem SSH username or password was rejected.", language: language)
+        }
         return L10n.text(message, language: language)
     }
 }

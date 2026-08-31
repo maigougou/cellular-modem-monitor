@@ -155,6 +155,597 @@ final class SignalStatusTests: XCTestCase {
         )
     }
 
+    func testDiscoveryBuildsScopedCandidateForDirectUSBECM() throws {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en8",
+            index: 18,
+            address: "192.168.254.20",
+            prefixLength: 24,
+            router: "192.168.254.1"
+        )])
+
+        let candidate = try XCTUnwrap(ModemCandidateGenerator().candidates(
+            topology: topology,
+            allowedKinds: [.zteMC7530CA]
+        ).first)
+
+        XCTAssertEqual(candidate.key.host, "192.168.254.1")
+        XCTAssertEqual(candidate.key.interfaceIndex, 18)
+        XCTAssertEqual(candidate.endpoint.interfaceName, "en8")
+        XCTAssertEqual(candidate.endpoint.sourceAddress, "192.168.254.20")
+        XCTAssertEqual(candidate.endpoint.gateway, "192.168.254.1")
+        XCTAssertEqual(candidate.endpoint.connectionPath, .unknown)
+        XCTAssertTrue(candidate.sources.contains(.matchingSubnet))
+        XCTAssertTrue(candidate.sources.contains(.matchingGateway))
+    }
+
+    func testDiscoveryBuildsScopedCandidateForDirectRJ45() throws {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en5",
+            index: 12,
+            address: "192.168.254.30",
+            prefixLength: 24,
+            router: "192.168.254.1"
+        )])
+
+        let candidate = try XCTUnwrap(ModemCandidateGenerator().candidates(
+            topology: topology,
+            allowedKinds: [.zteMC7530CA]
+        ).first)
+
+        XCTAssertEqual(candidate.key.interfaceIndex, 12)
+        XCTAssertEqual(candidate.endpoint.interfaceName, "en5")
+        XCTAssertEqual(candidate.endpoint.sourceAddress, "192.168.254.30")
+        XCTAssertEqual(candidate.endpoint.connectionPath, .unknown)
+        XCTAssertTrue(candidate.sources.contains(.matchingSubnet))
+    }
+
+    func testDiscoveryMarksZTEBehindSlateAsRouted() throws {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en1",
+            index: 6,
+            address: "192.168.8.23",
+            prefixLength: 24,
+            router: "192.168.8.1",
+            isPrimary: true
+        )])
+
+        let candidate = try XCTUnwrap(ModemCandidateGenerator().candidates(
+            topology: topology,
+            allowedKinds: [.zteMC7530CA]
+        ).first)
+
+        XCTAssertEqual(candidate.endpoint.connectionPath, .routed)
+        XCTAssertEqual(candidate.endpoint.sourceAddress, "192.168.8.23")
+        XCTAssertEqual(candidate.endpoint.gateway, "192.168.8.1")
+        XCTAssertTrue(candidate.sources.contains(.primaryInterface))
+        XCTAssertFalse(candidate.sources.contains(.matchingSubnet))
+    }
+
+    func testDiscoveryKeepsSamePrivateAddressDistinctAcrossInterfaces() {
+        let topology = NetworkTopologySnapshot(interfaces: [
+            discoveryInterface(
+                name: "en5",
+                index: 12,
+                address: "192.168.254.20",
+                prefixLength: 24,
+                router: "192.168.254.1"
+            ),
+            discoveryInterface(
+                name: "en8",
+                index: 18,
+                address: "192.168.254.30",
+                prefixLength: 24,
+                router: "192.168.254.1"
+            )
+        ])
+
+        let candidates = ModemCandidateGenerator().candidates(
+            topology: topology,
+            allowedKinds: [.zteMC7530CA]
+        )
+
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertEqual(Set(candidates.map(\.key.host)), ["192.168.254.1"])
+        XCTAssertEqual(Set(candidates.map(\.key.interfaceIndex)), [12, 18])
+        XCTAssertEqual(Set(candidates.map(\.id)).count, 2)
+    }
+
+    func testDiscoveryExcludesTunnelAndPeerInterfaces() {
+        let topology = NetworkTopologySnapshot(interfaces: [
+            discoveryInterface(
+                name: "en1",
+                index: 6,
+                address: "192.168.8.23",
+                prefixLength: 24,
+                router: "192.168.8.1"
+            ),
+            discoveryInterface(
+                name: "utun4",
+                index: 20,
+                address: "10.0.0.2",
+                prefixLength: 24,
+                router: nil,
+                kind: .tunnel
+            ),
+            discoveryInterface(
+                name: "awdl0",
+                index: 21,
+                address: "169.254.5.2",
+                prefixLength: 16,
+                router: nil,
+                kind: .peerToPeer
+            )
+        ])
+
+        let candidates = ModemCandidateGenerator().candidates(topology: topology)
+
+        XCTAssertEqual(candidates.count, 2)
+        XCTAssertTrue(candidates.allSatisfy { $0.key.interfaceIndex == 6 })
+    }
+
+    func testDiscoveryRanksManualAheadOfLastSuccessfulAndMergesEvidence() throws {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en8",
+            index: 18,
+            address: "192.168.254.20",
+            prefixLength: 24,
+            router: "192.168.254.1"
+        )])
+        let hints = ModemDiscoveryHints(
+            lastSuccessful: [ModemEndpointHint(
+                kind: .zteMC7530CA,
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceIndex: 18
+            )],
+            manual: [ModemEndpointHint(
+                kind: .zteMC7530CA,
+                baseURL: URL(string: "http://192.168.254.99:8080")!
+            )]
+        )
+
+        let candidates = ModemCandidateGenerator().candidates(
+            topology: topology,
+            hints: hints,
+            allowedKinds: [.zteMC7530CA]
+        )
+        let last = try XCTUnwrap(candidates.first { $0.key.effectivePort == 80 })
+        let manual = try XCTUnwrap(candidates.first { $0.key.effectivePort == 8080 })
+
+        XCTAssertEqual(candidates.first?.id, manual.id)
+        XCTAssertEqual(last.key.host, "192.168.254.1")
+        XCTAssertEqual(last.priority, ModemDiscoveryCandidateSource.lastSuccessful.rawValue)
+        XCTAssertTrue(last.sources.contains(.lastSuccessful))
+        XCTAssertTrue(last.sources.contains(.knownDefault))
+        XCTAssertTrue(last.sources.contains(.matchingSubnet))
+        XCTAssertEqual(manual.priority, ModemDiscoveryCandidateSource.manual.rawValue)
+        XCTAssertTrue(manual.sources.contains(.manual))
+        XCTAssertGreaterThan(manual.priority, last.priority)
+    }
+
+    func testDiscoveryDoesNotMergeDifferentSchemesOrPorts() {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en1",
+            index: 6,
+            address: "192.168.50.20",
+            prefixLength: 24,
+            router: "192.168.50.1"
+        )])
+        let profile = ModemDiscoveryProfile(
+            kind: .zteMC7530CA,
+            defaultBaseURLs: [
+                URL(string: "http://192.168.50.1")!,
+                URL(string: "http://192.168.50.1:80")!,
+                URL(string: "https://192.168.50.1")!,
+                URL(string: "http://192.168.50.1:8080")!
+            ]
+        )
+
+        let candidates = ModemCandidateGenerator(profiles: [profile]).candidates(
+            topology: topology
+        )
+
+        XCTAssertEqual(candidates.count, 3)
+        XCTAssertEqual(Set(candidates.map(\.key.description)), [
+            "http://192.168.50.1:80%6",
+            "https://192.168.50.1:443%6",
+            "http://192.168.50.1:8080%6"
+        ])
+    }
+
+    func testDiscoveryAllowedKindsFiltersBeforeProbing() async {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en1",
+            index: 6,
+            address: "192.168.8.23",
+            prefixLength: 24,
+            router: "192.168.8.1"
+        )])
+        let engine = ModemDiscoveryEngine(
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: topology),
+            probe: ClosureModemDiscoveryProbe { candidate in
+                modemIdentity(for: candidate.kind)
+            }
+        )
+
+        let report = await engine.discover(allowedKinds: [.zteMC7530CA])
+
+        XCTAssertEqual(report.attempts.count, 1)
+        XCTAssertEqual(report.matches.count, 1)
+        XCTAssertEqual(report.attempts.first?.candidate.kind, .zteMC7530CA)
+    }
+
+    func testDiscoveryProbeTimeoutDoesNotWaitForNonCooperativeProbe() async {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en1",
+            index: 6,
+            address: "192.168.8.23",
+            prefixLength: 24,
+            router: "192.168.8.1"
+        )])
+        let engine = ModemDiscoveryEngine(
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: topology),
+            probe: ClosureModemDiscoveryProbe { candidate in
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(500)) {
+                        continuation.resume()
+                    }
+                }
+                return modemIdentity(for: candidate.kind)
+            },
+            maximumConcurrentProbes: 2,
+            probeTimeoutNanoseconds: 1_000_000
+        )
+
+        let start = Date()
+        let report = await engine.discover()
+        let elapsed = Date().timeIntervalSince(start)
+
+        XCTAssertEqual(report.attempts.count, 2)
+        XCTAssertTrue(report.attempts.allSatisfy { $0.result == .timedOut })
+        XCTAssertLessThan(elapsed, 0.25, "Deadline must not await a non-cooperative probe")
+    }
+
+    func testDiscoveryResultsRemainInCandidateOrderWhenResponsesFinishOutOfOrder() async {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en1",
+            index: 6,
+            address: "192.168.8.23",
+            prefixLength: 24,
+            router: "192.168.8.1"
+        )])
+        let provider = FixedNetworkTopologyProvider(snapshot: topology)
+        let engine = ModemDiscoveryEngine(
+            topologyProvider: provider,
+            probe: ClosureModemDiscoveryProbe { candidate in
+                let delay: UInt64 = candidate.kind == .vos5G ? 40_000_000 : 1_000_000
+                try await Task.sleep(nanoseconds: delay)
+                return modemIdentity(for: candidate.kind)
+            },
+            maximumConcurrentProbes: 2,
+            probeTimeoutNanoseconds: 500_000_000
+        )
+        let expectedOrder = engine.candidates().map(\.id)
+
+        let report = await engine.discover()
+
+        XCTAssertEqual(report.attempts.map { $0.candidate.id }, expectedOrder)
+        XCTAssertEqual(report.matches.count, expectedOrder.count)
+    }
+
+    func testMC7530ParserFixturesCoverENDCSAAndSentinels() throws {
+        let endc = try MC7530Parser.parse(data: mc7530Fixture("endc-mixed-types.json"))
+        XCTAssertEqual(endc.networkType, "ENDC")
+        XCTAssertEqual(endc.operatorName, "Example Carrier")
+        XCTAssertEqual(endc.mcc, "302")
+        XCTAssertEqual(endc.mnc, "220")
+        XCTAssertEqual(endc.nrSystemMode, .nsa)
+        XCTAssertEqual(endc.nrBand, "n66")
+        XCTAssertEqual(endc.nrChannel, "434910")
+        XCTAssertEqual(endc.nrBandwidthMHz, 20)
+        XCTAssertEqual(endc.nrSignal, RadioSignal(rsrpDBm: -104, rsrqDB: -12, rssiDBm: -99, snrDB: 10.5))
+        XCTAssertEqual(endc.lteBand, "B2")
+        XCTAssertEqual(endc.lteChannel, "900")
+        XCTAssertEqual(endc.lteSignal, RadioSignal(rsrpDBm: -99, rsrqDB: -15.5, rssiDBm: -65, snrDB: 2))
+        XCTAssertEqual(endc.lteGlobalCellID, 19_088_743)
+        XCTAssertEqual(endc.ltePrimaryCell?.band, "B2")
+        XCTAssertEqual(endc.lteSecondaryCells.map(\.band), ["B66"])
+        XCTAssertEqual(endc.lteSecondaryCells.map(\.earfcn), [66_811])
+        XCTAssertEqual(endc.unparsedNRCA, "opaque-vendor-value")
+
+        let snapshot = endc.snapshot(
+            host: "192.168.254.1",
+            interfaceName: "en8",
+            now: Date(timeIntervalSince1970: 1)
+        )
+        XCTAssertEqual(snapshot.detailedMenuTitle, "NSA n66+B2")
+        XCTAssertEqual(snapshot.interfaceName, "en8")
+
+        let sa = try MC7530Parser.parse(data: mc7530Fixture("sa.json"))
+        XCTAssertEqual(sa.nrSystemMode, .sa)
+        XCTAssertEqual(sa.nrBand, "n77")
+        XCTAssertEqual(sa.nrChannel, "650000")
+        XCTAssertEqual(sa.nrBandwidthMHz, 100)
+        XCTAssertEqual(sa.nrGlobalCellID, 305_419_896)
+        XCTAssertNil(sa.lteBand)
+
+        let lte = try MC7530Parser.parse(data: mc7530Fixture("lte-sentinels.json"))
+        XCTAssertEqual(lte.lteBand, "B12")
+        XCTAssertEqual(lte.lteChannel, "5010")
+        XCTAssertEqual(lte.lteSignal, .empty)
+        XCTAssertNil(lte.nrBand)
+        XCTAssertEqual(lte.mcc, "001")
+        XCTAssertEqual(lte.mnc, "01")
+
+        let ranges = try MC7530Parser.parse(data: mc7530Fixture("range-sentinels.json"))
+        XCTAssertEqual(ranges.lteBand, "B12")
+        XCTAssertNil(ranges.lteChannel)
+        XCTAssertNil(ranges.lteGlobalCellID)
+        XCTAssertNil(ranges.ltePhysicalCellID)
+        XCTAssertNil(ranges.ltePrimaryCell)
+        XCTAssertTrue(ranges.lteSecondaryCells.isEmpty)
+        XCTAssertEqual(ranges.nrBand, "n77")
+        XCTAssertNil(ranges.nrChannel)
+        XCTAssertNil(ranges.nrBandwidthMHz)
+        XCTAssertNil(ranges.nrGlobalCellID)
+        XCTAssertNil(ranges.nrPhysicalCellID)
+        XCTAssertThrowsError(try MC7530Parser.parse(data: Data("[]".utf8)))
+    }
+
+    func testZTEAnonymousSchemaAndCSRFCompatibilityHeaders() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTEResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#)
+        ])
+        let transport = try ZTEUBusTransport(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            route: ZTEHTTPRoute(interfaceName: "en8", interfaceIndex: 18, sourceAddress: "192.168.254.20"),
+            http: http
+        )
+
+        XCTAssertTrue(try await transport.hasMC7530Schema())
+        let request = try XCTUnwrap(await http.records().first)
+        XCTAssertEqual(request.rpcMethod, "list")
+        XCTAssertEqual(request.sessionID, ZTEUBusTransport.zeroSessionID)
+        XCTAssertEqual(request.header("Origin"), "http://192.168.254.1")
+        XCTAssertEqual(request.header("Referer"), "http://192.168.254.1/")
+        XCTAssertEqual(request.header("Z-Mode"), "0")
+        XCTAssertEqual(request.header("Z-Tag"), "")
+        XCTAssertEqual(request.route.interfaceName, "en8")
+        XCTAssertEqual(request.route.interfaceIndex, 18)
+    }
+
+    func testZTEAuthHashesPasswordAndUsesReturnedSession() async throws {
+        let expectedHash = "8D1C7328B6F8EFB7E5D58D42216F27B67BE22C038BF4468A546DBA881440F62C"
+        XCTAssertEqual(ZTEAuthSession.loginHash(password: "secret", salt: "pepper"), expectedHash)
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"pepper"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+            testZTECallResponse(#"{"network_type":"LTE"}"#)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+            username: "admin",
+            password: "secret"
+        )
+
+        let payload = try await session.read(object: "zte_nwinfo_api", method: "nwinfo_get_netinfo")
+        XCTAssertEqual(payload["network_type"]?.stringValue, "LTE")
+        let records = await http.records()
+        XCTAssertEqual(records.map(\.ubusMethod), ["web_login_info", "web_login", "nwinfo_get_netinfo"])
+        XCTAssertEqual(records[1].loginUsername, "admin")
+        XCTAssertEqual(records[1].loginPassword, expectedHash)
+        XCTAssertEqual(records[2].sessionID, "sid-one")
+        XCTAssertTrue(records.allSatisfy { !$0.bodyText.contains("secret") })
+    }
+
+    func testZTEExpiredSessionRelogsExactlyOnce() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"salt-one"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+            testZTEStatusResponse(6),
+            testZTECallResponse(#"{"zte_web_sault":"salt-two"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+            testZTECallResponse(#"{"network_type":"NR5G SA"}"#)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+            password: "fixture-password"
+        )
+
+        let payload = try await session.read(object: "zte_nwinfo_api", method: "nwinfo_get_netinfo")
+        XCTAssertEqual(payload["network_type"]?.stringValue, "NR5G SA")
+        let records = await http.records()
+        XCTAssertEqual(records.count, 6)
+        XCTAssertEqual(records.filter { $0.ubusMethod == "web_login" }.count, 2)
+        XCTAssertEqual(
+            records.filter { $0.ubusMethod == "nwinfo_get_netinfo" }.map(\.sessionID),
+            ["sid-one", "sid-two"]
+        )
+    }
+
+    func testZTEWrongPasswordStopsFurtherLoginAttempts() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"pepper"}"#),
+            testZTECallResponse(#"{"result":"1"}"#)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+            password: "wrong-fixture-password"
+        )
+
+        for _ in 0..<2 {
+            do {
+                _ = try await session.read(object: "zte_nwinfo_api", method: "nwinfo_get_netinfo")
+                XCTFail("Wrong password must fail")
+            } catch let error as ZTEUBusError {
+                XCTAssertEqual(error, .authenticationFailed)
+            }
+        }
+        XCTAssertEqual(await http.requestCount(), 2)
+    }
+
+    func testZTEBackendRejectsBadCredentialsAcrossEndpointsUntilTheyChange() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"bad-salt"}"#),
+            testZTECallResponse(#"{"result":"1"}"#),
+            testZTECallResponse(#"{"zte_web_sault":"good-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"good-sid"}"#),
+            testZTECallResponse(#"{"network_type":"LTE","wan_active_band":"B12","wan_active_channel":5010,"lte_pci":7}"#)
+        ])
+        let backend = MC7530Backend(httpTransport: http)
+        let routed = ScopedEndpoint(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            interfaceName: "en1",
+            interfaceIndex: 11,
+            sourceAddress: "192.168.8.25",
+            connectionPath: .routed,
+            gateway: "192.168.8.1"
+        )
+        let direct = ScopedEndpoint(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            interfaceName: "en8",
+            interfaceIndex: 18,
+            sourceAddress: "192.168.254.20",
+            connectionPath: .directUSB,
+            gateway: "192.168.254.1"
+        )
+        let rejected = ModemCredentials.web(WebCredentials(password: "wrong-fixture-password"))
+
+        for endpoint in [routed, direct] {
+            do {
+                _ = try await backend.fetchSnapshot(endpoint: endpoint, credentials: rejected)
+                XCTFail("Wrong password must fail on every path")
+            } catch let error as ZTEUBusError {
+                XCTAssertEqual(error, .authenticationFailed)
+            }
+        }
+        XCTAssertEqual(await http.requestCount(), 2, "A second endpoint must not retry rejected credentials")
+
+        let snapshot = try await backend.fetchSnapshot(
+            endpoint: routed,
+            credentials: .web(WebCredentials(password: "changed-fixture-password"))
+        )
+        XCTAssertEqual(snapshot.lteBand, "B12")
+        let records = await http.records()
+        XCTAssertEqual(records.count, 5)
+        XCTAssertTrue(records.allSatisfy { $0.route.interfaceName == "en1" || $0.route.interfaceName == nil })
+        XCTAssertTrue(records.allSatisfy { $0.route.sourceAddress == nil })
+        XCTAssertEqual(records.last?.route.interfaceIndex, 11)
+    }
+
+    func testZTEConcurrentExpiredReadsReuseSingleReplacementSID() async throws {
+        let http = TestRacingExpiryZTEHTTPTransport()
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                http: http
+            ),
+            password: "fixture-password"
+        )
+
+        async let first = session.read(object: "zte_nwinfo_api", method: "nwinfo_get_netinfo")
+        async let second = session.read(object: "zte_nwinfo_api", method: "nwinfo_get_netinfo")
+        let payloads = try await [first, second]
+
+        XCTAssertEqual(payloads.map { $0["network_type"]?.stringValue }, ["ENDC", "ENDC"])
+        let history = await http.history()
+        XCTAssertEqual(history.loginCount, 2, "Only the initial and one replacement login are allowed")
+        XCTAssertEqual(history.netinfoSessions.filter { $0 == "sid-two" }.count, 2)
+        XCTAssertFalse(history.netinfoSessions.contains("sid-three"))
+    }
+
+    func testCoordinatorCredentialPolicySelectionAndActiveReuse() async throws {
+        let zte = TestMockModemBackend(kind: .zteMC7530CA)
+        let vos = TestMockModemBackend(kind: .vos5G)
+        let coordinator = ModemCoordinator(
+            registry: try testRegistry(zte: zte, vos: vos),
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: NetworkTopologySnapshot(interfaces: [
+                discoveryInterface(
+                    name: "en8", index: 18, address: "192.168.254.20",
+                    prefixLength: 24, router: "192.168.254.1"
+                )
+            ])),
+            probeTimeoutNanoseconds: 100_000_000
+        )
+        let web = ModemCredentials.web(WebCredentials(username: "admin", password: "fixture-web-password"))
+        let credentials = ModemConnectionCredentials([.zteMC7530CA: web])
+
+        let first = try await coordinator.read(
+            preferences: ModemConnectionPreferences(selection: .zteMC7530CA),
+            credentials: credentials
+        )
+        let second = try await coordinator.read(
+            preferences: ModemConnectionPreferences(selection: .zteMC7530CA),
+            credentials: credentials
+        )
+
+        XCTAssertFalse(first.reusedActiveEndpoint)
+        XCTAssertTrue(second.reusedActiveEndpoint)
+        let zteHistory = await zte.history()
+        XCTAssertEqual(zteHistory.identifyCredentials, [.none])
+        XCTAssertEqual(zteHistory.fetchCredentials, [web, web])
+        let vosHistory = await vos.history()
+        XCTAssertTrue(vosHistory.identifyCredentials.isEmpty)
+        XCTAssertTrue(vosHistory.fetchCredentials.isEmpty)
+
+        let preferences = ModemConnectionPreferences(
+            selection: .zteMC7530CA,
+            lastSuccessfulScopeKey: first.lastSuccessfulScopeKey,
+            lastSuccessfulEndpoint: first.lastSuccessfulEndpoint
+        )
+        let encoded = try JSONEncoder().encode(preferences)
+        XCTAssertEqual(try JSONDecoder().decode(ModemConnectionPreferences.self, from: encoded), preferences)
+        XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("fixture-web-password"))
+    }
+
+    func testCoordinatorFailedActiveReadRediscoverAndVOSUsesSSH() async throws {
+        let zte = TestMockModemBackend(kind: .zteMC7530CA, fetchFailures: [false, true, false])
+        let zteCoordinator = ModemCoordinator(
+            registry: try testRegistry(zte: zte),
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: NetworkTopologySnapshot(interfaces: [
+                discoveryInterface(
+                    name: "en8", index: 18, address: "192.168.254.20",
+                    prefixLength: 24, router: "192.168.254.1"
+                )
+            ])),
+            probeTimeoutNanoseconds: 100_000_000
+        )
+        let webCredentials = ModemConnectionCredentials([
+            .zteMC7530CA: .web(WebCredentials(password: "fixture-web-password"))
+        ])
+        _ = try await zteCoordinator.read(
+            preferences: ModemConnectionPreferences(selection: .zteMC7530CA),
+            credentials: webCredentials
+        )
+        let recovered = try await zteCoordinator.read(
+            preferences: ModemConnectionPreferences(selection: .zteMC7530CA),
+            credentials: webCredentials
+        )
+        XCTAssertFalse(recovered.reusedActiveEndpoint)
+        XCTAssertEqual(await zte.history().identifyCredentials.count, 2)
+        XCTAssertEqual(await zte.history().fetchCredentials.count, 3)
+
+        let vos = TestMockModemBackend(kind: .vos5G)
+        let vosCoordinator = ModemCoordinator(
+            registry: try testRegistry(vos: vos),
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: NetworkTopologySnapshot(interfaces: [
+                discoveryInterface(
+                    name: "en9", index: 19, address: "192.168.225.20",
+                    prefixLength: 24, router: "192.168.225.1"
+                )
+            ])),
+            probeTimeoutNanoseconds: 100_000_000
+        )
+        let ssh = ModemCredentials.ssh(SSHCredentials(username: "fixture", password: "fixture-ssh-password"))
+        _ = try await vosCoordinator.read(
+            preferences: ModemConnectionPreferences(selection: .vos5G),
+            credentials: ModemConnectionCredentials([.vos5G: ssh])
+        )
+        let vosHistory = await vos.history()
+        XCTAssertEqual(vosHistory.identifyCredentials, [ssh])
+        XCTAssertEqual(vosHistory.fetchCredentials, [ssh])
+    }
+
     func testLTEBandChannelAndBandwidth() throws {
         let radios = try QMIParser.activeRadios(from: data(lteBand))
         XCTAssertEqual(radios, [QMIRadioReading(kind: .lte, band: "B2", channel: 900, bandwidthMHz: 20)])
@@ -1074,6 +1665,70 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertNil(DeviceConfiguration(host: "example.com", username: "root", password: "x", refreshInterval: 5).sshHost)
     }
 
+    private func mc7530Fixture(_ name: String) throws -> Data {
+        let directory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/MC7530CA", isDirectory: true)
+        return try Data(contentsOf: directory.appendingPathComponent(name))
+    }
+
+    private func testRegistry(
+        zte: TestMockModemBackend? = nil,
+        vos: TestMockModemBackend? = nil
+    ) throws -> ModemBackendRegistry {
+        var registrations: [ModemBackendRegistration] = []
+        if let zte {
+            registrations.append(ModemBackendRegistration(
+                backend: zte,
+                discoveryProfile: ModemDiscoveryProfile(
+                    kind: .zteMC7530CA,
+                    defaultBaseURLs: [URL(string: "http://192.168.254.1")!]
+                ),
+                identificationCredentials: .anonymous,
+                statusCredentials: .configured(.web)
+            ))
+        }
+        if let vos {
+            registrations.append(ModemBackendRegistration(
+                backend: vos,
+                discoveryProfile: ModemDiscoveryProfile(
+                    kind: .vos5G,
+                    defaultBaseURLs: [URL(string: "http://192.168.225.1")!]
+                ),
+                identificationCredentials: .configured(.ssh),
+                statusCredentials: .configured(.ssh)
+            ))
+        }
+        return try ModemBackendRegistry(registrations: registrations)
+    }
+
+    private func discoveryInterface(
+        name: String,
+        index: UInt32,
+        address: String,
+        prefixLength: UInt8,
+        router: String?,
+        isPrimary: Bool = false,
+        kind: NetworkInterfaceKind = .physical,
+        isUp: Bool = true,
+        isRunning: Bool = true
+    ) -> NetworkInterfaceSnapshot {
+        NetworkInterfaceSnapshot(
+            name: name,
+            index: index,
+            serviceID: "fixture-\(name)",
+            kind: kind,
+            isUp: isUp,
+            isRunning: isRunning,
+            isPrimary: isPrimary,
+            addresses: [IPv4InterfaceAddress(
+                address: IPv4HostAddress(string: address)!,
+                prefixLength: prefixLength
+            )],
+            router: router.flatMap(IPv4HostAddress.init(string:))
+        )
+    }
+
     private func data(_ hex: String) -> Data { try! QMIParser.data(fromHex: hex) }
 
     private func le16(_ value: UInt16) -> Data {
@@ -1146,5 +1801,207 @@ final class SignalStatusTests: XCTestCase {
         result.append(le16(UInt16(value.count)))
         result.append(value)
         return result
+    }
+}
+
+private struct FixedNetworkTopologyProvider: NetworkTopologyProviding {
+    let storedSnapshot: NetworkTopologySnapshot
+
+    init(snapshot: NetworkTopologySnapshot) {
+        storedSnapshot = snapshot
+    }
+
+    func snapshot() -> NetworkTopologySnapshot { storedSnapshot }
+}
+
+private func modemIdentity(for kind: ModemKind) -> ModemIdentity {
+    ModemIdentity(
+        kind: kind,
+        manufacturer: "fixture",
+        model: "fixture-\(kind.rawValue)"
+    )
+}
+
+private enum TestSupportError: Error {
+    case missingResponse
+    case plannedSnapshotFailure
+}
+
+private func testZTEResponse(_ json: String) -> ZTEHTTPResponse {
+    ZTEHTTPResponse(statusCode: 200, headers: [:], body: Data(json.utf8))
+}
+
+private func testZTECallResponse(_ payloadObjectJSON: String) -> ZTEHTTPResponse {
+    testZTEResponse("[{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":[0,\(payloadObjectJSON)]}]")
+}
+
+private func testZTEStatusResponse(_ status: Int) -> ZTEHTTPResponse {
+    testZTEResponse("[{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":[\(status)]}]")
+}
+
+private struct TestZTERequestRecord: Sendable {
+    let headers: [String: String]
+    let bodyText: String
+    let route: ZTEHTTPRoute
+    let rpcMethod: String?
+    let sessionID: String?
+    let ubusMethod: String?
+    let loginUsername: String?
+    let loginPassword: String?
+
+    func header(_ name: String) -> String? {
+        headers.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
+    }
+}
+
+private actor TestScriptedZTEHTTPTransport: ZTEHTTPTransport {
+    private let responses: [ZTEHTTPResponse]
+    private var nextResponse = 0
+    private var requestRecords: [TestZTERequestRecord] = []
+
+    init(responses: [ZTEHTTPResponse]) {
+        self.responses = responses
+    }
+
+    func send(_ request: URLRequest, route: ZTEHTTPRoute) async throws -> ZTEHTTPResponse {
+        requestRecords.append(Self.record(request, route: route))
+        guard nextResponse < responses.count else { throw TestSupportError.missingResponse }
+        defer { nextResponse += 1 }
+        return responses[nextResponse]
+    }
+
+    func records() -> [TestZTERequestRecord] { requestRecords }
+    func requestCount() -> Int { requestRecords.count }
+
+    private static func record(_ request: URLRequest, route: ZTEHTTPRoute) -> TestZTERequestRecord {
+        let body = request.httpBody ?? Data()
+        let batch = (try? JSONSerialization.jsonObject(with: body)) as? [[String: Any]]
+        let rpc = batch?.first
+        let params = rpc?["params"] as? [Any]
+        let callParameters = params.flatMap { $0.count > 3 ? $0[3] as? [String: Any] : nil }
+        return TestZTERequestRecord(
+            headers: request.allHTTPHeaderFields ?? [:],
+            bodyText: String(decoding: body, as: UTF8.self),
+            route: route,
+            rpcMethod: rpc?["method"] as? String,
+            sessionID: params?.first as? String,
+            ubusMethod: params.flatMap { $0.count > 2 ? $0[2] as? String : nil },
+            loginUsername: callParameters?["username"] as? String,
+            loginPassword: callParameters?["password"] as? String
+        )
+    }
+}
+
+private struct TestRacingExpiryHistory: Sendable {
+    let loginCount: Int
+    let netinfoSessions: [String]
+}
+
+/// Releases two stale-SID reads in an order that reproduces the race where a
+/// late permission-denied response arrives after another read installed sid-two.
+private actor TestRacingExpiryZTEHTTPTransport: ZTEHTTPTransport {
+    private var loginCount = 0
+    private var oldReadCount = 0
+    private var netinfoSessions: [String] = []
+    private var firstOldRead: CheckedContinuation<ZTEHTTPResponse, Never>?
+    private var secondOldRead: CheckedContinuation<ZTEHTTPResponse, Never>?
+
+    func send(_ request: URLRequest, route: ZTEHTTPRoute) async throws -> ZTEHTTPResponse {
+        _ = route
+        guard let body = request.httpBody,
+              let batch = try JSONSerialization.jsonObject(with: body) as? [[String: Any]],
+              let rpc = batch.first,
+              let params = rpc["params"] as? [Any],
+              params.count > 2,
+              let sessionID = params[0] as? String,
+              let method = params[2] as? String
+        else { throw TestSupportError.missingResponse }
+
+        switch method {
+        case "web_login_info":
+            return testZTECallResponse(#"{"zte_web_sault":"race-salt"}"#)
+        case "web_login":
+            loginCount += 1
+            let sid: String
+            switch loginCount {
+            case 1: sid = "sid-one"
+            case 2: sid = "sid-two"
+            default: sid = "sid-three"
+            }
+            return testZTECallResponse("{\"result\":\"0\",\"ubus_rpc_session\":\"\(sid)\"}")
+        case "nwinfo_get_netinfo":
+            netinfoSessions.append(sessionID)
+            if sessionID == "sid-one" {
+                oldReadCount += 1
+                if oldReadCount == 1 {
+                    return await withCheckedContinuation { firstOldRead = $0 }
+                }
+                return await withCheckedContinuation { continuation in
+                    secondOldRead = continuation
+                    let first = firstOldRead
+                    firstOldRead = nil
+                    first?.resume(returning: testZTEStatusResponse(6))
+                }
+            }
+            if sessionID == "sid-two", let delayed = secondOldRead {
+                secondOldRead = nil
+                delayed.resume(returning: testZTEStatusResponse(6))
+            }
+            return testZTECallResponse(#"{"network_type":"ENDC"}"#)
+        default:
+            throw TestSupportError.missingResponse
+        }
+    }
+
+    func history() -> TestRacingExpiryHistory {
+        TestRacingExpiryHistory(
+            loginCount: loginCount,
+            netinfoSessions: netinfoSessions
+        )
+    }
+}
+
+private struct TestBackendHistory: Sendable {
+    let identifyCredentials: [ModemCredentials]
+    let fetchCredentials: [ModemCredentials]
+}
+
+private actor TestMockModemBackend: ModemStatusBackend {
+    nonisolated let kind: ModemKind
+    nonisolated let capabilities: ModemCapability = [.identityRead, .statusRead]
+
+    private let identity: ModemIdentity
+    private var fetchFailures: [Bool]
+    private var identifyCredentials: [ModemCredentials] = []
+    private var fetchCredentials: [ModemCredentials] = []
+
+    init(kind: ModemKind, fetchFailures: [Bool] = []) {
+        self.kind = kind
+        self.fetchFailures = fetchFailures
+        self.identity = modemIdentity(for: kind)
+    }
+
+    func identify(endpoint: ScopedEndpoint, credentials: ModemCredentials) async throws -> ModemIdentity? {
+        _ = endpoint
+        identifyCredentials.append(credentials)
+        return identity
+    }
+
+    func fetchSnapshot(endpoint: ScopedEndpoint, credentials: ModemCredentials) async throws -> DeviceSnapshot {
+        fetchCredentials.append(credentials)
+        if !fetchFailures.isEmpty, fetchFailures.removeFirst() {
+            throw TestSupportError.plannedSnapshotFailure
+        }
+        var snapshot = DeviceSnapshot.empty
+        snapshot.host = endpoint.host ?? "fixture"
+        snapshot.interfaceName = endpoint.interfaceName
+        return snapshot
+    }
+
+    func history() -> TestBackendHistory {
+        TestBackendHistory(
+            identifyCredentials: identifyCredentials,
+            fetchCredentials: fetchCredentials
+        )
     }
 }

@@ -52,7 +52,8 @@ actor VOSClient {
 
     func fetchSnapshot(configuration: DeviceConfiguration) async throws -> DeviceSnapshot {
         guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
-        let sourceAddress = host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil
+        let sourceAddress = configuration.sourceAddress
+            ?? (host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil)
         let output = try await executor.run(
             host: host,
             username: configuration.username,
@@ -63,7 +64,7 @@ actor VOSClient {
         let probe = try VOSProbeOutput.parse(output)
         var snapshot = try Self.makeSnapshot(
             host: host,
-            interfaceName: LocalInterface.vosInterfaceName(),
+            interfaceName: configuration.interfaceName ?? LocalInterface.vosInterfaceName(),
             probe: probe
         )
         if snapshot.operatorName == nil,
@@ -94,7 +95,8 @@ actor VOSClient {
 
     func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String {
         guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
-        let sourceAddress = host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil
+        let sourceAddress = configuration.sourceAddress
+            ?? (host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil)
         let output = try await executor.run(
             host: host,
             username: configuration.username,
@@ -244,7 +246,8 @@ actor VOSClient {
         timeout: TimeInterval
     ) async throws -> String {
         guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
-        let sourceAddress = host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil
+        let sourceAddress = configuration.sourceAddress
+            ?? (host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil)
         let output = try await executor.run(
             host: host,
             username: configuration.username,
@@ -266,7 +269,8 @@ actor VOSClient {
         timeout: TimeInterval
     ) async throws -> Data {
         guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
-        let sourceAddress = host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil
+        let sourceAddress = configuration.sourceAddress
+            ?? (host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil)
         let output = try await executor.run(
             host: host,
             username: configuration.username,
@@ -1152,7 +1156,7 @@ enum LocalInterface {
                 NI_NUMERICHOST
             )
             guard result == 0 else { continue }
-            let ip = String(cString: host)
+            let ip = decodeCString(host)
             guard ip.hasPrefix("192.168.225."), ip != "192.168.225.1" else { continue }
             let flags = interface.pointee.ifa_flags
             let isActive = flags & UInt32(IFF_UP) != 0 && flags & UInt32(IFF_RUNNING) != 0
@@ -1199,6 +1203,11 @@ enum LocalInterface {
         var text = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
         var address = local.sin_addr
         guard inet_ntop(AF_INET, &address, &text, socklen_t(text.count)) != nil else { return nil }
-        return String(cString: text)
+        return decodeCString(text)
+    }
+
+    private static func decodeCString(_ value: [CChar]) -> String {
+        let bytes = value.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 }
