@@ -156,7 +156,7 @@ struct ModemBackendRegistration: Sendable {
     var kind: ModemKind { backend.kind }
 }
 
-enum ModemCoordinatorError: LocalizedError, Equatable, Sendable {
+enum ModemCoordinatorError: LocalizedError, Equatable, Sendable, ModemFailureCategorizing {
     case duplicateBackend(ModemKind)
     case mismatchedDiscoveryProfile(backend: ModemKind, profile: ModemKind)
     case missingDiscoveryProfile(ModemKind)
@@ -165,6 +165,8 @@ enum ModemCoordinatorError: LocalizedError, Equatable, Sendable {
     case discoveredKindMismatch(expected: ModemKind, actual: ModemKind)
     case candidateIdentificationFailed([String])
     case allMatchedModemsFailed([String])
+    case authenticationFailed(kind: ModemKind?, messages: [String])
+    case qmiUnavailable(kind: ModemKind?, messages: [String])
 
     var errorDescription: String? {
         switch self {
@@ -190,8 +192,37 @@ enum ModemCoordinatorError: LocalizedError, Equatable, Sendable {
             return detail.isEmpty
                 ? "Supported modems were found, but none returned a status snapshot."
                 : "Supported modems were found, but status collection failed: \(detail)"
+        case let .authenticationFailed(kind, messages):
+            let subject = kind?.displayName ?? "The modem"
+            let detail = messages.filter { !$0.isEmpty }.joined(separator: "; ")
+            return detail.isEmpty
+                ? "\(subject) authentication failed."
+                : "\(subject) authentication failed: \(detail)"
+        case let .qmiUnavailable(kind, messages):
+            let subject = kind?.displayName ?? "The modem"
+            let detail = messages.filter { !$0.isEmpty }.joined(separator: "; ")
+            return detail.isEmpty
+                ? "\(subject) QMI is unavailable."
+                : "\(subject) QMI is unavailable: \(detail)"
         }
     }
+
+    var modemFailureCategory: ModemFailureCategory {
+        switch self {
+        case .authenticationFailed:
+            return .authentication
+        case .qmiUnavailable:
+            return .qmiUnavailable
+        default:
+            return .other
+        }
+    }
+}
+
+private struct CoordinatedModemFailure: Equatable, Hashable, Sendable {
+    let kind: ModemKind
+    let category: ModemFailureCategory
+    let message: String
 }
 
 struct ModemBackendRegistry: Sendable {
@@ -372,6 +403,7 @@ actor ModemCoordinator {
         preferences: ModemConnectionPreferences,
         credentials: ModemConnectionCredentials
     ) async throws -> ModemReadResult {
+        var priorStructuredFailure: CoordinatedModemFailure?
         let allowedKinds = preferences.selection.allowedKinds(
             registeredKinds: registry.registeredKinds
         )
@@ -413,6 +445,14 @@ actor ModemCoordinator {
                 // Re-snapshot topology and identify candidates after any failed
                 // read. The old endpoint is not trusted again unless discovery
                 // positively identifies it in the new topology.
+                let category = ModemFailureClassifier.category(of: error)
+                if category != .other {
+                    priorStructuredFailure = CoordinatedModemFailure(
+                        kind: current.identity.kind,
+                        category: category,
+                        message: error.localizedDescription
+                    )
+                }
                 activeModem = nil
             }
         } else if activeModem != nil {
@@ -434,17 +474,25 @@ actor ModemCoordinator {
             preferredScopeKey: preferences.lastSuccessfulScopeKey
         )
         guard !matches.isEmpty else {
-            let failures = relevantIdentificationFailures(
+            var failures = relevantIdentificationFailures(
                 in: report,
                 includeAll: preferences.selection.selectedKind != nil
             )
+            if let priorStructuredFailure {
+                failures.append(priorStructuredFailure)
+            }
+            if let structuredError = structuredCoordinatorError(for: failures) {
+                throw structuredError
+            }
             if !failures.isEmpty {
-                throw ModemCoordinatorError.candidateIdentificationFailed(failures)
+                throw ModemCoordinatorError.candidateIdentificationFailed(
+                    deduplicatedMessages(from: failures)
+                )
             }
             throw ModemCoordinatorError.noMatchingModem
         }
 
-        var failures: [String] = []
+        var failures = priorStructuredFailure.map { [$0] } ?? []
         for match in matches {
             do {
                 let active = try makeActiveModem(from: match)
@@ -462,10 +510,19 @@ actor ModemCoordinator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                failures.append(error.localizedDescription)
+                failures.append(CoordinatedModemFailure(
+                    kind: match.candidate.kind,
+                    category: ModemFailureClassifier.category(of: error),
+                    message: error.localizedDescription
+                ))
             }
         }
-        throw ModemCoordinatorError.allMatchedModemsFailed(failures)
+        if let structuredError = structuredCoordinatorError(for: failures) {
+            throw structuredError
+        }
+        throw ModemCoordinatorError.allMatchedModemsFailed(
+            deduplicatedMessages(from: failures)
+        )
     }
 
     private func fetchSnapshot(
@@ -528,23 +585,61 @@ actor ModemCoordinator {
     private func relevantIdentificationFailures(
         in report: ModemDiscoveryReport,
         includeAll: Bool
-    ) -> [String] {
+    ) -> [CoordinatedModemFailure] {
         let strongEvidence: Set<ModemDiscoveryCandidateSource> = [
             .matchingSubnet,
             .matchingGateway,
             .manual,
             .lastSuccessful
         ]
-        var seen: Set<String> = []
-        var messages: [String] = []
+        var seen: Set<CoordinatedModemFailure> = []
+        var failures: [CoordinatedModemFailure] = []
         for attempt in report.attempts {
-            guard case let .failed(message) = attempt.result,
+            guard case let .failed(message, category) = attempt.result,
                   includeAll || !attempt.candidate.sources.isDisjoint(with: strongEvidence),
-                  !message.isEmpty,
-                  seen.insert(message).inserted
+                  !message.isEmpty
             else { continue }
-            messages.append(message)
+            let failure = CoordinatedModemFailure(
+                kind: attempt.candidate.kind,
+                category: category,
+                message: message
+            )
+            guard seen.insert(failure).inserted else { continue }
+            failures.append(failure)
         }
-        return messages
+        return failures
+    }
+
+    private func structuredCoordinatorError(
+        for failures: [CoordinatedModemFailure]
+    ) -> ModemCoordinatorError? {
+        for category in [ModemFailureCategory.authentication, .qmiUnavailable] {
+            let matching = failures.filter { $0.category == category }
+            guard !matching.isEmpty else { continue }
+            let kinds = Set(matching.map(\.kind))
+            let kind = kinds.count == 1 ? kinds.first : nil
+            let messages = deduplicatedMessages(from: matching)
+            switch category {
+            case .authentication:
+                return .authenticationFailed(kind: kind, messages: messages)
+            case .qmiUnavailable:
+                return .qmiUnavailable(kind: kind, messages: messages)
+            case .other:
+                break
+            }
+        }
+        return nil
+    }
+
+    private func deduplicatedMessages(
+        from failures: [CoordinatedModemFailure]
+    ) -> [String] {
+        var seen: Set<String> = []
+        return failures.compactMap { failure in
+            guard !failure.message.isEmpty,
+                  seen.insert(failure.message).inserted
+            else { return nil }
+            return failure.message
+        }
     }
 }

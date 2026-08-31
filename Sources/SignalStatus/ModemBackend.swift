@@ -136,6 +136,25 @@ enum ModemCredentialKind: String, Hashable, Sendable {
     case web
 }
 
+/// Transport-neutral failure categories that must survive discovery and
+/// coordinator wrapping. UI state decisions use these structured values rather
+/// than parsing localized error text.
+enum ModemFailureCategory: String, Equatable, Hashable, Sendable {
+    case authentication
+    case qmiUnavailable
+    case other
+}
+
+protocol ModemFailureCategorizing {
+    var modemFailureCategory: ModemFailureCategory { get }
+}
+
+enum ModemFailureClassifier {
+    static func category(of error: Error) -> ModemFailureCategory {
+        (error as? any ModemFailureCategorizing)?.modemFailureCategory ?? .other
+    }
+}
+
 struct SSHCredentials: Equatable, Sendable {
     let username: String
     let password: String
@@ -165,7 +184,7 @@ enum ModemCredentials: Equatable, Sendable {
     }
 }
 
-enum ModemBackendError: LocalizedError, Equatable, Sendable {
+enum ModemBackendError: LocalizedError, Equatable, Sendable, ModemFailureCategorizing {
     case invalidEndpoint
     case credentialsRequired(ModemCredentialKind)
     case incompatibleCredentials(expected: ModemCredentialKind, actual: ModemCredentialKind)
@@ -184,6 +203,15 @@ enum ModemBackendError: LocalizedError, Equatable, Sendable {
             return "The endpoint did not provide a verifiable modem identity."
         case .unsupportedCapability:
             return "This modem backend does not support the requested operation."
+        }
+    }
+
+    var modemFailureCategory: ModemFailureCategory {
+        switch self {
+        case .credentialsRequired, .incompatibleCredentials:
+            return .authentication
+        case .invalidEndpoint, .identityUnavailable, .unsupportedCapability:
+            return .other
         }
     }
 }

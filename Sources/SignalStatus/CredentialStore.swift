@@ -26,6 +26,44 @@ struct CredentialUpdate: Equatable, Sendable {
     let password: String
 }
 
+/// Records whether the value shown in Settings came from a successful
+/// Keychain read. An unavailable value is not equivalent to an empty value:
+/// overwriting it with an empty field could delete a credential that still
+/// exists in Keychain.
+enum CredentialLoadState: Equatable, Sendable {
+    case loaded(String)
+    case unavailable(String)
+}
+
+struct CredentialLoadResult: Equatable, Sendable {
+    let password: String
+    let state: CredentialLoadState
+}
+
+struct CredentialEdit: Equatable, Sendable {
+    let account: String
+    let password: String
+    let loadState: CredentialLoadState
+}
+
+enum CredentialSavePlanner {
+    /// Emits only explicit edits. After a successful read, changing a value to
+    /// empty is an intentional delete. After a failed read, an unchanged empty
+    /// field is unknown and must be preserved; only a non-empty replacement is
+    /// safe to write.
+    static func updates(for edits: [CredentialEdit]) -> [CredentialUpdate] {
+        edits.compactMap { edit in
+            switch edit.loadState {
+            case let .loaded(original):
+                guard edit.password != original else { return nil }
+            case .unavailable:
+                guard !edit.password.isEmpty else { return nil }
+            }
+            return CredentialUpdate(account: edit.account, password: edit.password)
+        }
+    }
+}
+
 enum CredentialTransactionError: LocalizedError {
     case rollbackFailed(writeError: String, rollbackErrors: [String])
 

@@ -369,7 +369,7 @@ enum ModemDiscoveryProbeResult: Equatable, Sendable {
     case matched(ModemIdentity)
     case notMatched
     case timedOut
-    case failed(String)
+    case failed(String, category: ModemFailureCategory)
 }
 
 struct ModemDiscoveryAttempt: Equatable, Sendable {
@@ -550,7 +550,10 @@ struct ModemDiscoveryEngine: Sendable {
                     } catch is CancellationError {
                         result = .timedOut
                     } catch {
-                        result = .failed(String(describing: error))
+                        result = .failed(
+                            String(describing: error),
+                            category: ModemFailureClassifier.category(of: error)
+                        )
                     }
                     race.resolve(result)
                 }

@@ -816,6 +816,7 @@ enum DirectTests {
     private static func modernModemFailures() async -> [String] {
         var failures: [String] = []
         await runCredentialTests(failures: &failures)
+        runFailureClassificationTests(failures: &failures)
         runMC7530ParserTests(failures: &failures)
         await runZTEAuthTests(failures: &failures)
         await runDiscoveryTests(failures: &failures)
@@ -825,6 +826,51 @@ enum DirectTests {
 
     @MainActor
     private static func runCredentialTests(failures: inout [String]) {
+        let plannedUpdates = CredentialSavePlanner.updates(for: [
+            CredentialEdit(account: "unchanged", password: "same", loadState: .loaded("same")),
+            CredentialEdit(account: "clear", password: "", loadState: .loaded("old")),
+            CredentialEdit(account: "unreadable", password: "", loadState: .unavailable("denied")),
+            CredentialEdit(account: "replacement", password: "new-secret", loadState: .unavailable("denied"))
+        ])
+        check(
+            plannedUpdates == [
+                CredentialUpdate(account: "clear", password: ""),
+                CredentialUpdate(account: "replacement", password: "new-secret")
+            ],
+            "credential planner distinguishes explicit edits from unreadable empty fields",
+            failures: &failures
+        )
+
+        do {
+            let store = DirectCredentialStore(values: [
+                "unreadable": "must-survive",
+                "editable": "old-value"
+            ])
+            let updates = CredentialSavePlanner.updates(for: [
+                CredentialEdit(
+                    account: "unreadable",
+                    password: "",
+                    loadState: .unavailable("transient denial")
+                ),
+                CredentialEdit(
+                    account: "editable",
+                    password: "new-value",
+                    loadState: .loaded("old-value")
+                )
+            ])
+            try CredentialTransaction.apply(updates, store: store)
+            check(
+                store.snapshot() == [
+                    "unreadable": "must-survive",
+                    "editable": "new-value"
+                ],
+                "saving another setting preserves an unreadable Keychain credential",
+                failures: &failures
+            )
+        } catch {
+            failures.append("preserve unreadable Keychain credential: \(error)")
+        }
+
         do {
             let store = DirectCredentialStore(
                 values: ["vos": "old-vos", "zte": "old-zte"],
@@ -892,12 +938,76 @@ enum DirectTests {
                   "Keychain read failure preserves legacy preference", failures: &failures)
         }
 
+        let migrationSuiteName = "CellularModemMonitor.DirectTests.Migration.\(UUID().uuidString)"
+        if let defaults = UserDefaults(suiteName: migrationSuiteName) {
+            defer { defaults.removePersistentDomain(forName: migrationSuiteName) }
+            defaults.set("legacy-must-remain", forKey: "sshPassword")
+            let store = DirectCredentialStore(
+                values: [:],
+                failingSetAccount: "vos-5g-ssh",
+                failingSetPasswordPrefix: "legacy-"
+            )
+            do {
+                let result = try StatusModel.loadVOSCredential(
+                    defaults: defaults,
+                    credentialStore: store
+                )
+                check(result.password == "legacy-must-remain",
+                      "failed legacy migration keeps the usable in-memory password", failures: &failures)
+                guard case .unavailable = result.state else {
+                    failures.append("failed legacy migration remains marked unavailable")
+                    return
+                }
+                check(defaults.string(forKey: "sshPassword") == "legacy-must-remain",
+                      "failed legacy migration keeps the only durable password copy", failures: &failures)
+                check(
+                    CredentialSavePlanner.updates(for: [CredentialEdit(
+                        account: "vos-5g-ssh",
+                        password: result.password,
+                        loadState: result.state
+                    )]) == [CredentialUpdate(account: "vos-5g-ssh", password: "legacy-must-remain")],
+                    "Save retries a failed legacy Keychain migration before cleanup",
+                    failures: &failures
+                )
+            } catch {
+                failures.append("failed legacy migration state: \(error)")
+            }
+        }
+
         check(StatusModel.isBuiltInDefault(kind: .vos5G, address: "http://192.168.225.1/"),
               "VOS default address is not promoted to a manual hint", failures: &failures)
         check(StatusModel.isBuiltInDefault(kind: .zteMC7530CA, address: "192.168.254.1"),
               "ZTE default address is not promoted to a manual hint", failures: &failures)
         check(!StatusModel.isBuiltInDefault(kind: .zteMC7530CA, address: "192.168.254.99"),
               "changed ZTE address remains a manual hint", failures: &failures)
+    }
+
+    private static func runFailureClassificationTests(failures: inout [String]) {
+        check(
+            ModemFailureClassifier.category(of: VOSClientError.authenticationFailed) == .authentication,
+            "VOS authentication errors use structured classification",
+            failures: &failures
+        )
+        check(
+            ModemFailureClassifier.category(of: ZTEUBusError.authenticationFailed) == .authentication,
+            "ZTE authentication errors use structured classification",
+            failures: &failures
+        )
+        check(
+            ModemFailureClassifier.category(of: ModemBackendError.credentialsRequired(.web)) == .authentication,
+            "backend credential errors use structured classification",
+            failures: &failures
+        )
+        check(
+            ModemFailureClassifier.category(of: VOSClientError.qmiUnavailable(nil)) == .qmiUnavailable,
+            "VOS QMI errors use structured classification",
+            failures: &failures
+        )
+        check(
+            ModemFailureClassifier.category(of: DirectMisleadingAuthenticationError()) == .other,
+            "authentication-like English text does not alter structured classification",
+            failures: &failures
+        )
     }
 
     private static func runMC7530ParserTests(failures: inout [String]) {
@@ -1478,7 +1588,10 @@ enum DirectTests {
                 topology: .empty,
                 attempts: [ModemDiscoveryAttempt(
                     candidate: candidate,
-                    result: .failed(VOSClientError.authenticationFailed.localizedDescription)
+                    result: .failed(
+                        VOSClientError.authenticationFailed.localizedDescription,
+                        category: .authentication
+                    )
                 )]
             )
             let coordinator = ModemCoordinator(registry: try directRegistry(vos: vos)) { _, _, _ in report }
@@ -1494,15 +1607,63 @@ enum DirectTests {
                 )
                 failures.append("coordinator must surface likely-endpoint authentication failure")
             } catch let error as ModemCoordinatorError {
-                guard case let .candidateIdentificationFailed(messages) = error else {
+                guard case let .authenticationFailed(kind, messages) = error else {
                     failures.append("coordinator identification failure type: \(error)")
                     return
                 }
-                check(messages.count == 1 && messages[0].contains("password was rejected"),
+                check(kind == .vos5G && messages.count == 1 && messages[0].contains("password was rejected"),
                       "coordinator preserves discovery authentication reason", failures: &failures)
+                check(ModemFailureClassifier.category(of: error) == .authentication,
+                      "coordinator preserves discovery authentication category", failures: &failures)
             }
         } catch {
             failures.append("coordinator discovery failure classification setup: \(error)")
+        }
+
+        do {
+            let zte = DirectMockModemBackend(
+                kind: .zteMC7530CA,
+                typedFetchFailure: .zteAuthentication
+            )
+            let candidate = ModemDiscoveryCandidate(
+                kind: .zteMC7530CA,
+                endpoint: ScopedEndpoint(
+                    baseURL: URL(string: "http://192.168.254.1")!,
+                    interfaceName: "en8",
+                    interfaceIndex: 18,
+                    sourceAddress: "192.168.254.20"
+                ),
+                sources: [.matchingSubnet],
+                priority: ModemDiscoveryCandidateSource.matchingSubnet.rawValue
+            )
+            let report = ModemDiscoveryReport(
+                topology: .empty,
+                attempts: [ModemDiscoveryAttempt(
+                    candidate: candidate,
+                    result: .matched(directIdentity(.zteMC7530CA))
+                )]
+            )
+            let coordinator = ModemCoordinator(registry: try directRegistry(zte: zte)) { _, _, _ in report }
+            do {
+                _ = try await coordinator.read(
+                    preferences: ModemConnectionPreferences(selection: .zteMC7530CA),
+                    credentials: ModemConnectionCredentials([
+                        .zteMC7530CA: .web(WebCredentials(password: "rejected-fixture-password"))
+                    ])
+                )
+                failures.append("coordinator must preserve ZTE fetch authentication failure")
+            } catch let error as ModemCoordinatorError {
+                guard case let .authenticationFailed(kind, messages) = error else {
+                    failures.append("coordinator ZTE fetch failure type: \(error)")
+                    return
+                }
+                check(kind == .zteMC7530CA && !messages.isEmpty,
+                      "coordinator preserves ZTE fetch authentication context", failures: &failures)
+                check(ModemFailureClassifier.category(of: error) == .authentication,
+                      "coordinator preserves ZTE fetch authentication category", failures: &failures)
+            }
+        } catch {
+            failures.append("coordinator ZTE fetch classification setup: \(error)")
         }
 
         do {
@@ -1817,20 +1978,29 @@ private enum DirectTestSupportError: Error {
     case plannedCredentialFailure
 }
 
+private struct DirectMisleadingAuthenticationError: LocalizedError {
+    var errorDescription: String? {
+        "A password or credential was rejected and requires attention."
+    }
+}
+
 private final class DirectCredentialStore: CredentialStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: String]
     private let failingSetAccount: String?
+    private let failingSetPasswordPrefix: String
     private let failsReads: Bool
     private var numberOfSetCalls = 0
 
     init(
         values: [String: String],
         failingSetAccount: String? = nil,
+        failingSetPasswordPrefix: String = "new-",
         failsReads: Bool = false
     ) {
         self.values = values
         self.failingSetAccount = failingSetAccount
+        self.failingSetPasswordPrefix = failingSetPasswordPrefix
         self.failsReads = failsReads
     }
 
@@ -1845,7 +2015,7 @@ private final class DirectCredentialStore: CredentialStoring, @unchecked Sendabl
         lock.lock()
         defer { lock.unlock() }
         numberOfSetCalls += 1
-        if account == failingSetAccount, password.hasPrefix("new-") {
+        if account == failingSetAccount, password.hasPrefix(failingSetPasswordPrefix) {
             throw DirectTestSupportError.plannedCredentialFailure
         }
         if password.isEmpty {
@@ -1943,20 +2113,30 @@ private struct DirectBackendHistory: Sendable {
     let fetchScopeKeys: [String]
 }
 
+private enum DirectMockTypedFetchFailure: Sendable {
+    case zteAuthentication
+}
+
 private actor DirectMockModemBackend: ModemStatusBackend {
     nonisolated let kind: ModemKind
     nonisolated let capabilities: ModemCapability = [.identityRead, .statusRead]
 
     private let identity: ModemIdentity
     private var fetchFailures: [Bool]
+    private let typedFetchFailure: DirectMockTypedFetchFailure?
     private var identifyCredentials: [ModemCredentials] = []
     private var fetchCredentials: [ModemCredentials] = []
     private var identifyScopeKeys: [String] = []
     private var fetchScopeKeys: [String] = []
 
-    init(kind: ModemKind, fetchFailures: [Bool] = []) {
+    init(
+        kind: ModemKind,
+        fetchFailures: [Bool] = [],
+        typedFetchFailure: DirectMockTypedFetchFailure? = nil
+    ) {
         self.kind = kind
         self.fetchFailures = fetchFailures
+        self.typedFetchFailure = typedFetchFailure
         self.identity = directIdentity(kind)
     }
 
@@ -1975,6 +2155,12 @@ private actor DirectMockModemBackend: ModemStatusBackend {
     ) async throws -> DeviceSnapshot {
         fetchCredentials.append(credentials)
         fetchScopeKeys.append(endpoint.scopeKey)
+        if let typedFetchFailure {
+            switch typedFetchFailure {
+            case .zteAuthentication:
+                throw ZTEUBusError.authenticationFailed
+            }
+        }
         if !fetchFailures.isEmpty, fetchFailures.removeFirst() {
             throw DirectTestSupportError.plannedSnapshotFailure
         }

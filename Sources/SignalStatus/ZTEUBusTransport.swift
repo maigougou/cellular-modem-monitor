@@ -462,7 +462,7 @@ struct ZTEUBusCallResult: Equatable, Sendable {
     var object: [String: ZTEJSONValue]? { payload?.objectValue }
 }
 
-enum ZTEUBusError: LocalizedError, Equatable, Sendable {
+enum ZTEUBusError: LocalizedError, Equatable, Sendable, ModemFailureCategorizing {
     case invalidEndpoint
     case nonHTTPResponse
     case interfaceUnavailable
@@ -508,6 +508,10 @@ enum ZTEUBusError: LocalizedError, Equatable, Sendable {
     var isAccessDenied: Bool {
         if case let .rpc(code, _) = self { return code == -32_002 }
         return false
+    }
+
+    var modemFailureCategory: ModemFailureCategory {
+        self == .authenticationFailed ? .authentication : .other
     }
 }
 

@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-enum VOSClientError: LocalizedError, Equatable {
+enum VOSClientError: LocalizedError, Equatable, ModemFailureCategorizing {
     case invalidHost
     case unreachable
     case authenticationFailed
@@ -38,6 +38,17 @@ enum VOSClientError: LocalizedError, Equatable {
             return message
         case .invalidResponse:
             return "The modem SSH/QMI probe returned an unreadable response."
+        }
+    }
+
+    var modemFailureCategory: ModemFailureCategory {
+        switch self {
+        case .authenticationFailed:
+            return .authentication
+        case .qmiUnavailable:
+            return .qmiUnavailable
+        default:
+            return .other
         }
     }
 }

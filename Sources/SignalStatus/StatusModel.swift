@@ -50,6 +50,7 @@ final class StatusModel: ObservableObject {
     private var activeNRBandLock: Set<Int>?
     private var lastSuccessfulScopeKey: String?
     private var lastSuccessfulEndpoint: ModemEndpointPreference?
+    private var credentialLoadStates: [ModemKind: CredentialLoadState] = [:]
 
     private enum Key {
         static let host = "deviceHost"
@@ -102,23 +103,35 @@ final class StatusModel: ObservableObject {
         host = defaults.string(forKey: Key.host) ?? Self.defaultVOSHost
         username = defaults.string(forKey: Key.username) ?? "root"
         var credentialLoadErrors: [String] = []
+        var initialCredentialStates: [ModemKind: CredentialLoadState] = [:]
         do {
-            password = try Self.loadVOSPassword(
+            let result = try Self.loadVOSCredential(
                 defaults: defaults,
                 credentialStore: credentialStore
             )
+            password = result.password
+            initialCredentialStates[.vos5G] = result.state
+            if case let .unavailable(message) = result.state {
+                credentialLoadErrors.append(message)
+            }
         } catch {
             // A Keychain denial is not the same as a missing item. Do not fall
             // back to a different password and risk overwriting the stored one.
             password = ""
-            credentialLoadErrors.append(error.localizedDescription)
+            let message = error.localizedDescription
+            initialCredentialStates[.vos5G] = .unavailable(message)
+            credentialLoadErrors.append(message)
         }
         zteHost = defaults.string(forKey: Key.zteHost) ?? Self.defaultZTEHost
         do {
-            ztePassword = try credentialStore.password(for: Self.zteCredentialAccount) ?? ""
+            let loadedPassword = try credentialStore.password(for: Self.zteCredentialAccount) ?? ""
+            ztePassword = loadedPassword
+            initialCredentialStates[.zteMC7530CA] = .loaded(loadedPassword)
         } catch {
             ztePassword = ""
-            credentialLoadErrors.append(error.localizedDescription)
+            let message = error.localizedDescription
+            initialCredentialStates[.zteMC7530CA] = .unavailable(message)
+            credentialLoadErrors.append(message)
         }
         lastSuccessfulScopeKey = defaults.string(forKey: Key.lastSuccessfulScopeKey)
         lastSuccessfulEndpoint = Self.loadLastSuccessfulEndpoint(defaults: defaults)
@@ -137,6 +150,7 @@ final class StatusModel: ObservableObject {
             storedValue: defaults.string(forKey: Key.language),
             preferredLanguages: Locale.preferredLanguages
         )
+        credentialLoadStates = initialCredentialStates
         if !credentialLoadErrors.isEmpty {
             settingsError = credentialLoadErrors.joined(separator: "; ")
         }
@@ -754,17 +768,41 @@ final class StatusModel: ObservableObject {
         if Self.normalizedManagementURL(previousZTEHost) != Self.normalizedManagementURL(savedZTEHost) {
             changedEndpointKinds.insert(.zteMC7530CA)
         }
+        let credentialUpdates = CredentialSavePlanner.updates(for: [
+            CredentialEdit(
+                account: Self.vosCredentialAccount,
+                password: password,
+                loadState: credentialLoadStates[.vos5G]
+                    ?? .unavailable("The VOS credential state is unavailable.")
+            ),
+            CredentialEdit(
+                account: Self.zteCredentialAccount,
+                password: ztePassword,
+                loadState: credentialLoadStates[.zteMC7530CA]
+                    ?? .unavailable("The ZTE credential state is unavailable.")
+            )
+        ])
         do {
-            try CredentialTransaction.apply([
-                CredentialUpdate(account: Self.vosCredentialAccount, password: password),
-                CredentialUpdate(account: Self.zteCredentialAccount, password: ztePassword)
-            ], store: credentialStore)
+            try CredentialTransaction.apply(credentialUpdates, store: credentialStore)
         } catch {
             settingsError = localizedError(error)
             return false
         }
+        for update in credentialUpdates {
+            switch update.account {
+            case Self.vosCredentialAccount:
+                credentialLoadStates[.vos5G] = .loaded(password)
+            case Self.zteCredentialAccount:
+                credentialLoadStates[.zteMC7530CA] = .loaded(ztePassword)
+            default:
+                break
+            }
+        }
+        settingsError = unresolvedCredentialLoadError
 
-        defaults.removeObject(forKey: Key.password)
+        if let state = credentialLoadStates[.vos5G], case .loaded = state {
+            defaults.removeObject(forKey: Key.password)
+        }
         defaults.set(modemSelection.rawValue, forKey: Key.modemSelection)
         defaults.set(savedVOSHost, forKey: Key.host)
         defaults.set(username.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Key.username)
@@ -1245,6 +1283,14 @@ final class StatusModel: ObservableObject {
         defaults.removeObject(forKey: Key.lastSuccessfulEndpoint)
     }
 
+    private var unresolvedCredentialLoadError: String? {
+        let messages = ModemKind.allCases.compactMap { kind -> String? in
+            guard case let .unavailable(message) = credentialLoadStates[kind] else { return nil }
+            return message
+        }
+        return messages.isEmpty ? nil : messages.joined(separator: "; ")
+    }
+
     static func isBuiltInDefault(kind: ModemKind, address: String) -> Bool {
         let defaultAddress: String
         switch kind {
@@ -1270,70 +1316,89 @@ final class StatusModel: ObservableObject {
         return try? JSONDecoder().decode(ModemEndpointPreference.self, from: data)
     }
 
-    static func loadVOSPassword(
+    static func loadVOSCredential(
         defaults: UserDefaults,
         credentialStore: any CredentialStoring
-    ) throws -> String {
+    ) throws -> CredentialLoadResult {
         if let stored = try credentialStore.password(for: vosCredentialAccount) {
             defaults.removeObject(forKey: Key.password)
-            return stored
+            return CredentialLoadResult(password: stored, state: .loaded(stored))
         }
 
         guard let legacy = defaults.string(forKey: Key.password), !legacy.isEmpty else {
             defaults.removeObject(forKey: Key.password)
-            return "oelinux123"
+            let defaultPassword = "oelinux123"
+            return CredentialLoadResult(
+                password: defaultPassword,
+                state: .loaded(defaultPassword)
+            )
         }
         do {
             try credentialStore.setPassword(legacy, for: vosCredentialAccount)
             defaults.removeObject(forKey: Key.password)
         } catch {
-            // Keep the legacy value for a later migration attempt if Keychain
-            // is temporarily unavailable; never copy it to another preference.
+            // Keep the legacy value as the only durable copy and mark it
+            // unavailable so Save retries the Keychain write before deletion.
+            return CredentialLoadResult(
+                password: legacy,
+                state: .unavailable(error.localizedDescription)
+            )
         }
-        return legacy
+        return CredentialLoadResult(password: legacy, state: .loaded(legacy))
+    }
+
+    static func loadVOSPassword(
+        defaults: UserDefaults,
+        credentialStore: any CredentialStoring
+    ) throws -> String {
+        try loadVOSCredential(
+            defaults: defaults,
+            credentialStore: credentialStore
+        ).password
     }
 
     private func isAuthenticationError(_ error: Error) -> Bool {
-        if error as? VOSClientError == .authenticationFailed { return true }
-        if error as? ZTEUBusError == .authenticationFailed { return true }
-        if let backendError = error as? ModemBackendError {
-            switch backendError {
-            case .credentialsRequired, .incompatibleCredentials: return true
-            default: break
-            }
-        }
-        let message = error.localizedDescription.lowercased()
-        return (message.contains("password") || message.contains("credential")) &&
-            (message.contains("rejected") || message.contains("requires"))
+        ModemFailureClassifier.category(of: error) == .authentication
     }
 
     private func isQMIUnavailableError(_ error: Error) -> Bool {
-        if let clientError = error as? VOSClientError,
-           case .qmiUnavailable = clientError {
-            return true
-        }
-        return error.localizedDescription.localizedCaseInsensitiveContains("qmi is unavailable")
+        ModemFailureClassifier.category(of: error) == .qmiUnavailable
     }
 
     private func localizedError(_ error: Error) -> String {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        if message.localizedCaseInsensitiveContains("requires web credentials") {
-            return L10n.text(
-                "Enter the ZTE Web administrator password in Settings.",
-                language: language
-            )
+        if let backendError = error as? ModemBackendError {
+            switch backendError {
+            case .credentialsRequired(.web), .incompatibleCredentials(expected: .web, actual: _):
+                return L10n.text(
+                    "Enter the ZTE Web administrator password in Settings.",
+                    language: language
+                )
+            case .credentialsRequired(.ssh), .incompatibleCredentials(expected: .ssh, actual: _):
+                return L10n.text(
+                    "Enter the VOS SSH username and password in Settings.",
+                    language: language
+                )
+            default:
+                break
+            }
         }
-        if message.localizedCaseInsensitiveContains("requires ssh credentials") {
-            return L10n.text(
-                "Enter the VOS SSH username and password in Settings.",
-                language: language
-            )
-        }
-        if message.localizedCaseInsensitiveContains("ZTE administrator password was rejected") {
+        if error as? ZTEUBusError == .authenticationFailed {
             return L10n.text("The ZTE administrator password was rejected.", language: language)
         }
-        if message.localizedCaseInsensitiveContains("SSH username or password was rejected") {
+        if error as? VOSClientError == .authenticationFailed {
             return L10n.text("The modem SSH username or password was rejected.", language: language)
+        }
+        if let coordinatorError = error as? ModemCoordinatorError,
+           case let .authenticationFailed(kind, _) = coordinatorError {
+            switch kind {
+            case .zteMC7530CA:
+                return L10n.text("The ZTE administrator password was rejected.", language: language)
+            case .vos5G:
+                return L10n.text("The modem SSH username or password was rejected.", language: language)
+            case nil:
+                return L10n.text("Authentication failed", language: language)
+            }
         }
         return L10n.text(message, language: language)
     }
