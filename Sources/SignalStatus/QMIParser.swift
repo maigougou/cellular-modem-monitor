@@ -7,6 +7,7 @@ enum QMIParserError: LocalizedError, Equatable {
     case requestFailed(UInt16)
     case malformedTLV
     case noActiveBand
+    case systemPreferenceUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +17,7 @@ enum QMIParserError: LocalizedError, Equatable {
         case let .requestFailed(code): return "The Qualcomm QMI request failed (\(code))."
         case .malformedTLV: return "The VOS QMI response contains an invalid TLV."
         case .noActiveBand: return "Qualcomm NAS did not report an active radio band."
+        case .systemPreferenceUnavailable: return "Qualcomm NAS did not report separate SA and NSA preferences."
         }
     }
 }
@@ -35,14 +37,126 @@ struct QMIRadioReading: Equatable, Sendable {
 }
 
 struct QMISignalInfo: Equatable, Sendable {
+    var nrRSRQ: Int?
     var nrRSRP: Int?
+    var nrSNR: Double?
+    var lteRSSI: Int?
+    var lteRSRQ: Int?
     var lteRSRP: Int?
+    var lteSNR: Double?
+}
+
+enum QMILTECarrierRole: Equatable, Sendable {
+    case primary
+    case secondary
+}
+
+enum QMILTESecondaryCellState: Equatable, Sendable {
+    case deconfigured
+    case configuredDeactivated
+    case configuredActivated
+    case unknown(UInt32)
+
+    init(rawValue: UInt32) {
+        switch rawValue {
+        case 0: self = .deconfigured
+        case 1: self = .configuredDeactivated
+        case 2: self = .configuredActivated
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    var isActive: Bool { self == .configuredActivated }
+}
+
+struct QMILTECarrier: Equatable, Sendable {
+    let role: QMILTECarrierRole
+    let band: String?
+    let qmiBand: UInt16
+    let earfcn: UInt32
+    let bandwidthMHz: Double?
+    let physicalCellID: UInt16
+    let state: QMILTESecondaryCellState?
+    let index: UInt8?
+}
+
+struct QMILTECAInfo: Equatable, Sendable {
+    var primaryCell: QMILTECarrier?
+    var secondaryCells: [QMILTECarrier]
+
+    var activeSecondaryBands: [String] {
+        var seen = Set<String>()
+        return secondaryCells.compactMap { cell in
+            guard cell.state?.isActive == true,
+                  let band = cell.band,
+                  seen.insert(band).inserted
+            else { return nil }
+            return band
+        }
+    }
 }
 
 struct QMIServingInfo: Equatable, Sendable {
     var operatorName: String?
     var mcc: String?
     var mnc: String?
+}
+
+/// Signal measurements reported for one physical cell by NAS Get Cell
+/// Location Info (0x0043). QMI encodes these values in tenths of a decibel;
+/// `nil` represents its signed 16-bit unavailable sentinel.
+struct QMICellSignalMetrics: Equatable, Sendable {
+    let rsrqDB: Double?
+    let rsrpDBm: Double?
+    let rssiDBm: Double?
+    let snrDB: Double?
+}
+
+struct QMILTECellMeasurement: Equatable, Sendable {
+    let physicalCellID: UInt16
+    let signal: QMICellSignalMetrics
+}
+
+struct QMILTECellLocation: Equatable, Sendable {
+    let ueInIdle: Bool
+    let plmn: [UInt8]
+    let trackingAreaCode: UInt16
+    let globalCellID: UInt32
+    let earfcn: UInt32
+    let physicalCellID: UInt16
+    let cells: [QMILTECellMeasurement]
+
+    var servingCellMeasurement: QMILTECellMeasurement? {
+        cells.first { $0.physicalCellID == physicalCellID }
+    }
+}
+
+struct QMILTEFrequencyLocation: Equatable, Sendable {
+    let earfcn: UInt32
+    let cells: [QMILTECellMeasurement]
+}
+
+struct QMINRCellLocation: Equatable, Sendable {
+    let plmn: [UInt8]
+    let trackingAreaCode: [UInt8]
+    let globalCellID: UInt64
+    let physicalCellID: UInt16
+    let signal: QMICellSignalMetrics
+}
+
+struct QMICellLocationInfo: Equatable, Sendable {
+    let lte: QMILTECellLocation?
+    let lteInterfrequency: [QMILTEFrequencyLocation]
+    let nrARFCN: UInt32?
+    let nr: QMINRCellLocation?
+}
+
+struct QMIPLMNName: Equatable, Sendable {
+    var longName: String?
+    var shortName: String?
+    var serviceProviderName: String? = nil
+
+    var displayName: String? { longName ?? shortName ?? serviceProviderName }
 }
 
 private struct QMIResponse {
@@ -143,59 +257,241 @@ enum QMIParser {
         var result = QMISignalInfo()
 
         // QMI NAS LTE signal info: RSSI i8, RSRQ i8, RSRP i16, SNR i16.
-        if let lte = response.firstTLV(0x14), lte.count >= 4 {
+        if let lte = response.firstTLV(0x14), lte.count >= 6 {
+            result.lteRSSI = validInt8(lte.byte(at: 0))
+            result.lteRSRQ = validInt8(lte.byte(at: 1))
             result.lteRSRP = validRSRP(Int(Int16(bitPattern: lte.u16le(at: 2))))
+            result.lteSNR = decibelTenths(lte.u16le(at: 4))
         }
-        // QMI NAS NR5G signal info: RSRP i16 and SNR i16. TLV 0x18 is RSRQ.
-        if let nr = response.firstTLV(0x17), nr.count >= 2 {
+        // QMI NAS NR5G signal info: RSRP i16 and SNR i16. TLV 0x18 is RSRQ i16.
+        if let nr = response.firstTLV(0x17), nr.count >= 4 {
             result.nrRSRP = validRSRP(Int(Int16(bitPattern: nr.u16le(at: 0))))
+            result.nrSNR = decibelTenths(nr.u16le(at: 2))
+        }
+        if let nrRSRQ = response.firstTLV(0x18), nrRSRQ.count >= 2 {
+            result.nrRSRQ = signedInt16UnlessSentinel(nrRSRQ.u16le(at: 0))
         }
         return result
     }
 
     static func servingInfo(from data: Data) throws -> QMIServingInfo {
         let response = try QMIResponse(data: data, expectedMessage: 0x0024)
-        guard let name = response.firstTLV(0x12), name.count >= 5 else {
-            return QMIServingInfo()
-        }
-        let length = Int(name.byte(at: 4))
-        guard 5 + length <= name.count else { throw QMIParserError.malformedTLV }
-        let operatorData = name.subdata(in: 5..<(5 + length))
+        let name = response.firstTLV(0x12)
         let precisePLMN = response.firstTLV(0x27)
-        let mcc = precisePLMN.flatMap { $0.count >= 5 ? $0.u16le(at: 0) : nil } ?? name.u16le(at: 0)
-        let mnc = precisePLMN.flatMap { $0.count >= 5 ? $0.u16le(at: 2) : nil } ?? name.u16le(at: 2)
+        if let name, name.count < 5 { throw QMIParserError.malformedTLV }
+        if let precisePLMN, precisePLMN.count < 5 { throw QMIParserError.malformedTLV }
+        guard name != nil || precisePLMN != nil else { return QMIServingInfo() }
+
+        var operatorName: String?
+        if let name {
+            let length = Int(name.byte(at: 4))
+            guard 5 + length <= name.count else { throw QMIParserError.malformedTLV }
+            operatorName = String(data: name.subdata(in: 5..<(5 + length)), encoding: .utf8)?
+                .replacingOccurrences(of: "\0", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Precise PLMN is preferred when available, but some NAS responses
+        // omit the serving-name TLV entirely. Keep those responses usable so
+        // the caller can still resolve a readable name through Get PLMN Name.
+        guard let identity = precisePLMN ?? name else { return QMIServingInfo() }
+        let mcc = identity.u16le(at: 0)
+        let mnc = identity.u16le(at: 2)
         let hasThreeDigitMNC = precisePLMN.map { $0.count >= 5 && $0.byte(at: 4) != 0 }
         return QMIServingInfo(
-            operatorName: String(data: operatorData, encoding: .utf8),
+            operatorName: operatorName?.isEmpty == false ? operatorName : nil,
             mcc: String(format: "%03d", mcc),
             mnc: String(format: hasThreeDigitMNC == false ? "%02d" : "%03d", mnc)
         )
     }
 
-    static func lteSecondaryBands(from data: Data) throws -> [String] {
-        let response = try QMIResponse(data: data, expectedMessage: 0x00ac)
-        var values: [(band: UInt16, state: UInt32)] = []
+    static func cellLocationInfo(from data: Data) throws -> QMICellLocationInfo {
+        let response = try QMIResponse(data: data, expectedMessage: 0x0043)
 
-        if let list = response.firstTLV(0x15), !list.isEmpty {
+        let lte = try response.firstTLV(0x13).map(parseLTEIntrafrequencyLocation)
+        let lteInterfrequency = try response.firstTLV(0x14).map(parseLTEInterfrequencyLocation) ?? []
+
+        let nrARFCN = try response.firstTLV(0x2E).map { value in
+            guard value.count == 4 else { throw QMIParserError.malformedTLV }
+            return value.u32le(at: 0)
+        }
+
+        let nr = try response.firstTLV(0x2F).map { value in
+            // PLMN[3], TAC[3], NCI u64, PCI u16, then three i16 values.
+            guard value.count == 22 else { throw QMIParserError.malformedTLV }
+            return QMINRCellLocation(
+                plmn: Array(value[0..<3]),
+                trackingAreaCode: Array(value[3..<6]),
+                globalCellID: value.u64le(at: 6),
+                physicalCellID: value.u16le(at: 14),
+                signal: QMICellSignalMetrics(
+                    rsrqDB: decibelTenths(value.u16le(at: 16)),
+                    rsrpDBm: decibelTenths(value.u16le(at: 18)),
+                    rssiDBm: nil,
+                    snrDB: decibelTenths(value.u16le(at: 20))
+                )
+            )
+        }
+
+        return QMICellLocationInfo(
+            lte: lte,
+            lteInterfrequency: lteInterfrequency,
+            nrARFCN: nrARFCN,
+            nr: nr
+        )
+    }
+
+    static func plmnName(from data: Data) throws -> QMIPLMNName {
+        let response = try QMIResponse(data: data, expectedMessage: 0x0044)
+        guard let eons = response.firstTLV(0x10) else { return QMIPLMNName() }
+
+        // EONS encodes SPN first, followed by short and long operator names.
+        // Each operator name has encoding/country/spare metadata and a byte
+        // length. VOS currently returns UTF-8-compatible names (for example
+        // TELUS); unknown encodings fail closed to nil.
+        guard eons.count >= 2 else { throw QMIParserError.malformedTLV }
+        let spnEncoding = eons.byte(at: 0)
+        let spnLength = Int(eons.byte(at: 1))
+        guard 2 + spnLength <= eons.count else { throw QMIParserError.malformedTLV }
+        let serviceProviderName = decodeNetworkName(
+            eons.subdata(in: 2..<(2 + spnLength)),
+            encoding: spnEncoding
+        )
+        var offset = 2 + spnLength
+        let shortName = try parseEONSName(eons, offset: &offset)
+        let longName = try parseEONSName(eons, offset: &offset)
+        return QMIPLMNName(
+            longName: longName,
+            shortName: shortName,
+            serviceProviderName: serviceProviderName
+        )
+    }
+
+    static func getPLMNNameRequest(
+        mcc: UInt16,
+        mnc: UInt16,
+        mncHasThreeDigits: Bool? = nil,
+        transaction: UInt16 = 1
+    ) -> Data {
+        var identity = Data()
+        identity.appendUInt16LE(mcc)
+        identity.appendUInt16LE(mnc)
+
+        var payload = Data()
+        payload.append(tlv(type: 0x01, value: identity))
+        if let mncHasThreeDigits {
+            payload.append(tlv(type: 0x11, value: Data([mncHasThreeDigits ? 1 : 0])))
+        }
+
+        var request = Data([0x00])
+        request.appendUInt16LE(transaction)
+        request.appendUInt16LE(0x0044)
+        request.appendUInt16LE(UInt16(payload.count))
+        request.append(payload)
+        return request
+    }
+
+    static func lteCarrierAggregation(from data: Data) throws -> QMILTECAInfo {
+        let response = try QMIResponse(data: data, expectedMessage: 0x00ac)
+        let primaryCell = try response.firstTLV(0x13).map { value in
+            guard value.count >= 10 else { throw QMIParserError.malformedTLV }
+            return lteCarrier(
+                role: .primary,
+                value: value,
+                state: nil,
+                index: nil
+            )
+        }
+
+        var secondaryCells: [QMILTECarrier] = []
+        if let list = response.firstTLV(0x15) {
+            guard !list.isEmpty else { throw QMIParserError.malformedTLV }
             let count = Int(list.byte(at: 0))
             var offset = 1
             for _ in 0..<count {
                 guard offset + 15 <= list.count else { throw QMIParserError.malformedTLV }
-                values.append((list.u16le(at: offset + 8), list.u32le(at: offset + 10)))
+                let entry = list.subdata(in: offset..<(offset + 15))
+                secondaryCells.append(lteCarrier(
+                    role: .secondary,
+                    value: entry,
+                    state: QMILTESecondaryCellState(rawValue: entry.u32le(at: 10)),
+                    index: entry.byte(at: 14)
+                ))
                 offset += 15
             }
         } else if let legacy = response.firstTLV(0x12), legacy.count >= 14 {
-            values.append((legacy.u16le(at: 8), legacy.u32le(at: 10)))
+            secondaryCells.append(lteCarrier(
+                role: .secondary,
+                value: legacy,
+                state: QMILTESecondaryCellState(rawValue: legacy.u32le(at: 10)),
+                index: response.firstTLV(0x14).flatMap { $0.isEmpty ? nil : $0.byte(at: 0) }
+            ))
+        } else if let legacy = response.firstTLV(0x12), !legacy.isEmpty {
+            throw QMIParserError.malformedTLV
         }
 
-        var seen = Set<String>()
-        return values.compactMap { entry in
-            guard entry.state == 2,
-                  let number = lteBands[entry.band]
-            else { return nil }
-            let label = "B\(number)"
-            return seen.insert(label).inserted ? label : nil
+        return QMILTECAInfo(primaryCell: primaryCell, secondaryCells: secondaryCells)
+    }
+
+    static func lteSecondaryBands(from data: Data) throws -> [String] {
+        try lteCarrierAggregation(from: data).activeSecondaryBands
+    }
+
+    static func systemSelectionPreferences(from data: Data) throws -> NRSystemSelectionPreferences {
+        let response = try QMIResponse(data: data, expectedMessage: 0x0034)
+        guard let rawMode = response.firstTLV(0x11), rawMode.count == 2,
+              let rawSA = response.firstTLV(0x2C),
+              let rawNSA = response.firstTLV(0x2D),
+              let sa = NRBandMask(rawSA),
+              let nsa = NRBandMask(rawNSA)
+        else { throw QMIParserError.systemPreferenceUnavailable }
+
+        return NRSystemSelectionPreferences(
+            modePreference: rawMode.u16le(at: 0),
+            saBands: sa,
+            nsaBands: nsa,
+            lteBands: response.firstTLV(0x23).flatMap(LTEBandMask.init)
+        )
+    }
+
+    static func setNRSystemSelectionRequest(
+        modePreference: UInt16,
+        saBands: NRBandMask,
+        nsaBands: NRBandMask,
+        lteBands: LTEBandMask? = nil,
+        transaction: UInt16 = 1
+    ) -> Data {
+        var payload = Data()
+        // QMI NAS change duration 0 means until the next power cycle. This
+        // keeps a bad travel-mode choice recoverable by reconnecting VOS.
+        payload.append(tlv(type: 0x17, value: Data([0x00])))
+        var mode = Data()
+        mode.appendUInt16LE(modePreference)
+        payload.append(tlv(type: 0x11, value: mode))
+        if let lteBands {
+            payload.append(tlv(type: 0x24, value: lteBands.bytes))
         }
+        payload.append(tlv(type: 0x2F, value: saBands.bytes))
+        payload.append(tlv(type: 0x30, value: nsaBands.bytes))
+
+        var request = Data([0x00])
+        request.appendUInt16LE(transaction)
+        request.appendUInt16LE(0x0033)
+        request.appendUInt16LE(UInt16(payload.count))
+        request.append(payload)
+        return request
+    }
+
+    static func validateSetSystemSelectionResponse(_ data: Data) throws {
+        _ = try QMIResponse(data: data, expectedMessage: 0x0033)
+    }
+
+    static func getSystemSelectionRequest(transaction: UInt16 = 1) -> Data {
+        var request = Data([0x00])
+        request.appendUInt16LE(transaction)
+        request.appendUInt16LE(0x0034)
+        request.appendUInt16LE(0)
+        return request
     }
 
     private static func parseBandList(
@@ -226,6 +522,13 @@ enum QMIParser {
         return readings
     }
 
+    private static func tlv(type: UInt8, value: Data) -> Data {
+        var result = Data([type])
+        result.appendUInt16LE(UInt16(value.count))
+        result.append(value)
+        return result
+    }
+
     private static func parseBandwidthList(_ value: Data?) -> [(kind: RadioKind?, width: Double?)] {
         guard let value, !value.isEmpty else { return [] }
         let count = Int(value.byte(at: 0))
@@ -240,6 +543,36 @@ enum QMIParser {
             offset += 5
         }
         return result
+    }
+
+    private static func parseEONSName(_ value: Data, offset: inout Int) throws -> String? {
+        guard offset + 4 <= value.count else { throw QMIParserError.malformedTLV }
+        let encoding = value.byte(at: offset)
+        let length = Int(value.byte(at: offset + 3))
+        let start = offset + 4
+        let end = start + length
+        guard end <= value.count else { throw QMIParserError.malformedTLV }
+        offset = end
+        guard length > 0 else { return nil }
+        return decodeNetworkName(value.subdata(in: start..<end), encoding: encoding)
+    }
+
+    private static func decodeNetworkName(_ data: Data, encoding: UInt8) -> String? {
+        let name: String?
+        switch encoding {
+        case 0x00, 0x01:
+            name = String(data: data, encoding: .utf8)
+        case 0x04:
+            name = String(data: data, encoding: .utf16LittleEndian)
+        default:
+            // QMI also defines GSM 7-bit and several broadcast-specific
+            // encodings. Returning nil is safer than displaying mojibake.
+            name = nil
+        }
+        let cleaned = name?
+            .replacingOccurrences(of: "\0", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned?.isEmpty == false ? cleaned : nil
     }
 
     private static func preferredSystemTLV(from data: Data) throws -> Data {
@@ -274,6 +607,116 @@ enum QMIParser {
 
     private static func validRSRP(_ value: Int) -> Int? {
         (-200 ... -1).contains(value) ? value : nil
+    }
+
+    private static func validInt8(_ rawValue: UInt8) -> Int? {
+        let value = Int(Int8(bitPattern: rawValue))
+        return value == Int(Int8.min) ? nil : value
+    }
+
+    private static func signedInt16UnlessSentinel(_ rawValue: UInt16) -> Int? {
+        let value = Int16(bitPattern: rawValue)
+        return value == Int16.min ? nil : Int(value)
+    }
+
+    private static func decibelTenths(_ rawValue: UInt16) -> Double? {
+        signedInt16UnlessSentinel(rawValue).map { Double($0) / 10 }
+    }
+
+    private static func parseLTEIntrafrequencyLocation(_ value: Data) throws -> QMILTECellLocation {
+        // Fixed fields through the cell-count byte occupy 19 bytes. Each cell
+        // then contains PCI, RSRQ, RSRP, RSSI, and RX level as five u16/i16
+        // fields. Requiring exact consumption prevents truncated arrays and
+        // silently accepted trailing bytes.
+        guard value.count >= 19 else { throw QMIParserError.malformedTLV }
+        let count = Int(value.byte(at: 18))
+        let entrySize = 10
+        guard count <= (Int.max - 19) / entrySize,
+              value.count == 19 + count * entrySize
+        else { throw QMIParserError.malformedTLV }
+
+        var cells: [QMILTECellMeasurement] = []
+        cells.reserveCapacity(count)
+        var offset = 19
+        for _ in 0..<count {
+            cells.append(QMILTECellMeasurement(
+                physicalCellID: value.u16le(at: offset),
+                signal: QMICellSignalMetrics(
+                    rsrqDB: decibelTenths(value.u16le(at: offset + 2)),
+                    rsrpDBm: decibelTenths(value.u16le(at: offset + 4)),
+                    rssiDBm: decibelTenths(value.u16le(at: offset + 6)),
+                    snrDB: nil
+                )
+            ))
+            // The final i16 is cell-selection RX level, not another signal
+            // metric exposed by this parser.
+            offset += entrySize
+        }
+
+        return QMILTECellLocation(
+            ueInIdle: value.byte(at: 0) != 0,
+            plmn: Array(value[1..<4]),
+            trackingAreaCode: value.u16le(at: 4),
+            globalCellID: value.u32le(at: 6),
+            earfcn: UInt32(value.u16le(at: 10)),
+            physicalCellID: value.u16le(at: 12),
+            cells: cells
+        )
+    }
+
+    private static func parseLTEInterfrequencyLocation(_ value: Data) throws -> [QMILTEFrequencyLocation] {
+        guard value.count >= 2 else { throw QMIParserError.malformedTLV }
+        let frequencyCount = Int(value.byte(at: 1))
+        var offset = 2
+        var result: [QMILTEFrequencyLocation] = []
+        result.reserveCapacity(frequencyCount)
+
+        for _ in 0..<frequencyCount {
+            // EARFCN u16, low/high thresholds, priority and cell-count.
+            guard offset + 6 <= value.count else { throw QMIParserError.malformedTLV }
+            let earfcn = UInt32(value.u16le(at: offset))
+            let cellCount = Int(value.byte(at: offset + 5))
+            offset += 6
+            guard cellCount <= (value.count - offset) / 10 else {
+                throw QMIParserError.malformedTLV
+            }
+            var cells: [QMILTECellMeasurement] = []
+            cells.reserveCapacity(cellCount)
+            for _ in 0..<cellCount {
+                cells.append(QMILTECellMeasurement(
+                    physicalCellID: value.u16le(at: offset),
+                    signal: QMICellSignalMetrics(
+                        rsrqDB: decibelTenths(value.u16le(at: offset + 2)),
+                        rsrpDBm: decibelTenths(value.u16le(at: offset + 4)),
+                        rssiDBm: decibelTenths(value.u16le(at: offset + 6)),
+                        snrDB: nil
+                    )
+                ))
+                offset += 10
+            }
+            result.append(QMILTEFrequencyLocation(earfcn: earfcn, cells: cells))
+        }
+        guard offset == value.count else { throw QMIParserError.malformedTLV }
+        return result
+    }
+
+    private static func lteCarrier(
+        role: QMILTECarrierRole,
+        value: Data,
+        state: QMILTESecondaryCellState?,
+        index: UInt8?
+    ) -> QMILTECarrier {
+        let rawBand = value.u16le(at: 8)
+        return QMILTECarrier(
+            role: role,
+            band: lteBands[rawBand].map { "B\($0)" },
+            qmiBand: rawBand,
+            earfcn: UInt32(value.u16le(at: 2)),
+            bandwidthMHz: bandwidthMap[value.u32le(at: 4)],
+            physicalCellID: value.u16le(at: 0),
+            state: state,
+            index: index
+        )
     }
 
     private static func radioKind(code: UInt8) -> RadioKind? {
@@ -333,5 +776,14 @@ private extension Data {
             UInt32(byte(at: offset + 1)) << 8 |
             UInt32(byte(at: offset + 2)) << 16 |
             UInt32(byte(at: offset + 3)) << 24
+    }
+
+    func u64le(at offset: Int) -> UInt64 {
+        UInt64(u32le(at: offset)) | UInt64(u32le(at: offset + 4)) << 32
+    }
+
+    mutating func appendUInt16LE(_ value: UInt16) {
+        append(UInt8(truncatingIfNeeded: value))
+        append(UInt8(truncatingIfNeeded: value >> 8))
     }
 }

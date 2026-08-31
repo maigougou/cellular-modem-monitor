@@ -8,6 +8,8 @@ struct CellularModemMonitorApp: App {
         MenuBarExtra {
             StatusPanel()
                 .environmentObject(model)
+                .environment(\.appLanguage, model.language)
+                .environment(\.locale, model.language.locale)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: model.statusSymbol)
@@ -15,7 +17,9 @@ struct CellularModemMonitorApp: App {
                     Text(model.menuBarTitle)
                 }
             }
-            .accessibilityLabel("Cellular Modem Monitor, \(model.menuBarTitle), \(model.connectionState.label)")
+            .accessibilityLabel(
+                "Cellular Modem Monitor, \(model.menuBarTitle), \(L10n.text(model.connectionState.label, language: model.language))"
+            )
         }
         .menuBarExtraStyle(.window)
     }

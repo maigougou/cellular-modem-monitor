@@ -15,6 +15,7 @@ compile() {
     -sdk "$1" \
     -target "${arch}-apple-macosx13.0" \
     -module-cache-path "$module_cache" \
+    "$project_dir/Sources/SignalStatus/Localization.swift" \
     "$project_dir/Sources/SignalStatus/Models.swift" \
     "$project_dir/Sources/SignalStatus/QMIParser.swift" \
     "$project_dir/Sources/SignalStatus/VOSClient.swift" \
