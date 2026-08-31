@@ -2,69 +2,67 @@
 
 English | [简体中文](README.zh-CN.md)
 
-**Cellular Modem Monitor** is a native macOS menu-bar app for viewing live cellular
-radio information from supported USB modems. This release supports **VOS 5G**;
-additional modem backends can be added in future releases.
+**Cellular Modem Monitor** is a native macOS menu-bar app for viewing live
+cellular radio information. This release supports both **VOS 5G** and the
+**ZTE G5 MAX / MC7530CA**.
 
-It reads the modem through SSH and the Qualcomm QRTR/QMI services available on
-VOS. Normal status polling is read-only. The optional, explicitly opened
-**Network & radio controls** panel can change operator registration, temporary
-radio-access preferences and temporary LTE/NR band masks after confirmation.
+Normal status collection is read-only on both devices. VOS 5G also provides an
+optional, explicitly opened **Network & radio controls** panel. The ZTE backend
+is strictly read-only in this release and never exposes those VOS controls.
 
 <p align="center">
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
   <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="340" alt="Cellular Modem Monitor showing a 5G NSA n78 and LTE B2 connection">
   <br>
-  <sub>5G SA n78 and NSA n78+B2 examples; demo values use synthetic Cell IDs.</sub>
+  <sub>VOS 5G SA n78 and NSA n78+B2 examples; demo values use synthetic Cell IDs.</sub>
 </p>
 
 ## Features
 
+### Status features for both backends
+
+- Automatic discovery on every active physical IPv4 interface, without
+  assuming that a modem's management address is the default gateway
+- Per-interface candidate identity keeps repeated private management addresses
+  on different links separate during discovery
 - Live primary 5G NR and LTE bands in the menu bar
-- Explicit SA/NSA mode from Qualcomm DSD, without guessing from band combinations
-- RSRP, RSRQ, RSSI and SNR when each metric is reported by the modem
-- Human-readable downlink frequency and channel bandwidth; raw ARFCN remains in diagnostics
-- Serving NR/LTE global Cell ID; detailed LTE PCell/SCell aggregation
-  with exact per-carrier signal values when QMI can associate them
+- SA/NSA mode only when the selected backend reports it unambiguously
+- RSRP, RSRQ, RSSI and SNR when each metric is available
+- Human-readable downlink frequency and channel bandwidth; raw ARFCN remains
+  in diagnostics
+- Serving NR/LTE Cell ID and detailed LTE PCell/SCell aggregation when the
+  device supplies enough information to map it safely
 - Clickable Cell IDs: LTE opens CellMapper's prefilled ID calculator; NR copies
-  the full NCI and opens the matching MCC-MNC's NR map for **Cell Search**
-- Operator-name lookup from the serving PLMN, PLMN, USB interface and firmware versions
+  the full NCI and opens the matching MCC-MNC NR map for **Cell Search**
+- Operator, PLMN and selected network interface
 - Detailed, compact and icon-only menu-bar styles
-- English and Simplified Chinese UI; Chinese macOS installations default to
-  Simplified Chinese, while other system languages default to English. The
-  language can be changed instantly in Settings.
-- Manual refresh, adjustable 1/5/10/15/30/60-second polling and launch at login
-- Automatic recovery after unplugging and reconnecting the USB modem, with
-  faster retry while the modem is unavailable
-- Powered replacement of the single physical SIM is recognized at the next
-  poll: stale operator/radio details are cleared and registration is retried
-  on the faster recovery cadence until the new SIM has service
-- Copyable diagnostics for troubleshooting
-- Network scanning with operator name, MCC-MNC, availability and reported
-  LTE/NR access technology
-- Manual PLMN selection without forcing an access technology, automatic
-  operator selection, and `AT+COPS?` read-back verification
-- Auto SA/NSA, SA only, NSA only and LTE only controls with exact Qualcomm
-  mode/mask read-back, failure rollback and one-click restoration
-- Temporary NR and LTE band locks with allowlist validation, exact QMI read-back
-  and restoration of the masks captured from the attached modem
+- English and Simplified Chinese UI with instant language switching
+- Manual refresh, 1/5/10/15/30/60-second polling, launch at login, faster
+  recovery polling and copyable diagnostics
+
+### VOS-only control features
+
+- Network scan, manual PLMN selection and automatic operator selection
+- Auto SA/NSA, SA only, NSA only and LTE only preferences with exact read-back
+- Temporary NR and LTE band locks with allowlist validation and rollback
 - Read-only LTE neighbor measurements reported by Qualcomm NAS
 
-<p align="center">
-  <img src="assets/cellular-modem-monitor-settings-zh.png" width="360" alt="Cellular Modem Monitor Settings in Simplified Chinese with the language selector">
-  <br>
-  <sub>Runtime language selection in Settings (Simplified Chinese shown).</sub>
-</p>
+These controls depend on the VOS SSH/QMI implementation. They are not shown as
+capabilities of the ZTE G5 MAX / MC7530CA.
+
+The current Settings panel contains the Automatic/VOS/ZTE selector, each
+backend's address and credential fields, polling and display preferences, and
+the runtime language selector. Passwords are saved to macOS Keychain.
 
 ## Menu-bar labels
 
-The app displays only information confirmed by the modem:
+The app displays only information confirmed by the active backend:
 
 | Label | Meaning |
 | --- | --- |
-| `SA n78` | DSD explicitly reports 5G Standalone |
-| `NSA n78+B2` | DSD explicitly reports 5G Non-Standalone with NR n78 and LTE B2 |
-| `NR n78+B2` | The bands are known, but DSD did not provide an unambiguous mode |
+| `SA n78` | The modem explicitly reports 5G Standalone |
+| `NSA n78+B2` | The modem explicitly reports 5G Non-Standalone with NR n78 and LTE B2 |
+| `NR n78+B2` | The bands are known, but the mode is not unambiguous |
 | `LTE B2` | LTE B2 is active |
 | `n78+B2` | Compact menu-bar style |
 | `Cellular …` / `Cellular —` | Connecting / unavailable |
@@ -74,17 +72,49 @@ inferring SA or NSA from the presence of NR and LTE bands.
 
 ## Supported devices
 
-VOS 5G is the only supported modem in this release.
+| Device | Default management address | Status transport | Device controls |
+| --- | --- | --- | --- |
+| VOS 5G | `192.168.225.1` | SSH to Qualcomm QRTR/QMI | VOS network/radio controls |
+| ZTE G5 MAX / MC7530CA | `192.168.254.1` | Authenticated read-only Web UBus | Read-only |
 
-| Item | Tested value |
-| --- | --- |
-| Management address | `192.168.225.1` |
-| VOS firmware | `326.73_0R19` |
-| Internal modem firmware | `RXMG1.20.00.326_0R05` |
-| Default SSH login | `root` / `oelinux123` |
+The tested VOS reference unit reports firmware `326.73_0R19` and internal modem
+firmware `RXMG1.20.00.326_0R05`. Its published factory SSH login is
+`root` / `oelinux123`; change or override it in Settings if your unit differs.
 
-The SSH login is a shared factory credential published for VOS devices. Do not
-expose VOS SSH to an untrusted LAN or the Internet.
+For the ZTE, enter the existing Web administrator password—the same password
+used by its normal management page—in Settings. The application does not ship
+with, derive or display a device-specific administrator password.
+
+Both physical-device paths were validated on 2026-08-31.
+
+## Connection layouts and automatic discovery
+
+The discovery layer supports these layouts:
+
+```text
+Mac ← USB ECM ← modem
+Mac ← USB-to-RJ45 adapter / Ethernet ← modem
+Mac ← Wi-Fi or Ethernet ← Slate / another router ← modem
+```
+
+For every active physical IPv4 interface, the app considers the registered
+backend profiles, including `192.168.225.1` for VOS and `192.168.254.1` for the
+ZTE. It excludes loopback, `utun`, `awdl`, `llw` and peer-to-peer interfaces.
+Candidates are keyed by protocol, host, port and interface index, so identical
+private IP addresses on two adapters remain separate devices.
+
+Candidates are ranked deterministically using same-subnet and reported-router
+matches together with last-successful and manually entered hints. ZTE HTTP
+always pins the selected interface. On a direct same-subnet path it also pins
+the discovered source address; on a routed path it lets Network.framework
+choose the source address for that interface. VOS SSH uses the selected source
+address; it does not have an additional interface-index binding.
+
+In the routed Slate/router layout, the modem management address does **not**
+need to be the Mac's default gateway. A working route to that address must
+already exist through the selected interface. The app relies on that existing
+macOS route and does not inspect the full route table or create or change
+system routes.
 
 ## Install
 
@@ -94,20 +124,56 @@ Mac.
 1. Download `Cellular-Modem-Monitor-macOS.zip` from the
    [latest release](https://github.com/maigougou/cellular-modem-monitor/releases/latest).
 2. Unzip it and move **Cellular Modem Monitor.app** to `/Applications`.
-3. Connect the VOS 5G directly to the Mac and start the app.
-4. Allow **Local Network** access if macOS asks.
-5. If necessary, open **Settings…** and change the address or SSH login.
+3. Connect a supported modem directly, through an Ethernet adapter, or through
+   a router that already provides a route to the management address.
+4. Start the app and allow **Local Network** access if macOS asks.
+5. Open **Settings…**, choose **Automatic**, **VOS 5G**, or
+   **ZTE G5 MAX / MC7530CA**, then enter the matching credential.
 
-The default refresh interval is 30 seconds. Settings also provides 1, 5, 10,
-15 and 60-second choices. The app inside the release ZIP is
-ad-hoc signed and is not notarized with an Apple Developer ID. If macOS blocks
-the first launch, Control-click the app and choose **Open** after reviewing the
-source.
+The application in the release ZIP is ad-hoc signed and is not notarized with
+an Apple Developer ID. If macOS blocks the first launch, Control-click the app
+and choose **Open** after reviewing the source.
 
 If Local Network access was denied, enable it in **System Settings → Privacy &
 Security → Local Network**, then reopen the app.
 
-## How the VOS 5G backend works
+## First run and everyday use
+
+1. Leave device selection on **Automatic** to try every registered backend, or
+   select one backend to restrict discovery.
+2. For VOS, enter the SSH username and password. For the ZTE, enter its Web
+   administrator password.
+3. Normally, leave each backend's management address at its default. Changing
+   it adds that HTTP/HTTPS address as a manual discovery hint while the built-in
+   default remains available.
+4. Save Settings. The app discovers the device, verifies its identity and then
+   begins status polling.
+5. Use **Refresh** for an immediate read. The default interval is 30 seconds;
+   Settings also offers 1, 5, 10, 15 and 60 seconds.
+
+After polling detects that a modem was unplugged, reconnecting uses the faster
+recovery cadence. Registration loss or a PLMN change during replacement of a
+powered physical SIM is reflected on a later poll, and stale operator/radio
+details are cleared when the backend reports that transition. The app does not
+read a SIM identifier, so it cannot distinguish a same-PLMN swap that produces
+no observable registration change.
+
+## How the backends work
+
+### ZTE G5 MAX / MC7530CA
+
+Discovery performs a small anonymous UBus schema fingerprint so an unrelated
+Web server at the same private address is not accepted as a modem. Status reads
+then authenticate with the Web administrator password and reuse a scoped UBus
+session for that endpoint and interface.
+
+Normal polling calls the read-only `zte_nwinfo_api.nwinfo_get_netinfo` method.
+The parser maps reported operator/PLMN, LTE and NR bands, channels, bandwidth,
+PCI, Cell ID, signal metrics and LTE carrier aggregation without inventing
+missing values. The ZTE backend advertises only identity, status and Web UI
+capabilities; it has no write/control API in this release.
+
+### VOS 5G
 
 Each normal refresh opens one SSH session and performs read-only queries. If a
 new serving PLMN has no name in that response, the first lookup for that PLMN
@@ -122,82 +188,89 @@ Cellular Modem Monitor
   → NAS and DSD QMI services
 ```
 
-NAS supplies the active NR/LTE bands, channels, bandwidth, available RF signal
-metrics, serving-network data, serving Cell ID, LTE neighbor measurements
-and detailed LTE PCell/SCell information. When the serving-system response has
-an empty name, the backend resolves it with NAS Get PLMN Name. DSD
+NAS supplies active NR/LTE bands, channels, bandwidth, available RF metrics,
+serving-network data, Cell ID, LTE neighbor measurements and detailed LTE
+PCell/SCell information. NAS Get PLMN Name resolves an empty serving name. DSD
 supplies the explicit SA/NSA service-option bit. QRTR node and port numbers are
 discovered for every query rather than hard-coded. `AT+GMR` and the VOS version
-file provide the modem and device firmware versions.
+file provide modem and device firmware versions.
 
-The probe is executed from SSH stdin and is not installed on the VOS. Ordinary
-polling does not change bands, USB composition, carrier policy, APN,
-registration mode or any persistent setting.
+The probe is executed from SSH stdin and is not installed on VOS. Ordinary
+polling is read-only.
 
-## Network and radio controls
+## Network and radio controls — VOS only
 
-Expand **Network & radio controls** only when you want to change registration:
+Expand **Network & radio controls** only when a VOS device is active and you
+intend to change registration:
 
-<p align="center">
-  <img src="assets/cellular-modem-monitor-radio-controls.png" width="360" alt="Cellular Modem Monitor network and radio controls with aligned NR and LTE band-lock fields">
-  <br>
-  <sub>Operator, radio-access and temporary band controls; demo values use synthetic Cell IDs.</sub>
-</p>
+The current VOS-only panel contains operator actions, Auto SA/NSA, SA only, NSA
+only and LTE only preferences, NR/LTE band-lock fields and LTE neighbor
+measurements. It is not displayed when the active backend is ZTE.
 
 - **Scan Networks** runs `AT+COPS=?`. A full scan may take up to two minutes and
   can temporarily interrupt data. Results distinguish current, available,
-  forbidden and unknown PLMNs. LTE/NR badges describe the access technologies
-  reported by this scan; they are not a complete operator band list.
-- **Select** runs `AT+COPS=1,2,"MCCMNC"` and deliberately omits the optional
-  access-technology argument. **Automatic Selection** runs `AT+COPS=0`. The app
-  verifies either operation by reading `AT+COPS?` afterwards. Because COPS can
-  also alter Qualcomm's mode preference on 0R05, the app snapshots and restores
-  the current QMI mode and masks around scan/selection operations.
-- **Auto SA/NSA**, **SA only**, **NSA only** and **LTE only** write Qualcomm NAS system
-  selection preferences with change duration set to *power cycle*. Before the
-  first switch, the app keeps the original mode plus both 64-byte SA/NSA masks
-  in memory. It reads those three fields back after every write and attempts to
-  restore the original tuple if verification fails. LTE only disables NR while
-  preserving and verifying the current extended LTE band mask. Returning to an
-  NR mode restores the captured SA/NSA masks and reapplies any active NR band lock.
-- **Restore automatic defaults** restores that captured SA/NSA tuple and
-  extended LTE mask plus automatic operator selection. The baseline is bound to a hash of the current
-  VOS USB serial, so hot-swapping another unit at the same IP discards the old
-  masks; the raw serial is never returned or stored. The masks are intentionally
-  not persisted across app launches. If the app was closed after an override,
-  disconnecting VOS power restores the Qualcomm power-cycle defaults.
-- **Lock NR** and **Lock LTE** accept comma-separated band numbers. The app
-  intersects them with the captured factory-enabled masks, writes a temporary
-  Qualcomm preference, reads it back exactly and rolls back on failure.
-- **Neighbor measurements** refreshes QMI's current LTE measurements; it is not
+  forbidden and unknown PLMNs.
+- **Select** runs `AT+COPS=1,2,"MCCMNC"` without forcing an access technology.
+  **Automatic Selection** runs `AT+COPS=0`; both operations are verified with
+  `AT+COPS?`. The app preserves and restores the current QMI mode and masks
+  around these operations.
+- **Auto SA/NSA**, **SA only**, **NSA only** and **LTE only** use Qualcomm NAS
+  power-cycle-scoped preferences. The original mode and SA/NSA masks are held
+  in memory, read back after writes and restored if verification fails. LTE
+  only preserves the current extended LTE mask.
+- **Lock NR** and **Lock LTE** intersect requested bands with the captured
+  factory-enabled masks, write a temporary preference, read it back exactly and
+  roll back on failure.
+- **Restore automatic defaults** restores the captured SA/NSA tuple, extended
+  LTE mask and automatic operator selection. The baseline is bound to a digest
+  of the current VOS USB serial; the raw serial is not stored or returned, and
+  the masks are not persisted across app launches.
+- **Neighbor measurements** reads current Qualcomm LTE measurements; it is not
   an active RF scan. This firmware does not expose a standard NR-neighbor list.
 
-These controls do not edit `carrier_policy.xml`, OEM files, the hardware band
-filter, USB composition or APN settings.
-
-Replacing the physical SIM does not silently reset manual operator selection,
-SA/NSA/LTE preference or band locks. If those temporary modem settings exclude
-the new SIM's network, explicitly choose **Automatic Selection** or **Restore
-automatic defaults**.
+These controls are unavailable for the ZTE backend. Replacing a VOS SIM does
+not silently reset a manual selection or temporary radio preference; choose
+**Automatic Selection** or **Restore automatic defaults** when needed.
 
 ## Connection and security notes
 
+- Modem passwords are stored in the current macOS account's Keychain. They are
+  not stored in UserDefaults, endpoint caches, management URLs or diagnostics.
+- On upgrade, a legacy VOS password previously stored in UserDefaults is moved
+  to Keychain and the old preference is deleted after a successful migration.
+  If Keychain is temporarily unavailable, the old value is retained only so a
+  later launch can retry the migration.
+- ZTE discovery is anonymous, but status collection starts only after the user
+  supplies a valid Web administrator password in Settings. The authenticated
+  session remains in process memory and is scoped to its endpoint/interface.
 - Different VOS units can share `192.168.225.1` while using different SSH host
-  keys. For this physically attached local USB network, the VOS backend
-  intentionally disables SSH host-key verification and does not modify
-  `~/.ssh/known_hosts`. It therefore does not authenticate the SSH server's
-  identity. Point the app only at a trusted, locally attached VOS.
-- When the default address is used and a `192.168.225.x` USB interface is
-  detected, SSH is bound to that source address.
-- The SSH password is passed to OpenSSH through the bundled `SSH_ASKPASS`
-  helper, not through command-line arguments or diagnostics.
-- Connection settings, including the password, are currently stored in the
-  macOS user account's application preferences, not in Keychain.
-- Clicking an LTE Cell ID sends that ID to CellMapper in the browser URL, where
-  it may remain in browser history. Clicking an NR Cell ID copies the NCI to the
-  clipboard; it is sent to CellMapper only if you paste it into **Cell Search**.
+  keys. For this local modem path, the VOS backend disables SSH host-key
+  verification and does not modify `~/.ssh/known_hosts`; point it only at a
+  trusted device and network.
+- The VOS SSH password is passed through the bundled `SSH_ASKPASS` helper, not
+  through command-line arguments. Both backends omit credentials and stable
+  device identifiers from diagnostics.
+- Clicking an LTE Cell ID sends it in a CellMapper browser URL, where it may
+  remain in browser history. Clicking an NR Cell ID first copies the NCI; it is
+  sent only if pasted into **Cell Search**.
 
-## Build from source
+## Backend architecture and adding another modem
+
+Transport-specific code implements the common `ModemStatusBackend` protocol.
+A `ModemDiscoveryProfile` declares a backend's default management endpoints,
+and `ModemBackendRegistry` pairs the implementation, discovery profile,
+capabilities and credential policy. `ModemCoordinator` selects only registered
+backends and keeps discovery separate from status collection.
+
+To add another modem, implement a backend, add its `ModemKind`, provide a
+discovery profile and register the pair. Exposing it as a manual Settings choice
+also requires a `ModemSelection` case plus the corresponding credential fields
+and localized UI. The per-interface topology, candidate ranking, probe timeout
+and registry-driven coordinator remain transport-neutral. New write operations
+must be represented as explicit capabilities so they cannot appear on a
+read-only backend accidentally.
+
+## Build from source and tests
 
 Install Apple Command Line Tools, then run:
 
@@ -206,32 +279,54 @@ make test    # tests only
 make build   # tests, builds and packages the app
 ```
 
+For a public build that should retain a stable application identity across
+upgrades, provide an Apple Developer ID Application signing identity and require
+the build to use it:
+
+```sh
+SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+  REQUIRE_STABLE_SIGNING=1 make build
+```
+
+Without `SIGNING_IDENTITY`, the build script intentionally creates an ad-hoc
+signed local build and prints a warning. Because an ad-hoc binary's signing
+identity can change when it is rebuilt, macOS may ask for Keychain access again
+after an upgrade. The app reports Keychain read/write failures in Settings and
+does not silently replace an existing credential when Keychain access fails.
+
 The packaged application archive is written to:
 
 ```text
 dist/Cellular-Modem-Monitor-macOS.zip
 ```
 
-Source builds target the architecture of the Mac performing the build. Offline
-tests cover LTE and NR bands, explicit DSD SA/NSA, signal metrics, Cell ID,
-PLMN-name fallback, LTE/NR masks, detailed LTE CA data and malformed QMI
-responses. The read-only SSH/QMI path was validated end to end on physical VOS
-hardware on 2026-08-31.
+Offline tests cover the VOS QMI parsers and temporary-control safeguards; ZTE
+UBus authentication/session behavior and radio payload parsing; credential
+policies and non-secret preferences; backend registry/coordinator selection;
+malformed responses; and
+synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed Slate paths,
+same-IP multi-interface isolation, interface exclusion, priorities,
+scheme/port separation, backend filtering, deadlines and deterministic
+concurrent results. These tests do not require or modify a physical modem.
+
+The read-only VOS SSH/QMI and ZTE Web UBus status paths were validated end to
+end on physical hardware on 2026-08-31.
 
 ## Current limitations
 
-- Only VOS 5G is supported in this release.
 - The prebuilt release is Apple Silicon (`arm64`) only.
-- Some fields may be absent when the modem or network does not report them.
-- Standard LTE CA QMI reports SCell carrier identity/channel/bandwidth but not every SCell's
-  global Cell ID or all four signal metrics; unavailable per-carrier values are
-  shown as `—` rather than copied from the serving cell.
+- ZTE G5 MAX / MC7530CA support is status-only; VOS network/radio controls are
+  not available for it.
+- A routed modem requires an existing reachable route. The app does not
+  configure the Mac, Slate or another router.
+- Some fields are absent when the modem, firmware or network does not report
+  them. Missing values are shown as `—` rather than inferred.
+- Standard LTE CA data may identify SCell band/channel/bandwidth without every
+  SCell's global Cell ID or all signal metrics.
 - The UI currently shows one primary NR band and detailed LTE PCell/SCell data;
-  the public QMI path used by this backend does not enumerate multiple NR
-  component carriers.
-- This app does not unlock bands or edit persistent modem policy files. Its
-  operator-selection and radio-access controls affect registration and
-  power-cycle-scoped radio preferences only.
+  neither backend currently enumerates every possible NR component carrier.
+- VOS control changes are temporary and limited to the documented registration
+  and power-cycle-scoped radio preferences.
 
 ## Acknowledgements
 

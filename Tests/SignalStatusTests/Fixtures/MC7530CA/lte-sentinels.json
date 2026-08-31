@@ -1,0 +1,19 @@
+{
+  "network_type": "LTE",
+  "network_provider": "Example Carrier",
+  "rmcc": "001",
+  "rmnc": 1,
+  "wan_active_band": "B12",
+  "wan_active_channel": 5010,
+  "cell_id": 42,
+  "lte_pci": 7,
+  "lte_rsrp": -32768,
+  "lte_rsrq": -32768,
+  "lte_rssi": -32768,
+  "lte_snr": -32768,
+  "nr5g_action_band": 0,
+  "nr5g_rsrp": null,
+  "lteca": "",
+  "ltecasig": "",
+  "nrca": null
+}

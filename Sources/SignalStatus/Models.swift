@@ -14,7 +14,7 @@ enum ConnectionState: Equatable, Sendable {
         case .online: return "Online"
         case .stale: return "Stale"
         case .disconnected: return "Disconnected"
-        case .authenticationFailed: return "SSH login failed"
+        case .authenticationFailed: return "Authentication failed"
         case .qmiUnavailable: return "QMI unavailable"
         }
     }
@@ -631,6 +631,8 @@ struct DeviceConfiguration: Equatable, Sendable {
     var username: String
     var password: String
     var refreshInterval: TimeInterval
+    var sourceAddress: String? = nil
+    var interfaceName: String? = nil
 
     var sshHost: String? { baseURL?.host }
 

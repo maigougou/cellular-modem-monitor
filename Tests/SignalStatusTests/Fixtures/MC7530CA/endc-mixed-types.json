@@ -1,0 +1,35 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 3,
+    "result": [
+      0,
+      {
+        "network_type": "ENDC",
+        "network_provider_fullname": "Example Carrier",
+        "rmcc": 302,
+        "rmnc": "220",
+        "wan_active_band": "LTE BAND 2",
+        "wan_active_channel": "900",
+        "cell_id": "19088743",
+        "lte_pci": 223,
+        "lte_rsrp": "-99",
+        "lte_rsrq": -15.5,
+        "lte_rssi": -65,
+        "lte_snr": "2.0",
+        "nr5g_action_band": "n66",
+        "nr5g_action_channel": 434910,
+        "nr5g_bandwidth": "20",
+        "nr5g_cell_id": null,
+        "nr5g_pci": "41",
+        "nr5g_rsrp": -104,
+        "nr5g_rsrq": "-12",
+        "nr5g_rssi": -99,
+        "nr5g_snr": "10.5",
+        "lteca": "223,2,0,900,20;223,66,1,66811,15;",
+        "ltecasig": "-107.9,-14.1,10.0,-86.1,0,1;",
+        "nrca": "opaque-vendor-value"
+      }
+    ]
+  }
+]
