@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 protocol CredentialStoring: Sendable {
     func password(for account: String) throws -> String?
@@ -7,16 +6,19 @@ protocol CredentialStoring: Sendable {
     func removePassword(for account: String) throws
 }
 
-enum CredentialStoreError: LocalizedError, Equatable {
-    case unexpectedStatus(OSStatus)
+enum LocalCredentialStoreError: LocalizedError, Equatable {
+    case unsafePath(String)
+    case invalidFormat
+    case writeFailed
 
     var errorDescription: String? {
         switch self {
-        case let .unexpectedStatus(status):
-            if let message = SecCopyErrorMessageString(status, nil) as String? {
-                return "The Keychain operation failed: \(message)"
-            }
-            return "The Keychain operation failed (\(status))."
+        case let .unsafePath(path):
+            return "The local credential path is not a regular private file: \(path)"
+        case .invalidFormat:
+            return "The local credential file is unreadable or has an invalid format."
+        case .writeFailed:
+            return "The local credential file could not be written."
         }
     }
 }
@@ -26,10 +28,9 @@ struct CredentialUpdate: Equatable, Sendable {
     let password: String
 }
 
-/// Records whether the value shown in Settings came from a successful
-/// Keychain read. An unavailable value is not equivalent to an empty value:
-/// overwriting it with an empty field could delete a credential that still
-/// exists in Keychain.
+/// Records whether the value shown in Settings came from a successful local
+/// credential-file read. An unavailable value is not equivalent to an empty
+/// value: overwriting it could delete a credential that still exists on disk.
 enum CredentialLoadState: Equatable, Sendable {
     case loaded(String)
     case unavailable(String)
@@ -70,14 +71,13 @@ enum CredentialTransactionError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .rollbackFailed(writeError, rollbackErrors):
-            return "Keychain update failed (\(writeError)); restoring the previous credentials also failed: \(rollbackErrors.joined(separator: "; "))"
+            return "Credential update failed (\(writeError)); restoring the previous credentials also failed: \(rollbackErrors.joined(separator: "; "))"
         }
     }
 }
 
-/// Keychain does not provide a transaction spanning independent generic
-/// password items. Snapshot both values first and restore both if either write
-/// fails, so Settings never reports a clean failure after a partial update.
+/// Snapshot both values first and restore both if either write fails, so
+/// Settings never reports a clean failure after a partial update.
 enum CredentialTransaction {
     private enum OriginalCredential {
         case missing
@@ -128,37 +128,43 @@ enum CredentialTransaction {
     }
 }
 
-/// Stores modem credentials independently from discovery and radio data.
+/// Stores modem credentials independently from discovery and radio data in a
+/// single app-local JSON file.
 ///
-/// UserDefaults intentionally holds only non-secret connection preferences.
-/// Passwords never become part of a management URL, diagnostics, or a modem
-/// endpoint cache.
-final class KeychainCredentialStore: CredentialStoring, @unchecked Sendable {
-    static let shared = KeychainCredentialStore()
+/// The containing directory is 0700 and the file is 0600. This deliberately
+/// avoids macOS Keychain prompts for a locally managed modem, but it is not
+/// encrypted: software running as the same macOS account can read it.
+final class LocalCredentialStore: CredentialStoring, @unchecked Sendable {
+    static let shared = LocalCredentialStore()
 
-    private let service: String
+    static let directoryName = "Cellular Modem Monitor"
+    static let fileName = "credentials.json"
 
-    init(service: String = "com.maigougou.cellularmodemmonitor.credentials") {
-        self.service = service
+    private let fileURL: URL
+    private let fileManager: FileManager
+    private let lock = NSLock()
+
+    init(
+        fileURL: URL? = nil,
+        fileManager: FileManager = .default
+    ) {
+        self.fileManager = fileManager
+        self.fileURL = fileURL ?? Self.defaultFileURL(fileManager: fileManager)
+    }
+
+    static func defaultFileURL(fileManager: FileManager = .default) -> URL {
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent(directoryName, isDirectory: true)
+            .appendingPathComponent(fileName, isDirectory: false)
     }
 
     func password(for account: String) throws -> String? {
-        var query = baseQuery(account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else {
-            throw CredentialStoreError.unexpectedStatus(status)
-        }
-        guard let data = item as? Data,
-              let password = String(data: data, encoding: .utf8)
-        else {
-            throw CredentialStoreError.unexpectedStatus(errSecDecode)
-        }
-        return password
+        try withLock { try load()[account] }
     }
 
     func setPassword(_ password: String, for account: String) throws {
@@ -167,39 +173,105 @@ final class KeychainCredentialStore: CredentialStoring, @unchecked Sendable {
             return
         }
 
-        let data = Data(password.utf8)
-        let query = baseQuery(account: account)
-        let attributes = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-
-        if updateStatus == errSecItemNotFound {
-            var item = query
-            item[kSecValueData as String] = data
-            let addStatus = SecItemAdd(item as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw CredentialStoreError.unexpectedStatus(addStatus)
-            }
-            return
-        }
-
-        guard updateStatus == errSecSuccess else {
-            throw CredentialStoreError.unexpectedStatus(updateStatus)
+        try withLock {
+            var values = try load()
+            values[account] = password
+            try save(values)
         }
     }
 
     func removePassword(for account: String) throws {
-        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw CredentialStoreError.unexpectedStatus(status)
+        try withLock {
+            var values = try load()
+            guard values.removeValue(forKey: account) != nil else { return }
+            try save(values)
         }
     }
 
-    private func baseQuery(account: String) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
+    private func withLock<T>(_ operation: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
+
+    private func load() throws -> [String: String] {
+        guard fileManager.fileExists(atPath: fileURL.path) else { return [:] }
+        // Restore both documented permission boundaries before reading an
+        // existing store, even if they were changed outside the app.
+        try ensurePrivateDirectory(fileURL.deletingLastPathComponent())
+        let values = try fileURL.resourceValues(forKeys: [
+            .isSymbolicLinkKey,
+            .isRegularFileKey
+        ])
+        guard values.isSymbolicLink != true, values.isRegularFile == true else {
+            throw LocalCredentialStoreError.unsafePath(fileURL.path)
+        }
+        // Tighten files created by an older build before reading them.
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+        let data = try Data(contentsOf: fileURL, options: [.mappedIfSafe])
+        do {
+            return try JSONDecoder().decode([String: String].self, from: data)
+        } catch {
+            throw LocalCredentialStoreError.invalidFormat
+        }
+    }
+
+    private func save(_ values: [String: String]) throws {
+        let directoryURL = fileURL.deletingLastPathComponent()
+        try ensurePrivateDirectory(directoryURL)
+
+        if fileManager.fileExists(atPath: fileURL.path) {
+            let resourceValues = try fileURL.resourceValues(forKeys: [
+                .isSymbolicLinkKey,
+                .isRegularFileKey
+            ])
+            guard resourceValues.isSymbolicLink != true,
+                  resourceValues.isRegularFile == true
+            else { throw LocalCredentialStoreError.unsafePath(fileURL.path) }
+        }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(values)
+        do {
+            // Atomic replacement occurs inside the private 0700 directory;
+            // chmod the final inode before returning success.
+            try data.write(to: fileURL, options: [.atomic])
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: fileURL.path
+            )
+        } catch let error as LocalCredentialStoreError {
+            throw error
+        } catch {
+            throw LocalCredentialStoreError.writeFailed
+        }
+    }
+
+    private func ensurePrivateDirectory(_ directoryURL: URL) throws {
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDirectory) {
+            let values = try directoryURL.resourceValues(forKeys: [
+                .isSymbolicLinkKey,
+                .isDirectoryKey
+            ])
+            guard isDirectory.boolValue,
+                  values.isSymbolicLink != true,
+                  values.isDirectory == true
+            else { throw LocalCredentialStoreError.unsafePath(directoryURL.path) }
+        } else {
+            try fileManager.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        }
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directoryURL.path
+        )
     }
 }

@@ -1042,11 +1042,11 @@ enum DirectTests {
                     "unreadable": "must-survive",
                     "editable": "new-value"
                 ],
-                "saving another setting preserves an unreadable Keychain credential",
+                "saving another setting preserves an unreadable local credential",
                 failures: &failures
             )
         } catch {
-            failures.append("preserve unreadable Keychain credential: \(error)")
+            failures.append("preserve unreadable local credential: \(error)")
         }
 
         do {
@@ -1074,10 +1074,139 @@ enum DirectTests {
                 try CredentialTransaction.apply([
                     CredentialUpdate(account: "vos", password: "new-vos")
                 ], store: store)
-                failures.append("credential transaction must not treat a Keychain read error as missing")
+                failures.append("credential transaction must not treat a credential read error as missing")
             } catch {}
             check(store.setCallCount() == 0,
                   "credential read failure performs no writes", failures: &failures)
+        }
+
+        do {
+            let fileManager = FileManager.default
+            let root = fileManager.temporaryDirectory.appendingPathComponent(
+                "CellularModemMonitor.DirectTests.LocalCredentialStore.\(UUID().uuidString)",
+                isDirectory: true
+            )
+            defer { try? fileManager.removeItem(at: root) }
+            let fileURL = root
+                .appendingPathComponent("private", isDirectory: true)
+                .appendingPathComponent("credentials.json", isDirectory: false)
+            let store = LocalCredentialStore(fileURL: fileURL, fileManager: fileManager)
+
+            try store.setPassword("fixture-vos-secret", for: "vos")
+            try store.setPassword("fixture-zte-secret", for: "zte")
+            check(
+                try store.password(for: "vos") == "fixture-vos-secret" &&
+                    store.password(for: "zte") == "fixture-zte-secret",
+                "local credential store round-trips independent accounts",
+                failures: &failures
+            )
+
+            let directoryAttributes = try fileManager.attributesOfItem(
+                atPath: fileURL.deletingLastPathComponent().path
+            )
+            let fileAttributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+            let directoryMode = (directoryAttributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
+            let fileMode = (fileAttributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
+            check(directoryMode & 0o777 == 0o700,
+                  "local credential directory is mode 0700", failures: &failures)
+            check(fileMode & 0o777 == 0o600,
+                  "local credential file is mode 0600", failures: &failures)
+
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: fileURL.deletingLastPathComponent().path
+            )
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o644],
+                ofItemAtPath: fileURL.path
+            )
+            _ = try store.password(for: "zte")
+            let repairedDirectoryMode = (
+                try fileManager.attributesOfItem(
+                    atPath: fileURL.deletingLastPathComponent().path
+                )[.posixPermissions] as? NSNumber
+            )?.intValue ?? -1
+            let repairedFileMode = (
+                try fileManager.attributesOfItem(atPath: fileURL.path)[.posixPermissions] as? NSNumber
+            )?.intValue ?? -1
+            check(repairedDirectoryMode & 0o777 == 0o700 &&
+                    repairedFileMode & 0o777 == 0o600,
+                  "local credential read restores private directory/file modes",
+                  failures: &failures)
+
+            try store.removePassword(for: "vos")
+            check(
+                try store.password(for: "vos") == nil &&
+                    store.password(for: "zte") == "fixture-zte-secret",
+                "removing one local credential preserves the other account",
+                failures: &failures
+            )
+        } catch {
+            failures.append("local credential round-trip and permissions: \(error)")
+        }
+
+        do {
+            let fileManager = FileManager.default
+            let root = fileManager.temporaryDirectory.appendingPathComponent(
+                "CellularModemMonitor.DirectTests.LocalCredentialSymlink.\(UUID().uuidString)",
+                isDirectory: true
+            )
+            defer { try? fileManager.removeItem(at: root) }
+            try fileManager.createDirectory(
+                at: root,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let targetURL = root.appendingPathComponent("target.json", isDirectory: false)
+            let targetData = Data(#"{"existing":"must-survive"}"#.utf8)
+            try targetData.write(to: targetURL)
+            let fileURL = root.appendingPathComponent("credentials.json", isDirectory: false)
+            try fileManager.createSymbolicLink(
+                atPath: fileURL.path,
+                withDestinationPath: targetURL.path
+            )
+            let store = LocalCredentialStore(fileURL: fileURL, fileManager: fileManager)
+            do {
+                try store.setPassword("must-not-write", for: "new")
+                failures.append("local credential symlink path must fail closed")
+            } catch let error as LocalCredentialStoreError {
+                if case .unsafePath = error {} else {
+                    failures.append("local credential symlink reports the wrong error: \(error)")
+                }
+            }
+            check(
+                try Data(contentsOf: targetURL) == targetData,
+                "local credential symlink rejection leaves its target untouched",
+                failures: &failures
+            )
+        } catch {
+            failures.append("local credential symlink fail-closed setup: \(error)")
+        }
+
+        do {
+            let fileManager = FileManager.default
+            let root = fileManager.temporaryDirectory.appendingPathComponent(
+                "CellularModemMonitor.DirectTests.LocalCredentialMalformed.\(UUID().uuidString)",
+                isDirectory: true
+            )
+            defer { try? fileManager.removeItem(at: root) }
+            try fileManager.createDirectory(
+                at: root,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let fileURL = root.appendingPathComponent("credentials.json", isDirectory: false)
+            try Data("{not-json".utf8).write(to: fileURL)
+            let store = LocalCredentialStore(fileURL: fileURL, fileManager: fileManager)
+            do {
+                _ = try store.password(for: "zte")
+                failures.append("malformed local credential JSON must fail closed")
+            } catch let error as LocalCredentialStoreError {
+                check(error == .invalidFormat,
+                      "malformed local credential JSON reports invalid format", failures: &failures)
+            }
+        } catch {
+            failures.append("malformed local credential setup: \(error)")
         }
 
         let suiteName = "CellularModemMonitor.DirectTests.\(UUID().uuidString)"
@@ -1110,10 +1239,10 @@ enum DirectTests {
             let store = DirectCredentialStore(values: [:], failsReads: true)
             do {
                 _ = try StatusModel.loadVOSPassword(defaults: defaults, credentialStore: store)
-                failures.append("Keychain read failure must be surfaced")
+                failures.append("local credential read failure must be surfaced")
             } catch {}
             check(defaults.string(forKey: "sshPassword") == "legacy-must-remain",
-                  "Keychain read failure preserves legacy preference", failures: &failures)
+                  "local credential read failure preserves legacy preference", failures: &failures)
         }
 
         let migrationSuiteName = "CellularModemMonitor.DirectTests.Migration.\(UUID().uuidString)"
@@ -1144,7 +1273,7 @@ enum DirectTests {
                         password: result.password,
                         loadState: result.state
                     )]) == [CredentialUpdate(account: "vos-5g-ssh", password: "legacy-must-remain")],
-                    "Save retries a failed legacy Keychain migration before cleanup",
+                    "Save retries a failed legacy credential migration before cleanup",
                     failures: &failures
                 )
             } catch {
@@ -1477,45 +1606,126 @@ enum DirectTests {
             let http = DirectScriptedZTEHTTPTransport(responses: [
                 zteResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
                 zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
-                zteCallResponse(#"{"values":{"modem_msn":"fixture-device-alpha"}}"#)
+                zteCallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+                zteCallResponse(#"{"modem_msn":"fixture-device-alpha"}"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+                zteCallResponse(#"{"network_type":"LTE","wan_active_band":"B12","wan_active_channel":5010,"lte_pci":7}"#)
             ])
             let backend = MC7530Backend(httpTransport: http)
+            let endpoint = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en8",
+                interfaceIndex: 18,
+                sourceAddress: "192.168.254.20",
+                connectionPath: .directUSB,
+                gateway: "192.168.254.1"
+            )
+            let credentials = ModemCredentials.web(
+                WebCredentials(password: "fixture-password")
+            )
             let identity = try await backend.identify(
-                endpoint: ScopedEndpoint(
-                    baseURL: URL(string: "http://192.168.254.1")!,
-                    interfaceName: "en8",
-                    interfaceIndex: 18,
-                    sourceAddress: "192.168.254.20",
-                    connectionPath: .directUSB,
-                    gateway: "192.168.254.1"
-                ),
-                credentials: .none
+                endpoint: endpoint,
+                credentials: credentials
+            )
+            let snapshot = try await backend.fetchSnapshot(
+                endpoint: endpoint,
+                credentials: credentials
             )
             let expected = try MC7530ControlSession.fingerprint(
                 modemMSN: "fixture-device-alpha"
             )
             check(identity?.kind == .zteMC7530CA &&
                     identity?.stableIdentifier == expected,
-                  "ZTE anonymous discovery binds exact model and MSN digest",
+                  "ZTE discovery binds authenticated MSN digest after anonymous model preflight",
                   failures: &failures)
+            check(snapshot.lteBand == "B12",
+                  "ZTE status follows authenticated identity", failures: &failures)
             let records = await http.records()
-            check(records.count == 3 &&
-                    records.allSatisfy { $0.sessionID == ZTEUBusTransport.zeroSessionID },
-                  "ZTE discovery sends no administrator session",
+            let identityRecords = Array(records.prefix(6))
+            check(records.count == 8 &&
+                    identityRecords.prefix(4).allSatisfy {
+                        $0.sessionID == ZTEUBusTransport.zeroSessionID
+                    } &&
+                    records.suffix(4).allSatisfy { $0.sessionID == "fixture-sid" },
+                  "ZTE identity switches to the authenticated SID only after preflight and login",
                   failures: &failures)
-            check(records.map(\.ubusMethod) == [nil, "get", "get"] &&
+            check(identityRecords.map(\.ubusMethod) == [
+                nil, "get", "web_login_info", "web_login", "get", "get_modem_msn"
+            ] &&
                     records[1].parameters == [
                         "config": "zwrt_common_info", "section": "common_config"
-                    ] && records[2].parameters == [
-                        "config": "zwrt_zte_mdm", "section": "device_info"
+                    ] && records[4].parameters == [
+                        "config": "zwrt_common_info", "section": "common_config"
                     ],
-                  "ZTE discovery uses exact retail anonymous UCI identity fields",
+                  "ZTE identity performs anonymous schema/model checks then authenticated retail identity reads",
                   failures: &failures)
-            check(records.allSatisfy { $0.ubusMethod != "web_login" },
-                  "ZTE discovery never submits the Web password",
+            check(records[2].object == "zwrt_web" &&
+                    records[3].object == "zwrt_web" &&
+                    records[5].object == "zwrt_zte_mdm.api" &&
+                    records[5].header("Z-Tag") == "get_modem_msn",
+                  "ZTE identity uses the verified authenticated get_modem_msn method",
+                  failures: &failures)
+            check(records.filter { $0.ubusMethod == "web_login" }.count == 1 &&
+                    records.suffix(2).map(\.ubusMethod) == ["get", "nwinfo_get_netinfo"],
+                  "ZTE identity and first status read reuse one authenticated session",
                   failures: &failures)
         } catch {
-            failures.append("ZTE anonymous exact identity: \(error)")
+            failures.append("ZTE authenticated exact identity: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#)
+            ])
+            let backend = MC7530Backend(httpTransport: http)
+            do {
+                _ = try await backend.identify(
+                    endpoint: ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!),
+                    credentials: .none
+                )
+                failures.append("ZTE identity without Web credentials must fail closed")
+            } catch let error as ModemBackendError {
+                check(error == .credentialsRequired(.web),
+                      "ZTE identity without a password reports required Web credentials",
+                      failures: &failures)
+            }
+            let records = await http.records()
+            check(records.map(\.ubusMethod) == [nil, "get"] &&
+                    records.allSatisfy { $0.sessionID == ZTEUBusTransport.zeroSessionID },
+                  "ZTE missing credentials stop after anonymous schema/model preflight",
+                  failures: &failures)
+        } catch {
+            failures.append("ZTE missing identity credentials setup: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+                zteCallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+                zteCallResponse(#"{"result":"1"}"#)
+            ])
+            let backend = MC7530Backend(httpTransport: http)
+            do {
+                _ = try await backend.identify(
+                    endpoint: ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!),
+                    credentials: .web(WebCredentials(password: "wrong-fixture-password"))
+                )
+                failures.append("ZTE identity with a rejected password must fail closed")
+            } catch let error as ZTEUBusError {
+                check(error == .authenticationFailed,
+                      "ZTE identity surfaces structured authentication failure",
+                      failures: &failures)
+            }
+            let records = await http.records()
+            check(records.map(\.ubusMethod) == [nil, "get", "web_login_info", "web_login"],
+                  "ZTE rejected identity password stops before authenticated model/MSN reads",
+                  failures: &failures)
+        } catch {
+            failures.append("ZTE rejected identity credentials setup: \(error)")
         }
 
         do {
@@ -2590,8 +2800,8 @@ enum DirectTests {
                 ($0.kind, $0.probeTimeoutNanoseconds)
             }
         )
-        check(builtInTimeouts[.zteMC7530CA] == 2_000_000_000,
-              "ZTE discovery keeps the short HTTP probe budget", failures: &failures)
+        check(builtInTimeouts[.zteMC7530CA] == 5_000_000_000,
+              "ZTE discovery budget covers authenticated identity chain", failures: &failures)
         check(builtInTimeouts[.vos5G] == 9_000_000_000,
               "VOS discovery exceeds the SSH probe budget", failures: &failures)
 
@@ -2762,8 +2972,8 @@ enum DirectTests {
                   "coordinator reuses active endpoint", failures: &failures)
             let zteHistory = await zte.history()
             let vosHistory = await vos.history()
-            check(zteHistory.identifyCredentials == [.none],
-                  "coordinator ZTE identification is anonymous", failures: &failures)
+            check(zteHistory.identifyCredentials == [web],
+                  "coordinator ZTE identification receives available Web credentials", failures: &failures)
             check(zteHistory.fetchCredentials == [web, web],
                   "coordinator ZTE status uses web credential", failures: &failures)
             check(vosHistory.identifyCredentials.isEmpty && vosHistory.fetchCredentials.isEmpty,
@@ -2787,6 +2997,126 @@ enum DirectTests {
                   "coordinator preferences exclude secrets", failures: &failures)
         } catch {
             failures.append("coordinator ZTE policy/reuse: \(error)")
+        }
+
+        do {
+            let topology = NetworkTopologySnapshot(interfaces: [directDiscoveryInterface(
+                name: "en8", index: 18, address: "192.168.254.20", prefixLength: 24,
+                router: "192.168.254.1"
+            )])
+            let matchingZTE = DirectMockModemBackend(kind: .zteMC7530CA)
+            let matchingCoordinator = ModemCoordinator(
+                registry: try directRegistry(zte: matchingZTE),
+                topologyProvider: DirectFixedNetworkTopologyProvider(snapshot: topology),
+                probeTimeoutNanoseconds: 100_000_000
+            )
+            do {
+                _ = try await matchingCoordinator.read(
+                    preferences: ModemConnectionPreferences(selection: .automatic),
+                    credentials: ModemConnectionCredentials()
+                )
+                failures.append("automatic ZTE discovery must require Web credentials after a match")
+            } catch let error as ModemCoordinatorError {
+                if case let .authenticationFailed(kind, _) = error {
+                    check(kind == .zteMC7530CA,
+                          "automatic matching ZTE reports its Web credential requirement",
+                          failures: &failures)
+                } else {
+                    failures.append("automatic matching ZTE reports wrong error: \(error)")
+                }
+            }
+            let matchingHistory = await matchingZTE.history()
+            check(matchingHistory.identifyCredentials == [.none] &&
+                    matchingHistory.fetchCredentials.isEmpty,
+                  "automatic ZTE performs anonymous preflight before requiring a password",
+                  failures: &failures)
+
+            let unrelated = DirectMockModemBackend(kind: .zteMC7530CA, identifies: false)
+            let unrelatedCoordinator = ModemCoordinator(
+                registry: try directRegistry(zte: unrelated),
+                topologyProvider: DirectFixedNetworkTopologyProvider(snapshot: topology),
+                probeTimeoutNanoseconds: 100_000_000
+            )
+            do {
+                _ = try await unrelatedCoordinator.read(
+                    preferences: ModemConnectionPreferences(selection: .automatic),
+                    credentials: ModemConnectionCredentials()
+                )
+                failures.append("an unrelated automatic candidate must not match ZTE")
+            } catch let error as ModemCoordinatorError {
+                check(error == .noMatchingModem,
+                      "unrelated automatic candidate is not mislabeled as authentication failure",
+                      failures: &failures)
+            }
+            let unrelatedHistory = await unrelated.history()
+            check(unrelatedHistory.identifyCredentials == [.none] &&
+                    unrelatedHistory.fetchCredentials.isEmpty,
+                  "unrelated automatic candidate receives anonymous preflight only",
+                  failures: &failures)
+        } catch {
+            failures.append("coordinator automatic ZTE two-stage credential policy: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#)
+            ])
+            let backend = MC7530Backend(httpTransport: http)
+            let profile = ModemDiscoveryProfile(
+                kind: .zteMC7530CA,
+                defaultBaseURLs: [URL(string: "http://192.168.254.1")!],
+                probeTimeoutNanoseconds: 100_000_000
+            )
+            let registry = try ModemBackendRegistry(registrations: [
+                ModemBackendRegistration(
+                    backend: backend,
+                    discoveryProfile: profile,
+                    identificationCredentials: .configuredOrAnonymous(.web),
+                    statusCredentials: .configured(.web)
+                )
+            ])
+            let routedTopology = NetworkTopologySnapshot(interfaces: [
+                directDiscoveryInterface(
+                    name: "en1", index: 6, address: "192.168.8.23", prefixLength: 24,
+                    router: "192.168.8.1", isPrimary: true
+                )
+            ])
+            let coordinator = ModemCoordinator(
+                registry: registry,
+                topologyProvider: DirectFixedNetworkTopologyProvider(snapshot: routedTopology),
+                probeTimeoutNanoseconds: 100_000_000
+            )
+            do {
+                _ = try await coordinator.read(
+                    preferences: ModemConnectionPreferences(selection: .automatic),
+                    credentials: ModemConnectionCredentials()
+                )
+                failures.append("routed MC7530 preflight must request its missing Web password")
+            } catch let error as ModemCoordinatorError {
+                if case let .authenticationFailed(kind, _) = error {
+                    check(kind == .zteMC7530CA,
+                          "routed MC7530 product match survives weak-topology filtering",
+                          failures: &failures)
+                } else {
+                    failures.append("routed MC7530 preflight reports wrong error: \(error)")
+                }
+            }
+            let report = await coordinator.lastDiscoveryReport
+            if let attempt = report?.attempts.first,
+               case let .failed(_, category, confirmedProduct) = attempt.result {
+                let strongEvidence: Set<ModemDiscoveryCandidateSource> = [
+                    .matchingSubnet, .matchingGateway, .manual, .lastSuccessful
+                ]
+                check(category == .authentication && confirmedProduct &&
+                        attempt.candidate.sources.isDisjoint(with: strongEvidence),
+                      "routed authenticated identity failure retains confirmed-product evidence",
+                      failures: &failures)
+            } else {
+                failures.append("routed MC7530 preflight did not record its confirmed failure")
+            }
+        } catch {
+            failures.append("coordinator routed ZTE confirmed-product credential path: \(error)")
         }
 
         do {
@@ -2970,7 +3300,8 @@ enum DirectTests {
                     candidate: candidate,
                     result: .failed(
                         VOSClientError.authenticationFailed.localizedDescription,
-                        category: .authentication
+                        category: .authentication,
+                        confirmedProduct: false
                     )
                 )]
             )
@@ -3162,8 +3493,8 @@ enum DirectTests {
                 vosClient: VOSClient(),
                 zteHTTPTransport: http
             )
-            check(standard.registration(for: .zteMC7530CA)?.identificationCredentials == .anonymous,
-                  "standard registry ZTE anonymous identity policy", failures: &failures)
+            check(standard.registration(for: .zteMC7530CA)?.identificationCredentials == .configuredOrAnonymous(.web),
+                  "standard registry ZTE preflight identity policy", failures: &failures)
             check(standard.registration(for: .zteMC7530CA)?.statusCredentials == .configured(.web),
                   "standard registry ZTE web status policy", failures: &failures)
             check(standard.registration(for: .vos5G)?.identificationCredentials == .configured(.ssh),
@@ -3348,7 +3679,7 @@ enum DirectTests {
                     kind: .zteMC7530CA,
                     defaultBaseURLs: [URL(string: "http://192.168.254.1")!]
                 ),
-                identificationCredentials: .anonymous,
+                identificationCredentials: .configuredOrAnonymous(.web),
                 statusCredentials: .configured(.web)
             ))
         }
@@ -4062,7 +4393,7 @@ private actor DirectMockModemBackend: ModemStatusBackend {
     nonisolated let kind: ModemKind
     nonisolated let capabilities: ModemCapability = [.identityRead, .statusRead]
 
-    private let identity: ModemIdentity
+    private let identity: ModemIdentity?
     private var fetchFailures: [Bool]
     private let typedFetchFailure: DirectMockTypedFetchFailure?
     private var identifyCredentials: [ModemCredentials] = []
@@ -4073,12 +4404,13 @@ private actor DirectMockModemBackend: ModemStatusBackend {
     init(
         kind: ModemKind,
         fetchFailures: [Bool] = [],
-        typedFetchFailure: DirectMockTypedFetchFailure? = nil
+        typedFetchFailure: DirectMockTypedFetchFailure? = nil,
+        identifies: Bool = true
     ) {
         self.kind = kind
         self.fetchFailures = fetchFailures
         self.typedFetchFailure = typedFetchFailure
-        self.identity = directIdentity(kind)
+        self.identity = identifies ? directIdentity(kind) : nil
     }
 
     func identify(

@@ -211,7 +211,7 @@ enum L10n {
         "SSH password": "SSH 密码",
         "Web admin password": "Web 管理员密码",
         "Required for status": "读取状态所必需",
-        "Passwords are stored in macOS Keychain. Addresses, selection and display preferences are stored in app settings.": "密码存储在 macOS 钥匙串中；地址、调制解调器选择和显示偏好存储在应用设置中。",
+        "Passwords are stored unencrypted in a private local file readable only by your macOS account. They are never stored in diagnostics or management URLs.": "密码以未加密形式保存在仅当前 macOS 账户可读的本地私有文件中；不会写入诊断信息或管理 URL。",
         "Refresh interval": "刷新间隔",
         "Language": "语言",
         "Menu bar": "菜单栏",

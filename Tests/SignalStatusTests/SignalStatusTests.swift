@@ -698,6 +698,79 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(request.route.interfaceIndex, 18)
     }
 
+    func testMC7530IdentityPrefiltersAnonymouslyBeforeAuthenticatedMSN() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTEResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
+            testZTECallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTECallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#)
+        ])
+        let backend = MC7530Backend(httpTransport: http)
+        let endpoint = ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!)
+        let credentials = ModemCredentials.web(WebCredentials(password: "fixture-password"))
+
+        let identified = try await backend.identify(
+            endpoint: endpoint,
+            credentials: credentials
+        )
+        let identity = try XCTUnwrap(identified)
+
+        XCTAssertEqual(identity.kind, .zteMC7530CA)
+        XCTAssertEqual(
+            identity.stableIdentifier,
+            try MC7530ControlSession.fingerprint(modemMSN: "fixture-device-alpha")
+        )
+        let records = await http.records()
+        XCTAssertEqual(
+            records.map(\.ubusMethod),
+            [nil, "get", "web_login_info", "web_login", "get", "get_modem_msn"]
+        )
+        XCTAssertEqual(
+            records.map(\.sessionID),
+            [
+                ZTEUBusTransport.zeroSessionID,
+                ZTEUBusTransport.zeroSessionID,
+                ZTEUBusTransport.zeroSessionID,
+                ZTEUBusTransport.zeroSessionID,
+                "fixture-sid",
+                "fixture-sid"
+            ]
+        )
+        XCTAssertEqual(records[1].header("Z-Tag"), "zwrt_common_info")
+        XCTAssertEqual(records[4].header("Z-Tag"), "zwrt_common_info")
+        XCTAssertEqual(records[5].header("Z-Tag"), "get_modem_msn")
+    }
+
+    func testMC7530IdentityWrongPasswordFailsBeforeAuthenticatedIdentityRead() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTEResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
+            testZTECallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"1"}"#)
+        ])
+        let backend = MC7530Backend(httpTransport: http)
+        let endpoint = ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!)
+
+        do {
+            _ = try await backend.identify(
+                endpoint: endpoint,
+                credentials: .web(WebCredentials(password: "wrong-fixture-password"))
+            )
+            XCTFail("A rejected Web credential must not identify the modem")
+        } catch let error as ZTEUBusError {
+            XCTAssertEqual(error, .authenticationFailed)
+        }
+
+        let records = await http.records()
+        XCTAssertEqual(
+            records.map(\.ubusMethod),
+            [nil, "get", "web_login_info", "web_login"]
+        )
+        XCTAssertFalse(records.contains { $0.ubusMethod == "get_modem_msn" })
+    }
+
     func testZTEAuthHashesPasswordAndUsesReturnedSession() async throws {
         let expectedHash = "8D1C7328B6F8EFB7E5D58D42216F27B67BE22C038BF4468A546DBA881440F62C"
         XCTAssertEqual(ZTEAuthSession.loginHash(password: "secret", salt: "pepper"), expectedHash)
@@ -1190,7 +1263,7 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertFalse(first.reusedActiveEndpoint)
         XCTAssertTrue(second.reusedActiveEndpoint)
         let zteHistory = await zte.history()
-        XCTAssertEqual(zteHistory.identifyCredentials, [.none])
+        XCTAssertEqual(zteHistory.identifyCredentials, [web])
         XCTAssertEqual(zteHistory.fetchCredentials, [web, web])
         let vosHistory = await vos.history()
         XCTAssertTrue(vosHistory.identifyCredentials.isEmpty)
@@ -1204,6 +1277,114 @@ final class SignalStatusTests: XCTestCase {
         let encoded = try JSONEncoder().encode(preferences)
         XCTAssertEqual(try JSONDecoder().decode(ModemConnectionPreferences.self, from: encoded), preferences)
         XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("fixture-web-password"))
+    }
+
+    func testStandardRegistryUsesTwoStageMC7530IdentityAndRequiresWebForStatus() throws {
+        let registry = try ModemBackendRegistry.standard(
+            zteHTTPTransport: TestScriptedZTEHTTPTransport(responses: [])
+        )
+        let registration = try XCTUnwrap(registry.registration(for: .zteMC7530CA))
+
+        XCTAssertEqual(
+            registration.identificationCredentials,
+            .configuredOrAnonymous(.web)
+        )
+        XCTAssertEqual(registration.statusCredentials, .configured(.web))
+    }
+
+    func testCoordinatorSelectedZTEFailsClosedForMissingOrWrongCredentials() async throws {
+        let zte = TestMockModemBackend(kind: .zteMC7530CA)
+        let coordinator = ModemCoordinator(
+            registry: try testRegistry(zte: zte),
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: NetworkTopologySnapshot(interfaces: [
+                discoveryInterface(
+                    name: "en8", index: 18, address: "192.168.254.20",
+                    prefixLength: 24, router: "192.168.254.1"
+                )
+            ])),
+            probeTimeoutNanoseconds: 100_000_000
+        )
+        let preferences = ModemConnectionPreferences(selection: .zteMC7530CA)
+
+        do {
+            _ = try await coordinator.read(
+                preferences: preferences,
+                credentials: ModemConnectionCredentials()
+            )
+            XCTFail("Missing Web credentials must fail before discovery")
+        } catch let error as ModemBackendError {
+            XCTAssertEqual(error, .credentialsRequired(.web))
+        }
+
+        do {
+            _ = try await coordinator.read(
+                preferences: preferences,
+                credentials: ModemConnectionCredentials([
+                    .zteMC7530CA: .ssh(SSHCredentials(
+                        username: "fixture",
+                        password: "wrong-transport-password"
+                    ))
+                ])
+            )
+            XCTFail("An SSH credential must not be passed to the ZTE Web backend")
+        } catch let error as ModemBackendError {
+            XCTAssertEqual(
+                error,
+                .incompatibleCredentials(expected: .web, actual: .ssh)
+            )
+        }
+
+        let history = await zte.history()
+        XCTAssertTrue(history.identifyCredentials.isEmpty)
+        XCTAssertTrue(history.fetchCredentials.isEmpty)
+    }
+
+    func testCoordinatorAutomaticZTEDefersPasswordUntilAfterAnonymousMatch() async throws {
+        let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
+            name: "en8", index: 18, address: "192.168.254.20",
+            prefixLength: 24, router: "192.168.254.1"
+        )])
+        let matchingZTE = TestMockModemBackend(kind: .zteMC7530CA)
+        let matchingCoordinator = ModemCoordinator(
+            registry: try testRegistry(zte: matchingZTE),
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: topology),
+            probeTimeoutNanoseconds: 100_000_000
+        )
+
+        do {
+            _ = try await matchingCoordinator.read(
+                preferences: ModemConnectionPreferences(selection: .automatic),
+                credentials: ModemConnectionCredentials()
+            )
+            XCTFail("A matching ZTE must require its Web password")
+        } catch let error as ModemCoordinatorError {
+            guard case let .authenticationFailed(kind, _) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertEqual(kind, .zteMC7530CA)
+        }
+        let matchingHistory = await matchingZTE.history()
+        XCTAssertEqual(matchingHistory.identifyCredentials, [.none])
+        XCTAssertTrue(matchingHistory.fetchCredentials.isEmpty)
+
+        let unrelated = TestMockModemBackend(kind: .zteMC7530CA, identifies: false)
+        let unrelatedCoordinator = ModemCoordinator(
+            registry: try testRegistry(zte: unrelated),
+            topologyProvider: FixedNetworkTopologyProvider(snapshot: topology),
+            probeTimeoutNanoseconds: 100_000_000
+        )
+        do {
+            _ = try await unrelatedCoordinator.read(
+                preferences: ModemConnectionPreferences(selection: .automatic),
+                credentials: ModemConnectionCredentials()
+            )
+            XCTFail("An unrelated candidate must not match ZTE")
+        } catch let error as ModemCoordinatorError {
+            XCTAssertEqual(error, .noMatchingModem)
+        }
+        let unrelatedHistory = await unrelated.history()
+        XCTAssertEqual(unrelatedHistory.identifyCredentials, [.none])
+        XCTAssertTrue(unrelatedHistory.fetchCredentials.isEmpty)
     }
 
     func testCoordinatorFailedActiveReadRediscoverAndVOSUsesSSH() async throws {
@@ -2192,7 +2373,7 @@ final class SignalStatusTests: XCTestCase {
                     kind: .zteMC7530CA,
                     defaultBaseURLs: [URL(string: "http://192.168.254.1")!]
                 ),
-                identificationCredentials: .anonymous,
+                identificationCredentials: .configuredOrAnonymous(.web),
                 statusCredentials: .configured(.web)
             ))
         }
@@ -2484,15 +2665,15 @@ private actor TestMockModemBackend: ModemStatusBackend {
     nonisolated let kind: ModemKind
     nonisolated let capabilities: ModemCapability = [.identityRead, .statusRead]
 
-    private let identity: ModemIdentity
+    private let identity: ModemIdentity?
     private var fetchFailures: [Bool]
     private var identifyCredentials: [ModemCredentials] = []
     private var fetchCredentials: [ModemCredentials] = []
 
-    init(kind: ModemKind, fetchFailures: [Bool] = []) {
+    init(kind: ModemKind, fetchFailures: [Bool] = [], identifies: Bool = true) {
         self.kind = kind
         self.fetchFailures = fetchFailures
-        self.identity = modemIdentity(for: kind)
+        self.identity = identifies ? modemIdentity(for: kind) : nil
     }
 
     func identify(endpoint: ScopedEndpoint, credentials: ModemCredentials) async throws -> ModemIdentity? {
