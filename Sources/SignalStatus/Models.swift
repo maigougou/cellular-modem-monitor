@@ -178,8 +178,14 @@ struct CellularNetwork: Identifiable, Equatable, Sendable {
     var plmn: String
     var availability: NetworkAvailability
     var accessTechnologies: [CellularAccessTechnology]
+    /// Opaque token returned by a backend scan and replayed only to that same
+    /// backend when the user selects the row. ZTE uses it for the exact m_rat
+    /// value; VOS does not need one.
+    var selectionToken: String? = nil
 
-    var id: String { plmn }
+    var id: String {
+        selectionToken.map { "\(plmn)|\($0)" } ?? plmn
+    }
 
     var displayName: String {
         if !longName.isEmpty { return longName }
@@ -601,11 +607,11 @@ enum ControlOperationDeviceGuardError: LocalizedError, Equatable, Sendable {
     case deviceChanged
 
     var errorDescription: String? {
-        "The attached VOS changed during the operation. No saved radio tuple was written to the new device."
+        "The attached modem changed during the operation. No saved radio settings were written to the replacement device."
     }
 }
 
-/// Binds one control operation to the physical VOS that started it.
+/// Binds one control operation to the physical modem that started it.
 ///
 /// The expected fingerprint never changes. Once any mismatch is observed, the
 /// guard remains invalid even if the original device later reappears, so no

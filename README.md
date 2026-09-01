@@ -6,9 +6,9 @@ English | [简体中文](README.zh-CN.md)
 cellular radio information. This release supports both **VOS 5G** and the
 **ZTE G5 MAX / MC7530CA**.
 
-Normal status collection is read-only on both devices. VOS 5G also provides an
-optional, explicitly opened **Network & radio controls** panel. The ZTE backend
-is strictly read-only in this release and never exposes those VOS controls.
+Normal status collection is read-only on both devices. An optional, explicitly
+opened **Network & radio controls** panel provides verified controls through
+either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 
 <p align="center">
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
@@ -40,15 +40,19 @@ is strictly read-only in this release and never exposes those VOS controls.
 - Manual refresh, 1/5/10/15/30/60-second polling, launch at login, faster
   recovery polling and copyable diagnostics
 
-### VOS-only control features
+### Device-control features
 
 - Network scan, manual PLMN selection and automatic operator selection
 - Auto SA/NSA, SA only, NSA only and LTE only preferences with exact read-back
-- Temporary NR and LTE band locks with allowlist validation and rollback
-- Read-only LTE neighbor measurements reported by Qualcomm NAS
+- NR and LTE band locks with allowlist validation and automatic rollback
+- A backend-specific restore operation with final read-back verification
+- Physical-device identity verification before every write
+- Read-only LTE neighbor measurements when the active backend reports them
 
-These controls depend on the VOS SSH/QMI implementation. They are not shown as
-capabilities of the ZTE G5 MAX / MC7530CA.
+Controls are routed through the currently active backend rather than directly
+to a particular transport. VOS preferences last until power loss. MC7530CA
+preferences are persistent until changed or restored. The UI shows each section
+only when the active backend declares that capability.
 
 The current Settings panel contains the Automatic/VOS/ZTE selector, each
 backend's address and credential fields, polling and display preferences, and
@@ -74,8 +78,8 @@ inferring SA or NSA from the presence of NR and LTE bands.
 
 | Device | Default management address | Status transport | Device controls |
 | --- | --- | --- | --- |
-| VOS 5G | `192.168.225.1` | SSH to Qualcomm QRTR/QMI | VOS network/radio controls |
-| ZTE G5 MAX / MC7530CA | `192.168.254.1` | Authenticated read-only Web UBus | Read-only |
+| VOS 5G | `192.168.225.1` | SSH to Qualcomm QRTR/QMI | Read-back-verified network/radio controls |
+| ZTE G5 MAX / MC7530CA | `192.168.254.1` | Authenticated Web UBus | Read-back-verified network/radio controls |
 
 The tested VOS reference unit reports firmware `326.73_0R19` and internal modem
 firmware `RXMG1.20.00.326_0R05`. Its published factory SSH login is
@@ -85,7 +89,10 @@ For the ZTE, enter the existing Web administrator password—the same password
 used by its normal management page—in Settings. The application does not ship
 with, derive or display a device-specific administrator password.
 
-Both physical-device paths were validated on 2026-08-31.
+Both read-only physical-device status paths were validated on 2026-08-31.
+The MC7530CA mutating control path is mapped from the tested unit's retail Web
+implementation and covered by offline request, read-back, rollback and restore
+tests; this release has not sent those control writes to the physical unit.
 
 ## Connection layouts and automatic discovery
 
@@ -162,16 +169,27 @@ no observable registration change.
 
 ### ZTE G5 MAX / MC7530CA
 
-Discovery performs a small anonymous UBus schema fingerprint so an unrelated
-Web server at the same private address is not accepted as a modem. Status reads
-then authenticate with the Web administrator password and reuse a scoped UBus
-session for that endpoint and interface.
+Discovery uses anonymous UBus reads to require all three target identifiers:
+the expected network-info schema, an exact `MC7530CA` product prefix from
+`zwrt_common_info.common_config.wa_inner_version`, and a SHA-256 digest of
+`zwrt_zte_mdm.device_info.modem_msn`. It never receives the configured Web
+password. Status reads then authenticate with the Web administrator password,
+recheck the exact product identity and reuse a scoped UBus session for that
+endpoint and interface. Before the coordinator exposes writes, the authenticated
+session's modem-MSN digest must match the digest returned by discovery.
 
 Normal polling calls the read-only `zte_nwinfo_api.nwinfo_get_netinfo` method.
 The parser maps reported operator/PLMN, LTE and NR bands, channels, bandwidth,
 PCI, Cell ID, signal metrics and LTE carrier aggregation without inventing
-missing values. The ZTE backend advertises only identity, status and Web UI
-capabilities; it has no write/control API in this release.
+missing values.
+
+When the control panel is opened, the same scoped authenticated session exposes
+only the radio methods declared by the backend. Every action uses the retail Web
+request headers, checks UBus/JSON-RPC errors, waits for asynchronous modem work,
+then verifies the result with a fresh `nwinfo_get_netinfo` read. If a change or
+verification fails, the session attempts a verified rollback when the device
+identity still matches and the API provides the required setters; any rollback
+failure is reported explicitly.
 
 ### VOS 5G
 
@@ -198,39 +216,79 @@ file provide modem and device firmware versions.
 The probe is executed from SSH stdin and is not installed on VOS. Ordinary
 polling is read-only.
 
-## Network and radio controls — VOS only
+## Network and radio controls
 
-Expand **Network & radio controls** only when a VOS device is active and you
-intend to change registration:
+Expand **Network & radio controls** only when you intend to change cellular
+registration. A full operator scan, manual registration, radio-mode change or
+band lock can temporarily interrupt data on either modem.
 
-The current VOS-only panel contains operator actions, Auto SA/NSA, SA only, NSA
-only and LTE only preferences, NR/LTE band-lock fields and LTE neighbor
-measurements. It is not displayed when the active backend is ZTE.
+The panel has one backend-neutral contract: open a session bound to the active
+physical modem, perform one command, read the authoritative state back, and
+attempt a verified rollback of the pre-operation vendor state when it is safe
+and supported. A rollback failure is reported instead of being hidden. Changing
+the active modem, endpoint or credential invalidates that session.
 
-- **Scan Networks** runs `AT+COPS=?`. A full scan may take up to two minutes and
-  can temporarily interrupt data. Results distinguish current, available,
-  forbidden and unknown PLMNs.
-- **Select** runs `AT+COPS=1,2,"MCCMNC"` without forcing an access technology.
-  **Automatic Selection** runs `AT+COPS=0`; both operations are verified with
-  `AT+COPS?`. The app preserves and restores the current QMI mode and masks
-  around these operations.
-- **Auto SA/NSA**, **SA only**, **NSA only** and **LTE only** use Qualcomm NAS
-  power-cycle-scoped preferences. The original mode and SA/NSA masks are held
-  in memory, read back after writes and restored if verification fails. LTE
-  only preserves the current extended LTE mask.
-- **Lock NR** and **Lock LTE** intersect requested bands with the captured
-  factory-enabled masks, write a temporary preference, read it back exactly and
-  roll back on failure.
-- **Restore automatic defaults** restores the captured SA/NSA tuple, extended
-  LTE mask and automatic operator selection. The baseline is bound to a digest
-  of the current VOS USB serial; the raw serial is not stored or returned, and
-  the masks are not persisted across app launches.
-- **Neighbor measurements** reads current Qualcomm LTE measurements; it is not
+### VOS 5G control path
+
+- **Scan Networks** uses `AT+COPS=?`; manual and automatic selection use
+  `AT+COPS=1,2,"MCCMNC"` and `AT+COPS=0`, with `AT+COPS?` verification.
+- The current Qualcomm QMI mode and band tuple is preserved around operator
+  actions. SA/NSA/LTE preferences and band locks are read back exactly and are
+  scoped to the current power cycle.
+- **Restore automatic defaults** writes the automatic tuple captured in this
+  app session and returns operator selection to automatic.
+- The session is bound to a SHA-256 digest of the VOS USB serial. The raw serial
+  is not stored or returned.
+- **Neighbor measurements** shows current Qualcomm LTE measurements; it is not
   an active RF scan. This firmware does not expose a standard NR-neighbor list.
 
-These controls are unavailable for the ZTE backend. Replacing a VOS SIM does
-not silently reset a manual selection or temporary radio preference; choose
-**Automatic Selection** or **Restore automatic defaults** when needed.
+### ZTE G5 MAX / MC7530CA control path
+
+- Scan uses `nwinfo_manual_scan`, bounded status polling and
+  `nwinfo_m_netselect_contents`. Manual registration replays the exact RAT token
+  returned by that scan and polls `nwinfo_m_netselect_result`; automatic
+  selection is verified from `net_select_mode`.
+- If a control session opens while the modem is already in manual selection,
+  `nwinfo_get_netinfo` does not expose the exact `m_rat` needed to replay that
+  state. Run **Scan Networks** first; the backend captures the token only when
+  one unique `current` scan row matches the active PLMN. Until then it fails
+  closed before changing the manual operator, returning to automatic selection,
+  changing radio mode, locking LTE/NR bands or restoring defaults. A saved RAT
+  is also rejected before any write when it is incompatible with the target
+  `net_select` mode.
+- Auto SA/NSA, NSA only, SA only and LTE only write the exact retail tokens
+  `WL_AND_NSA`, `LTE_AND_5G`, `Only_5G` and `Only_LTE` through
+  `nwinfo_set_netselect`.
+- LTE locking uses `nwinfo_set_lte_ext_band`. SA and NSA locking both use
+  `nwinfo_set_nrbandlock`, with the documented type `0` and `1` respectively.
+  The verified product allowlists are LTE
+  `2,4,5,7,12,13,17,25,26,29,30,38,41,42,43,48,66,71` and NR
+  `2,5,7,12,25,29,30,38,41,66,71,77`.
+- These ZTE preferences persist across power loss until changed or restored.
+  Before any persistent control write, the backend validates a complete recovery
+  image: mode/operator replay data, GW/LTE/SA/NSA values, cell locks, and the
+  exact verified default NRDC list. The retail schema exposes no NRDC setter, so
+  a non-default NRDC list blocks the operation before its first write. Successful
+  commands verify that every persistent field outside the requested change stayed
+  unchanged; collateral firmware changes are treated as failures.
+  **Restore automatic defaults** calls the dedicated
+  `nwinfo_reset_band_cell_setting`, then verifies the exact LTE/SA/NSA vendor
+  lists, the MC7530CA legacy GW mask, cleared LTE/NR cell locks and the exact
+  verified default NRDC list before explicitly restoring and verifying
+  `WL_AND_NSA` automatic mode. Before the first reset write, every recoverable
+  pre-operation value is parsed and validated. After any ambiguous write,
+  verification failure, cancellation or collateral change, an uncancelled
+  recovery task runs the reset and then rebuilds and verifies the previous
+  GW/LTE/SA/NSA/cell/operator state with the exact retail setters. Independent
+  recovery steps continue after a lost response, and exact final readback decides
+  success. It is not a factory reset and does not read or modify APN profiles.
+- Before every write, the authenticated session reads the modem MSN and compares
+  only its SHA-256 digest with the session identity. The raw MSN is neither
+  exposed nor stored. Once a mismatch is observed, that session refuses all
+  later writes, including rollback writes to the replacement modem.
+- The firmware reports LTE/NR neighbor fields, but the tested unit has not
+  provided a non-empty sample whose format can be validated. The app therefore
+  does not claim ZTE neighbor-measurement visualization.
 
 ## Connection and security notes
 
@@ -240,9 +298,12 @@ not silently reset a manual selection or temporary radio preference; choose
   to Keychain and the old preference is deleted after a successful migration.
   If Keychain is temporarily unavailable, the old value is retained only so a
   later launch can retry the migration.
-- ZTE discovery is anonymous, but status collection starts only after the user
-  supplies a valid Web administrator password in Settings. The authenticated
-  session remains in process memory and is scoped to its endpoint/interface.
+- ZTE discovery is anonymous and reads only the schema plus the exact product
+  field and modem-MSN digest needed to bind a candidate. Status collection
+  starts only after the user supplies a valid Web administrator password in
+  Settings. Each authenticated session and its credential failure gate remain
+  in process memory and are isolated to one endpoint/interface. Control writes
+  additionally require its modem-MSN digest to match discovery.
 - Different VOS units can share `192.168.225.1` while using different SSH host
   keys. For this local modem path, the VOS backend disables SSH host-key
   verification and does not modify `~/.ssh/known_hosts`; point it only at a
@@ -257,6 +318,9 @@ not silently reset a manual selection or temporary radio preference; choose
 ## Backend architecture and adding another modem
 
 Transport-specific code implements the common `ModemStatusBackend` protocol.
+Backends that expose writes also implement `ModemControlBackend` and return a
+device-bound `ModemControlSession`; vendor tokens, retry order, baseline state
+and rollback logic never leak into `StatusModel` or SwiftUI.
 A `ModemDiscoveryProfile` declares a backend's default management endpoints,
 and `ModemBackendRegistry` pairs the implementation, discovery profile,
 capabilities and credential policy. `ModemCoordinator` selects only registered
@@ -301,7 +365,10 @@ dist/Cellular-Modem-Monitor-macOS.zip
 ```
 
 Offline tests cover the VOS QMI parsers and temporary-control safeguards; ZTE
-UBus authentication/session behavior and radio payload parsing; credential
+UBus authentication/session/header behavior, radio payload parsing, exact
+control methods and parameters, asynchronous polling, read-back verification,
+strict PLMN/RAT parsing, full-state rollback after collateral changes, lost
+responses and cancellation, verified restore and physical-device mismatch rejection; credential
 policies and non-secret preferences; backend registry/coordinator selection;
 malformed responses; and
 synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed Slate paths,
@@ -315,8 +382,8 @@ end on physical hardware on 2026-08-31.
 ## Current limitations
 
 - The prebuilt release is Apple Silicon (`arm64`) only.
-- ZTE G5 MAX / MC7530CA support is status-only; VOS network/radio controls are
-  not available for it.
+- ZTE neighbor fields are not visualized until a non-empty, device-verified
+  sample establishes their exact format.
 - A routed modem requires an existing reachable route. The app does not
   configure the Mac, Slate or another router.
 - Some fields are absent when the modem, firmware or network does not report
@@ -325,8 +392,8 @@ end on physical hardware on 2026-08-31.
   SCell's global Cell ID or all signal metrics.
 - The UI currently shows one primary NR band and detailed LTE PCell/SCell data;
   neither backend currently enumerates every possible NR component carrier.
-- VOS control changes are temporary and limited to the documented registration
-  and power-cycle-scoped radio preferences.
+- VOS radio preferences are power-cycle scoped. MC7530CA radio preferences are
+  persistent and remain in effect until changed or explicitly restored.
 
 ## Acknowledgements
 

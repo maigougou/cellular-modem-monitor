@@ -21,12 +21,15 @@ compile() {
     "$project_dir/Sources/SignalStatus/VOSClient.swift" \
     "$project_dir/Sources/SignalStatus/CredentialStore.swift" \
     "$project_dir/Sources/SignalStatus/ModemBackend.swift" \
+    "$project_dir/Sources/SignalStatus/ModemControlBackend.swift" \
     "$project_dir/Sources/SignalStatus/VOSBackend.swift" \
+    "$project_dir/Sources/SignalStatus/VOSControlSession.swift" \
     "$project_dir/Sources/SignalStatus/NetworkTopology.swift" \
     "$project_dir/Sources/SignalStatus/ModemDiscovery.swift" \
     "$project_dir/Sources/SignalStatus/ZTEUBusTransport.swift" \
     "$project_dir/Sources/SignalStatus/ZTEAuthSession.swift" \
     "$project_dir/Sources/SignalStatus/MC7530Parser.swift" \
+    "$project_dir/Sources/SignalStatus/MC7530ControlSession.swift" \
     "$project_dir/Sources/SignalStatus/MC7530Backend.swift" \
     "$project_dir/Sources/SignalStatus/ModemCoordinator.swift" \
     "$project_dir/Sources/SignalStatus/StatusModel.swift" \

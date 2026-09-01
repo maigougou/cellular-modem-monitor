@@ -27,47 +27,79 @@ actor ZTEAuthSession {
         _ = try await currentSessionID()
     }
 
-    /// Performs an authenticated read. If rpcd rejects a previously valid SID,
-    /// the session is recreated once and the read is retried exactly once.
+    /// Performs an authenticated read. This compatibility wrapper keeps the
+    /// original read-only request headers and delegates session recovery to the
+    /// generic call path.
     func read(
         object: String,
         method: String,
         parameters: [String: ZTEJSONValue] = [:]
     ) async throws -> ZTEJSONValue {
+        try await call(
+            object: object,
+            method: method,
+            parameters: parameters,
+            mode: .read
+        )
+    }
+
+    /// Performs one authenticated UBus call using the same request-mode and
+    /// tag headers as the retail Web UI. If rpcd rejects a previously valid
+    /// SID, the session is recreated once and the identical call is retried
+    /// exactly once.
+    func call(
+        object: String,
+        method: String,
+        parameters: [String: ZTEJSONValue] = [:],
+        mode: ZTEUBusCallMode = .read,
+        zTag: String = ""
+    ) async throws -> ZTEJSONValue {
         let sid = try await currentSessionID()
+        let first: ZTEUBusCallResult
         do {
-            let first = try await transport.call(
+            first = try await transport.call(
                 sessionID: sid,
                 object: object,
                 method: method,
-                parameters: parameters
+                parameters: parameters,
+                mode: mode,
+                zTag: zTag
             )
-            if first.status == 6 {
-                return try await retryAfterSessionExpiry(
-                    failedSessionID: sid,
-                    object: object,
-                    method: method,
-                    parameters: parameters
-                )
-            }
-            guard first.status == 0 else { throw ZTEUBusError.ubusStatus(first.status) }
-            guard let payload = first.payload else { throw ZTEUBusError.invalidResponse }
-            return payload
         } catch let error as ZTEUBusError where error.isAccessDenied {
             return try await retryAfterSessionExpiry(
                 failedSessionID: sid,
                 object: object,
                 method: method,
-                parameters: parameters
+                parameters: parameters,
+                mode: mode,
+                zTag: zTag
             )
         }
+        // Keep this retry outside the do/catch above. If the replacement SID is
+        // itself denied, that error must escape rather than being caught as a
+        // second expiry and causing a third login/write attempt.
+        if first.status == 6 {
+            return try await retryAfterSessionExpiry(
+                failedSessionID: sid,
+                object: object,
+                method: method,
+                parameters: parameters,
+                mode: mode,
+                zTag: zTag
+            )
+        }
+        guard first.status == 0 else { throw ZTEUBusError.ubusStatus(first.status) }
+        guard let payload = first.payload else { throw ZTEUBusError.invalidResponse }
+        return payload
     }
 
     private func retryAfterSessionExpiry(
         failedSessionID: String,
         object: String,
         method: String,
-        parameters: [String: ZTEJSONValue]
+        parameters: [String: ZTEJSONValue],
+        mode: ZTEUBusCallMode,
+        zTag: String
     ) async throws -> ZTEJSONValue {
         let sid: String
         if let current = sessionID, current != failedSessionID {
@@ -85,7 +117,9 @@ actor ZTEAuthSession {
                 sessionID: sid,
                 object: object,
                 method: method,
-                parameters: parameters
+                parameters: parameters,
+                mode: mode,
+                zTag: zTag
             )
         } catch let error as ZTEUBusError where error.isAccessDenied {
             if sessionID == sid { sessionID = nil }

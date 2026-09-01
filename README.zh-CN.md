@@ -5,9 +5,8 @@
 **Cellular Modem Monitor** 是一款原生 macOS 菜单栏应用，用于查看实时蜂窝
 无线状态。当前版本同时支持 **VOS 5G** 与 **ZTE G5 MAX / MC7530CA**。
 
-两种设备的常规状态采集都只读。VOS 5G 还提供需要用户主动展开的
-**网络与无线控制**面板。当前版本的 ZTE 后端严格只读，也不会显示这些 VOS
-控制项。
+两种设备的常规状态采集都只读。需要用户主动展开的**网络与无线控制**面板，
+可通过 VOS SSH/QMI 后端或 ZTE 认证 Web UBus 后端执行带验证的控制。
 
 <p align="center">
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor 显示 5G SA n78 连接">
@@ -34,14 +33,17 @@
 - 提供英文和简体中文界面，可即时切换语言
 - 支持手动刷新、1/5/10/15/30/60 秒轮询、登录时启动、快速恢复轮询和复制诊断
 
-### 仅 VOS 可用的控制功能
+### 设备控制功能
 
 - 扫描网络、手动选择 PLMN 和恢复自动选网
 - Auto SA/NSA、SA only、NSA only、LTE only，并精确读回验证
-- 临时锁定 NR/LTE 频段，按允许列表校验并支持失败回滚
-- 读取 Qualcomm NAS 当前报告的 LTE 邻区测量
+- 锁定 NR/LTE 频段，按允许列表校验并支持自动失败回滚
+- 后端专属的恢复操作及最终读回验证
+- 每次写入前验证物理设备身份
+- 在当前后端明确支持时读取 LTE 邻区测量
 
-这些控制依赖 VOS 的 SSH/QMI 实现，不会作为 ZTE G5 MAX / MC7530CA 的能力显示。
+控制始终交给当前活动后端，不会由界面直接调用某种传输。VOS 偏好持续到断电；
+MC7530CA 偏好会持久保存，直到再次修改或恢复。界面只显示当前后端声明的能力。
 
 当前设置面板包含自动/VOS/ZTE 选择器、各后端的地址与凭据输入、轮询与显示偏好，
 以及运行时语言选择器。密码会保存到 macOS Keychain。
@@ -66,8 +68,8 @@
 
 | 设备 | 默认管理地址 | 状态传输 | 设备控制 |
 | --- | --- | --- | --- |
-| VOS 5G | `192.168.225.1` | 通过 SSH 访问 Qualcomm QRTR/QMI | VOS 网络/无线控制 |
-| ZTE G5 MAX / MC7530CA | `192.168.254.1` | 认证后的只读 Web UBus | 只读 |
+| VOS 5G | `192.168.225.1` | 通过 SSH 访问 Qualcomm QRTR/QMI | 带读回验证的网络/无线控制 |
+| ZTE G5 MAX / MC7530CA | `192.168.254.1` | 认证 Web UBus | 带读回验证的网络/无线控制 |
 
 已测试的 VOS 参考设备报告固件 `326.73_0R19`，内部 modem 固件为
 `RXMG1.20.00.326_0R05`。其公开的原厂 SSH 登录为 `root` / `oelinux123`；
@@ -76,7 +78,9 @@
 ZTE 需要在设置中输入现有 Web 管理员密码，也就是正常管理页面使用的密码。
 应用不会内置、推导或显示任何设备专属管理员密码。
 
-两种实机链路均已于 2026-08-31 完成验证。
+两种实机只读状态链路均已于 2026-08-31 完成验证。MC7530CA 写控制链路依据已测试
+设备的零售 Web 实现完成映射，并由离线请求、读回、回滚和恢复测试覆盖；本版本尚未
+向这台实机发送这些控制写入。
 
 ## 连接方式与自动发现
 
@@ -141,14 +145,21 @@ PLMN、也未产生可观察注册变化的换卡。
 
 ### ZTE G5 MAX / MC7530CA
 
-发现阶段会执行小范围匿名 UBus schema 指纹检查，避免将同一私网地址上的无关
-Web 服务误识别为 modem。读取状态时再使用 Web 管理员密码认证，并为对应的
-endpoint 与接口复用限定范围的 UBus session。
+发现阶段通过匿名 UBus 读取同时核对三项目标标识：预期网络信息 schema、
+`zwrt_common_info.common_config.wa_inner_version` 中精确的 `MC7530CA` 产品前缀，
+以及 `zwrt_zte_mdm.device_info.modem_msn` 的 SHA-256 摘要；此阶段不会收到设置中
+保存的 Web 密码。读取状态时才使用 Web 管理员密码认证，再次核对精确产品身份，并
+为对应 endpoint 与接口复用限定范围的 UBus session。Coordinator 只有在认证 session
+的 modem-MSN 摘要与发现阶段一致后才会开放写入。
 
 常规轮询调用只读方法 `zte_nwinfo_api.nwinfo_get_netinfo`。解析器映射设备实际
 报告的运营商/PLMN、LTE/NR 频段、信道、带宽、PCI、Cell ID、信号指标和 LTE
-载波聚合，不会编造缺失值。ZTE 后端只声明身份、状态和 Web UI 能力；当前版本
-不提供任何写入或控制 API。
+载波聚合，不会编造缺失值。
+
+打开控制面板后，同一个限定路径的认证 session 只提供后端声明的无线控制方法。
+每次操作都会使用零售 Web 相同的请求头，检查 UBus/JSON-RPC 错误，等待异步
+modem 工作完成，再通过新的 `nwinfo_get_netinfo` 精确回读。若写入或验证失败，
+仅在设备身份仍一致且 API 有所需 setter 时尝试回滚并验证；回滚失败会明确报告。
 
 ### VOS 5G
 
@@ -172,31 +183,60 @@ DSD 通过明确的 service-option 位返回 SA/NSA。QRTR 节点与端口会在
 
 探针只从 SSH stdin 执行，不会安装到 VOS。普通轮询始终只读。
 
-## 网络与无线控制——仅 VOS
+## 网络与无线控制
 
-只有在 VOS 设备处于活动状态并且确实需要改变注册时，才展开**网络与无线控制**：
+只有确实需要改变蜂窝注册时，才展开**网络与无线控制**。在两种 modem 上，完整
+运营商扫描、手动注册、无线模式切换或锁频都可能暂时中断数据。
 
-当前仅 VOS 面板包含运营商操作、Auto SA/NSA、SA only、NSA only、LTE only、
-NR/LTE 锁频输入和 LTE 邻区测量。活动后端为 ZTE 时不会显示此面板。
+面板采用同一套后端无关约定：创建绑定到当前物理 modem 的 session，执行一个
+命令，精确读回权威状态；若命令或验证失败，则在安全且受支持时尝试回滚并验证，
+回滚失败会明确报告。切换活动 modem、endpoint 或凭据会使该 session 失效。
 
-- **扫描网络**执行 `AT+COPS=?`。完整扫描可能持续两分钟，并可能暂时中断数据；
-  结果区分当前、可用、禁止和未知 PLMN。
-- **选择**执行 `AT+COPS=1,2,"MCCMNC"`，不会强制接入技术；**自动选择**执行
-  `AT+COPS=0`。两种操作都会通过 `AT+COPS?` 验证，应用还会在这些操作前后保存
-  并恢复当前 QMI mode 和掩码。
-- **Auto SA/NSA**、**SA only**、**NSA only**、**LTE only** 使用持续到断电的
-  Qualcomm NAS 偏好。原始 mode 与 SA/NSA 掩码仅保存在内存中；写入后会读回，
-  验证失败则恢复。LTE only 会保留当前扩展 LTE 掩码。
-- **锁定 NR**和**锁定 LTE**会把请求频段与捕获的原厂允许掩码取交集，写入临时
-  偏好，精确读回，并在失败时回滚。
-- **恢复自动默认值**会恢复捕获的 SA/NSA 值、扩展 LTE 掩码和自动选网。基线绑定
-  到当前 VOS USB serial 的摘要；原始 serial 不会保存或返回，掩码也不会跨应用
-  启动持久保存。
-- **邻区测量**读取 Qualcomm 当前 LTE 测量，并不是主动射频扫描。此固件没有
-  标准的 NR 邻区列表接口。
+### VOS 5G 控制路径
 
-ZTE 后端不提供这些控制。更换 VOS SIM 不会擅自重置手动选网或临时无线偏好；
-需要时请明确选择**自动选择**或**恢复自动默认值**。
+- **扫描网络**使用 `AT+COPS=?`；手动与自动选网使用
+  `AT+COPS=1,2,"MCCMNC"` 和 `AT+COPS=0`，并以 `AT+COPS?` 验证。
+- 运营商操作前后会保留当前 Qualcomm QMI mode 与频段 tuple。SA/NSA/LTE 偏好
+  和锁频都会精确读回，并持续到本次断电。
+- **恢复自动默认值**写回本次 app session 捕获的自动 tuple，并恢复自动选网。
+- session 绑定到 VOS USB serial 的 SHA-256 摘要，原始 serial 不会保存或返回。
+- **邻区测量**读取 Qualcomm 当前 LTE 测量，并不是主动射频扫描；该固件没有
+  标准 NR 邻区列表。
+
+### ZTE G5 MAX / MC7530CA 控制路径
+
+- 扫描依次使用 `nwinfo_manual_scan`、有界状态轮询和
+  `nwinfo_m_netselect_contents`。手动注册会原样回送扫描结果中的 RAT token，并
+  轮询 `nwinfo_m_netselect_result`；自动选网则通过 `net_select_mode` 验证。
+- 如果 control session 打开时 modem 已处于手动选网，`nwinfo_get_netinfo` 不会返回
+  重放该状态所需的精确 `m_rat`。必须先运行**扫描网络**；只有扫描结果中恰好一个
+  `current` 行与当前 PLMN 匹配时，后端才会保存该 token。在此之前，改选另一个手动
+  网络、恢复自动选网、改变无线模式、LTE/NR 锁频或恢复默认值都会在写入前安全拒绝。
+  如果已保存 RAT 与目标 `net_select` 模式不兼容，也会在任何写入前拒绝。
+- Auto SA/NSA、NSA only、SA only、LTE only 经 `nwinfo_set_netselect` 精确写入
+  零售 token：`WL_AND_NSA`、`LTE_AND_5G`、`Only_5G`、`Only_LTE`。
+- LTE 锁频使用 `nwinfo_set_lte_ext_band`；SA 与 NSA 都使用
+  `nwinfo_set_nrbandlock`，type 分别为 `0` 与 `1`。已验证产品允许列表为 LTE
+  `2,4,5,7,12,13,17,25,26,29,30,38,41,42,43,48,66,71`，NR
+  `2,5,7,12,25,29,30,38,41,66,71,77`。
+- ZTE 偏好会跨断电持久保存。每项持久控制写入前，后端都会验证完整恢复镜像：
+  模式/运营商重放数据、
+  GW/LTE/SA/NSA 值、小区锁，以及精确的已验证默认 NRDC 列表。零售 schema 没有
+  NRDC setter，因此 NRDC 不是该精确默认值时会在第一次写入前阻止操作。命令成功
+  还必须证明请求字段之外的所有持久字段保持不变；固件旁带修改会按失败处理。
+  **恢复自动默认值**调用专用方法
+  `nwinfo_reset_band_cell_setting`，然后验证精确的 LTE/SA/NSA 厂商列表、
+  MC7530CA 旧制式 GW mask、已清除的 LTE/NR 小区锁，以及精确的已验证默认 NRDC 列表，
+  最后明确恢复并验证 `WL_AND_NSA` 自动模式。第一次 reset 写入前会先解析并严格校验
+  所有可恢复的原状态；遇到响应丢失、读回失败、任务取消或旁带修改后，会在独立的
+  未取消恢复任务中执行 reset，再用零售固件对应 setter 重建并验证此前的
+  GW/LTE/SA/NSA/小区锁/选网值。某一步响应丢失不会阻止后续恢复步骤，最终以精确
+  权威读回判定成功。它不是恢复出厂，也不会读取或修改 APN profile。
+- 每次写入前，认证 session 都读取 modem MSN，并只将其 SHA-256 摘要与 session
+  身份比较；原始 MSN 不会暴露或保存。一旦发现不匹配，该 session 会永久拒绝
+  后续写入，包括对替换设备执行回滚。
+- 固件会返回 LTE/NR 邻区字段，但已测试设备尚未提供能够验证格式的非空样本，
+  因此应用目前不声明 ZTE 邻区测量可视化能力。
 
 ## 连接与安全说明
 
@@ -204,8 +244,10 @@ ZTE 后端不提供这些控制。更换 VOS SIM 不会擅自重置手动选网�
   endpoint 缓存、管理 URL 或诊断信息中。
 - 升级时，旧版本曾保存在 UserDefaults 中的 VOS 密码会迁移到 Keychain；迁移成功
   后才删除旧偏好值。如果 Keychain 暂时不可用，旧值只会为之后再次尝试迁移而保留。
-- ZTE 发现阶段匿名，但只有用户在设置中提供有效 Web 管理员密码后才会读取状态。
-  认证 session 仅保留在进程内存中，并限定到对应 endpoint/接口。
+- ZTE 发现阶段匿名，只读取绑定候选所需的 schema、精确产品字段和 modem-MSN 摘要；
+  只有用户在设置中提供有效 Web 管理员密码后才会读取状态。每个认证 session 及其
+  凭据失败门禁仅保留在进程内存中，并分别限定到一个 endpoint/接口；控制写入还要求
+  modem-MSN 摘要与发现阶段一致。
 - 不同 VOS 可能共用 `192.168.225.1`，但使用不同 SSH host key。针对这条本地
   modem 链路，VOS 后端会关闭 SSH host-key 验证，也不会修改
   `~/.ssh/known_hosts`；请只连接可信设备和网络。
@@ -216,7 +258,10 @@ ZTE 后端不提供这些控制。更换 VOS SIM 不会擅自重置手动选网�
 
 ## 后端架构与添加其他 modem
 
-各传输实现采用共同的 `ModemStatusBackend` 协议。`ModemDiscoveryProfile` 声明
+各传输实现采用共同的 `ModemStatusBackend` 协议。支持写入的后端还会实现
+`ModemControlBackend` 并返回绑定设备的 `ModemControlSession`；厂商 token、重试
+顺序、基线状态和回滚逻辑不会泄漏到 `StatusModel` 或 SwiftUI。
+`ModemDiscoveryProfile` 声明
 后端的默认管理 endpoint，`ModemBackendRegistry` 将实现、发现 profile、能力和
 凭据策略配对。`ModemCoordinator` 只选择已注册后端，并将发现与状态采集分离。
 
@@ -253,8 +298,11 @@ macOS 可能再次请求 Keychain 访问权限。若 Keychain 读取或写入失
 dist/Cellular-Modem-Monitor-macOS.zip
 ```
 
-离线测试覆盖 VOS QMI 解析与临时控制保护；ZTE UBus 认证/session 与无线 payload
-解析；凭据策略与不含秘密的偏好数据；后端 registry/coordinator 选择；畸形响应；
+离线测试覆盖 VOS QMI 解析与临时控制保护；ZTE UBus 认证/session/request header、
+无线 payload 解析、精确控制方法与参数、异步轮询、读回验证、失败回滚、验证恢复和
+严格 PLMN/RAT 解析、旁带修改/响应丢失/任务取消后的全状态回滚，以及物理设备不匹配
+拒写；凭据策略与不含秘密的偏好数据；后端 registry/coordinator
+选择；畸形响应；
 以及 USB ECM、RJ45/以太网、经 Slate 路由、同 IP 多接口隔离、接口排除、优先级、
 协议/端口分离、
 后端过滤、deadline 和并发结果固定排序等合成发现路径。测试不需要也不会修改
@@ -266,7 +314,7 @@ dist/Cellular-Modem-Monitor-macOS.zip
 ## 当前限制
 
 - 预编译版本仅支持 Apple Silicon（`arm64`）。
-- ZTE G5 MAX / MC7530CA 当前仅支持状态读取，不能使用 VOS 的网络/无线控制。
+- 在获得能够验证精确格式的非空实机样本前，ZTE 邻区字段不会显示为邻区测量。
 - 通过路由访问 modem 时必须已经存在可达路由；应用不会配置 Mac、Slate 或其他
   路由器。
 - 当 modem、固件或网络没有报告某项信息时，对应字段会显示 `—`，不会自行推测。
@@ -274,7 +322,7 @@ dist/Cellular-Modem-Monitor-macOS.zip
   Global Cell ID 或全部信号指标。
 - 当前界面显示一个主要 NR 频段和详细 LTE PCell/SCell；两种后端目前都不能枚举
   所有可能的 NR 组成载波。
-- VOS 控制变更是临时的，并严格限于文档所述注册及持续到断电的无线偏好。
+- VOS 无线偏好持续到断电；MC7530CA 无线偏好会持久保存，直到再次修改或明确恢复。
 
 ## 致谢
 

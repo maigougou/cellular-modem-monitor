@@ -45,6 +45,11 @@ struct ModemCapability: OptionSet, Hashable, Sendable {
         .lteBandLock,
         .neighborMeasurements
     ]
+
+    /// All capabilities used by the shared device-control surface. The legacy
+    /// `vosControls` spelling remains source-compatible, but no UI or
+    /// coordinator decision may infer a backend kind from this set.
+    static let deviceControls = vosControls
 }
 
 /// Describes how macOS reaches the management endpoint. It is intentionally
@@ -189,6 +194,7 @@ enum ModemBackendError: LocalizedError, Equatable, Sendable, ModemFailureCategor
     case credentialsRequired(ModemCredentialKind)
     case incompatibleCredentials(expected: ModemCredentialKind, actual: ModemCredentialKind)
     case identityUnavailable
+    case deviceModelMismatch(expected: String, actual: String)
     case unsupportedCapability(ModemCapability)
 
     var errorDescription: String? {
@@ -201,6 +207,8 @@ enum ModemBackendError: LocalizedError, Equatable, Sendable, ModemFailureCategor
             return "The modem requires \(expected.rawValue) credentials, not \(actual.rawValue) credentials."
         case .identityUnavailable:
             return "The endpoint did not provide a verifiable modem identity."
+        case let .deviceModelMismatch(expected, actual):
+            return "The modem reported model \(actual), but this backend requires \(expected)."
         case .unsupportedCapability:
             return "This modem backend does not support the requested operation."
         }
@@ -210,7 +218,8 @@ enum ModemBackendError: LocalizedError, Equatable, Sendable, ModemFailureCategor
         switch self {
         case .credentialsRequired, .incompatibleCredentials:
             return .authentication
-        case .invalidEndpoint, .identityUnavailable, .unsupportedCapability:
+        case .invalidEndpoint, .identityUnavailable, .deviceModelMismatch,
+             .unsupportedCapability:
             return .other
         }
     }

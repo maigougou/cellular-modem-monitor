@@ -462,6 +462,13 @@ struct ZTEUBusCallResult: Equatable, Sendable {
     var object: [String: ZTEJSONValue]? { payload?.objectValue }
 }
 
+/// Mirrors the retail Web UI's per-request `Z-Mode` header. Read/poll calls
+/// use `0`; authenticated actions initiated by the UI use `1`.
+enum ZTEUBusCallMode: String, Equatable, Sendable {
+    case read = "0"
+    case write = "1"
+}
+
 enum ZTEUBusError: LocalizedError, Equatable, Sendable, ModemFailureCategorizing {
     case invalidEndpoint
     case nonHTTPResponse
@@ -566,7 +573,9 @@ struct ZTEUBusTransport: Sendable {
         sessionID: String,
         object: String,
         method: String,
-        parameters: [String: ZTEJSONValue] = [:]
+        parameters: [String: ZTEJSONValue] = [:],
+        mode: ZTEUBusCallMode = .read,
+        zTag: String = ""
     ) async throws -> ZTEUBusCallResult {
         let request = RPCRequest(
             id: 3,
@@ -578,7 +587,7 @@ struct ZTEUBusTransport: Sendable {
                 .object(parameters)
             ]
         )
-        let reply = try await perform(request)
+        let reply = try await perform(request, mode: mode, zTag: zTag)
         guard let values = reply.result?.arrayValue,
               let rawStatus = values.first?.int64Value,
               let status = Int(exactly: rawStatus)
@@ -586,7 +595,11 @@ struct ZTEUBusTransport: Sendable {
         return ZTEUBusCallResult(status: status, payload: values.count > 1 ? values[1] : nil)
     }
 
-    private func perform(_ rpc: RPCRequest) async throws -> RPCReply {
+    private func perform(
+        _ rpc: RPCRequest,
+        mode: ZTEUBusCallMode = .read,
+        zTag: String = ""
+    ) async throws -> RPCReply {
         let body = try JSONEncoder().encode([rpc])
         var request = URLRequest(url: ubusURL)
         request.httpMethod = "POST"
@@ -595,8 +608,8 @@ struct ZTEUBusTransport: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("\(origin)/", forHTTPHeaderField: "Referer")
-        request.setValue("0", forHTTPHeaderField: "Z-Mode")
-        request.setValue("", forHTTPHeaderField: "Z-Tag")
+        request.setValue(mode.rawValue, forHTTPHeaderField: "Z-Mode")
+        request.setValue(zTag, forHTTPHeaderField: "Z-Tag")
 
         let response = try await http.send(request, route: route)
         guard (200..<300).contains(response.statusCode) else {
