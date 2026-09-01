@@ -79,9 +79,10 @@ MC7530CA 偏好会持久保存，直到再次修改或恢复。界面只显示�
 ZTE 需要在设置中输入现有 Web 管理员密码，也就是正常管理页面使用的密码。
 应用不会内置、推导或显示任何设备专属管理员密码。
 
-两种实机只读状态链路均已于 2026-08-31 完成验证。MC7530CA 写控制链路依据已测试
-设备的零售 Web 实现完成映射，并由离线请求、读回、回滚和恢复测试覆盖；本版本尚未
-向这台实机发送这些控制写入。
+两种实机只读状态链路均已于 2026-08-31 完成验证。2026-09-01 已在 MC7530CA 实机
+执行仅 SA（`Only_5G`）控制请求，验证 `Z-Mode: 0`、空 `Z-Tag` 的 SID 认证形式，
+并通过权威模式回读确认结果。注册后实机报告 TELUS `302-220` SA，最初使用 `n71`，
+随后正常重选至 `n77`。完整控制链路另有离线请求、读回、回滚和恢复测试覆盖。
 
 ## 连接方式与自动发现
 
@@ -158,8 +159,13 @@ PLMN、也未产生可观察注册变化的换卡。
 载波聚合，不会编造缺失值。
 
 打开控制面板后，同一个限定路径的认证 session 只提供后端声明的无线控制方法。
-每次操作都会使用零售 Web 相同的请求头，检查 UBus/JSON-RPC 错误，等待异步
-modem 工作完成，再通过新的 `nwinfo_get_netinfo` 精确回读。若写入或验证失败，
+每项 MC7530CA 无线 RPC 都使用实机验证过的 SID 认证请求形式：`Z-Mode: 0` 和空
+`Z-Tag`。在已测试固件上，同一个有效 SID 若改用浏览器式 `Z-Mode: 1` 和方法名
+`Z-Tag`，会返回 JSON-RPC `-32002 Access denied`。首次收到 access denied 时，session
+只会重新认证一次，并原样重试一次请求。action 路径以 UBus 状态 0 为成功，包括实机
+setter 返回的无 payload `result: [0]`；read 和 poll 仍必须返回预期 payload。随后后端
+检查 UBus/JSON-RPC 错误，等待异步 modem 工作完成，再通过新的
+`nwinfo_get_netinfo` 精确回读。若写入或验证失败，
 仅在设备身份仍一致且 API 有所需 setter 时尝试回滚并验证；回滚失败会明确报告。
 
 ### VOS 5G
@@ -206,6 +212,12 @@ DSD 通过明确的 service-option 位返回 SA/NSA。QRTR 节点与端口会在
 
 ### ZTE G5 MAX / MC7530CA 控制路径
 
+- 所有已认证 network-info 控制，包括 setter、扫描/状态/结果轮询和权威回读，都使用
+  `Z-Mode: 0` 与空 `Z-Tag`。这是在 MC7530CA 实机上验证成功的请求形式；通用 transport
+  仍保留两种 header mode，供其他 ZTE 调用路径使用。
+- setter 或 action 收到 UBus 状态 0 即为成功，包括实机返回的无 payload JSON-RPC
+  `result: [0]`。状态/读回调用与 action 分离；如果状态 0 响应缺少其必需 payload，
+  read 路径仍会拒绝。
 - 扫描依次使用 `nwinfo_manual_scan`、有界状态轮询和
   `nwinfo_m_netselect_contents`。手动注册会原样回送扫描结果中的 RAT token，并
   轮询 `nwinfo_m_netselect_result`；自动选网则通过 `net_select_mode` 验证。
@@ -303,7 +315,8 @@ dist/Cellular-Modem-Monitor-macOS.zip
 ```
 
 离线测试覆盖 VOS QMI 解析与临时控制保护；ZTE UBus 认证/session/request header、
-无线 payload 解析、精确控制方法与参数、异步轮询、读回验证、失败回滚、验证恢复和
+无线读取 payload 解析、无 payload 操作结果处理、精确控制方法与参数、异步轮询、
+读回验证、失败回滚、验证恢复和
 严格 PLMN/RAT 解析、旁带修改/响应丢失/任务取消后的全状态回滚，以及物理设备不匹配
 拒写；凭据策略与不含秘密的偏好数据；后端 registry/coordinator
 选择；畸形响应；
@@ -313,7 +326,8 @@ dist/Cellular-Modem-Monitor-macOS.zip
 任何实机 modem。
 
 只读 VOS SSH/QMI 与 ZTE Web UBus 状态链路已于 2026-08-31 在实机上完成
-端到端验证。
+端到端验证。上文所述 MC7530CA 仅 SA 写入与权威回读已于 2026-09-01 完成实机
+验证；其余 ZTE 控制类别仍由离线测试覆盖。
 
 ## 当前限制
 

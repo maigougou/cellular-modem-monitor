@@ -43,10 +43,11 @@ actor ZTEAuthSession {
         )
     }
 
-    /// Performs one authenticated UBus call using the same request-mode and
-    /// tag headers as the retail Web UI. If rpcd rejects a previously valid
-    /// SID, the session is recreated once and the identical call is retried
-    /// exactly once.
+    /// Performs a payload-bearing authenticated UBus call. Read and polling
+    /// callers require that payload; generic transports may also use this for
+    /// actions whose firmware contract includes one. If rpcd rejects a
+    /// previously valid SID, the session is recreated once and the identical
+    /// call is retried exactly once.
     func call(
         object: String,
         method: String,
@@ -54,6 +55,43 @@ actor ZTEAuthSession {
         mode: ZTEUBusCallMode = .read,
         zTag: String = ""
     ) async throws -> ZTEJSONValue {
+        let result = try await authenticatedCall(
+            object: object,
+            method: method,
+            parameters: parameters,
+            mode: mode,
+            zTag: zTag
+        )
+        guard let payload = result.payload else { throw ZTEUBusError.invalidResponse }
+        return payload
+    }
+
+    /// Performs an authenticated action. UBus status zero is authoritative
+    /// success even when the firmware returns the valid payload-free `[0]`
+    /// result used by MC7530CA setters.
+    func action(
+        object: String,
+        method: String,
+        parameters: [String: ZTEJSONValue] = [:],
+        mode: ZTEUBusCallMode = .read,
+        zTag: String = ""
+    ) async throws {
+        _ = try await authenticatedCall(
+            object: object,
+            method: method,
+            parameters: parameters,
+            mode: mode,
+            zTag: zTag
+        )
+    }
+
+    private func authenticatedCall(
+        object: String,
+        method: String,
+        parameters: [String: ZTEJSONValue],
+        mode: ZTEUBusCallMode,
+        zTag: String
+    ) async throws -> ZTEUBusCallResult {
         let sid = try await currentSessionID()
         let first: ZTEUBusCallResult
         do {
@@ -89,8 +127,7 @@ actor ZTEAuthSession {
             )
         }
         guard first.status == 0 else { throw ZTEUBusError.ubusStatus(first.status) }
-        guard let payload = first.payload else { throw ZTEUBusError.invalidResponse }
-        return payload
+        return first
     }
 
     private func retryAfterSessionExpiry(
@@ -100,10 +137,10 @@ actor ZTEAuthSession {
         parameters: [String: ZTEJSONValue],
         mode: ZTEUBusCallMode,
         zTag: String
-    ) async throws -> ZTEJSONValue {
+    ) async throws -> ZTEUBusCallResult {
         let sid: String
         if let current = sessionID, current != failedSessionID {
-            // Another read already refreshed this expired SID while the failed
+            // Another call already refreshed this expired SID while the failed
             // request was in flight. Reuse that replacement instead of logging
             // in a second time and invalidating a newly valid session.
             sid = current
@@ -129,8 +166,7 @@ actor ZTEAuthSession {
             if retry.status == 6, sessionID == sid { sessionID = nil }
             throw ZTEUBusError.ubusStatus(retry.status)
         }
-        guard let payload = retry.payload else { throw ZTEUBusError.invalidResponse }
-        return payload
+        return retry
     }
 
     private func currentSessionID() async throws -> String {

@@ -881,6 +881,67 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(records.filter { $0.ubusMethod == "web_login" }.count, 2)
     }
 
+    func testZTEMC7530HeaderFormRelogsOnceAfterAccessDenied() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"salt-one"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+            testZTEResponse(#"[{"jsonrpc":"2.0","id":3,"error":{"code":-32002,"message":"Access denied"}}]"#),
+            testZTECallResponse(#"{"zte_web_sault":"salt-two"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+            testZTEStatusResponse(0)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                http: http
+            ),
+            password: "fixture-password"
+        )
+
+        try await session.action(
+            object: "zte_nwinfo_api",
+            method: "nwinfo_set_netselect",
+            parameters: ["net_select": .string("Only_5G")],
+            mode: .read,
+            zTag: ""
+        )
+
+        let records = await http.records()
+        XCTAssertEqual(records.count, 6)
+        let setters = records.filter { $0.ubusMethod == "nwinfo_set_netselect" }
+        XCTAssertEqual(setters.map(\.sessionID), ["sid-one", "sid-two"])
+        XCTAssertEqual(setters.map { $0.header("Z-Mode") }, ["0", "0"])
+        XCTAssertEqual(setters.map { $0.header("Z-Tag") }, ["", ""])
+        XCTAssertEqual(records.filter { $0.ubusMethod == "web_login" }.count, 2)
+    }
+
+    func testZTEReadRejectsPayloadFreeSuccess() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTEStatusResponse(0)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                http: http
+            ),
+            password: "fixture-password"
+        )
+
+        do {
+            _ = try await session.call(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_get_netinfo",
+                mode: .read,
+                zTag: ""
+            )
+            XCTFail("An authenticated read must require a response payload")
+        } catch let error as ZTEUBusError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+    }
+
     func testZTEReplacementSIDDenialDoesNotTriggerASecondRetry() async throws {
         let http = TestScriptedZTEHTTPTransport(responses: [
             testZTECallResponse(#"{"zte_web_sault":"salt-one"}"#),
@@ -1013,11 +1074,14 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(state.nsaBands, Set([2, 66, 77]))
         XCTAssertEqual(state.preferenceLifetime, .persistent)
 
-        let records = await http.records().filter {
-            $0.ubusMethod == "get_modem_msn" || $0.ubusMethod == "nwinfo_get_netinfo"
-        }
-        XCTAssertTrue(records.allSatisfy {
-            $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == $0.ubusMethod
+        let records = await http.records()
+        let controlReads = records.filter { $0.ubusMethod == "nwinfo_get_netinfo" }
+        XCTAssertTrue(controlReads.allSatisfy {
+            $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == ""
+        })
+        let identityReads = records.filter { $0.ubusMethod == "get_modem_msn" }
+        XCTAssertTrue(identityReads.allSatisfy {
+            $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == "get_modem_msn"
         })
     }
 

@@ -1857,6 +1857,74 @@ enum DirectTests {
             let http = DirectScriptedZTEHTTPTransport(responses: [
                 zteCallResponse(#"{"zte_web_sault":"salt-one"}"#),
                 zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+                zteResponse(#"[{"jsonrpc":"2.0","id":3,"error":{"code":-32002,"message":"Access denied"}}]"#),
+                zteCallResponse(#"{"zte_web_sault":"salt-two"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+                zteStatusResponse(0)
+            ])
+            let session = ZTEAuthSession(
+                transport: try ZTEUBusTransport(
+                    baseURL: URL(string: "http://192.168.254.1")!,
+                    http: http
+                ),
+                password: "fixture-password"
+            )
+            try await session.action(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_set_netselect",
+                parameters: ["net_select": .string("Only_5G")],
+                mode: .read,
+                zTag: ""
+            )
+            let records = await http.records()
+            check(records.count == 6,
+                  "MC7530 payload-free setter succeeds after exactly one access-denied retry",
+                  failures: &failures)
+            let setters = records.filter { $0.ubusMethod == "nwinfo_set_netselect" }
+            check(setters.map(\.sessionID) == ["sid-one", "sid-two"],
+                  "MC7530 header form replaces an access-denied SID once", failures: &failures)
+            check(setters.allSatisfy {
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == ""
+            }, "MC7530 header form survives access-denied retry unchanged", failures: &failures)
+            check(records.filter { $0.ubusMethod == "web_login" }.count == 2,
+                  "MC7530 access-denied setter relogs once", failures: &failures)
+        } catch {
+            failures.append("MC7530 access-denied setter retry: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+                zteStatusResponse(0)
+            ])
+            let session = ZTEAuthSession(
+                transport: try ZTEUBusTransport(
+                    baseURL: URL(string: "http://192.168.254.1")!,
+                    http: http
+                ),
+                password: "fixture-password"
+            )
+            do {
+                _ = try await session.call(
+                    object: "zte_nwinfo_api",
+                    method: "nwinfo_get_netinfo",
+                    mode: .read,
+                    zTag: ""
+                )
+                failures.append("ZTE payload-free read must fail")
+            } catch let error as ZTEUBusError {
+                check(error == .invalidResponse,
+                      "ZTE payload-free read remains strict", failures: &failures)
+            }
+        } catch {
+            failures.append("ZTE payload-free read response: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"salt-one"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
                 zteStatusResponse(6),
                 zteCallResponse(#"{"zte_web_sault":"salt-two"}"#),
                 zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
@@ -2081,9 +2149,15 @@ enum DirectTests {
             check(state.canRestoreDefaults && state.preferenceLifetime == .persistent,
                   "MC7530 neutral state reports persistent/restorable controls", failures: &failures)
             let records = await http.records()
-            let calls = records.filter { $0.object == "zte_nwinfo_api" || $0.object == "zwrt_zte_mdm.api" }
-            check(calls.allSatisfy { $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == $0.ubusMethod },
-                  "MC7530 refresh uses exact read mode and method tags", failures: &failures)
+            let controlCalls = records.filter { $0.object == "zte_nwinfo_api" }
+            check(controlCalls.allSatisfy {
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == ""
+            }, "MC7530 control reads use the verified SID-authenticated header form",
+               failures: &failures)
+            let identityCalls = records.filter { $0.object == "zwrt_zte_mdm.api" }
+            check(identityCalls.allSatisfy {
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == $0.ubusMethod
+            }, "MC7530 identity reads preserve their verified method tags", failures: &failures)
         } catch {
             failures.append("MC7530 neutral control-state parsing: \(error)")
         }
@@ -2206,8 +2280,10 @@ enum DirectTests {
                 "nwinfo_manual_scan", "nwinfo_m_netselect_status",
                 "nwinfo_m_netselect_status", "nwinfo_m_netselect_contents"
             ], "MC7530 scan polls status before reading contents", failures: &failures)
-            check(actions.allSatisfy { $0.header("Z-Mode") == "1" && $0.header("Z-Tag") == $0.ubusMethod },
-                  "MC7530 scan uses exact retail action headers", failures: &failures)
+            check(actions.allSatisfy {
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == ""
+            }, "MC7530 scan and polling use the verified SID-authenticated header form",
+               failures: &failures)
         } catch {
             failures.append("MC7530 scan/status/contents: \(error)")
         }
@@ -2231,11 +2307,12 @@ enum DirectTests {
             let register = records.first { $0.ubusMethod == "nwinfo_manual_register" }
             check(register?.parameters == ["m_mcc_mnc": "00102", "m_rat": "13"],
                   "MC7530 manual registration sends exact PLMN/RAT parameters", failures: &failures)
-            check(register?.header("Z-Mode") == "1" && register?.header("Z-Tag") == "nwinfo_manual_register",
-                  "MC7530 manual registration uses retail action headers", failures: &failures)
+            check(register?.header("Z-Mode") == "0" && register?.header("Z-Tag") == "",
+                  "MC7530 manual registration uses the verified SID-authenticated header form",
+                  failures: &failures)
             let polls = records.filter { $0.ubusMethod == "nwinfo_m_netselect_result" }
             check(polls.count == 2 && polls.allSatisfy {
-                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == "nwinfo_m_netselect_result"
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == ""
             }, "MC7530 manual registration polls authenticated result", failures: &failures)
         } catch {
             failures.append("MC7530 manual registration/readback: \(error)")
@@ -2302,8 +2379,9 @@ enum DirectTests {
                 let writes = await http.records().filter { $0.ubusMethod == "nwinfo_set_netselect" }
                 check(writes.count == 1 && writes[0].parameters == ["net_select": token],
                       "MC7530 \(mode.rawValue) uses exact ZTE token", failures: &failures)
-                check(writes[0].header("Z-Mode") == "1" && writes[0].header("Z-Tag") == "nwinfo_set_netselect",
-                      "MC7530 \(mode.rawValue) uses exact action headers", failures: &failures)
+                check(writes[0].header("Z-Mode") == "0" && writes[0].header("Z-Tag") == "",
+                      "MC7530 \(mode.rawValue) uses the verified SID-authenticated header form",
+                      failures: &failures)
                 check(result.state.architecture == mode,
                       "MC7530 \(mode.rawValue) verifies neutral readback", failures: &failures)
             } catch {
@@ -2391,8 +2469,9 @@ enum DirectTests {
             check(lteWrite?.parameters == ["lte_band": "2,66"],
                   "MC7530 LTE lock writes exact sorted parameters", failures: &failures)
             check((nrWrites + [lteWrite].compactMap { $0 }).allSatisfy {
-                $0.header("Z-Mode") == "1" && $0.header("Z-Tag") == $0.ubusMethod
-            }, "MC7530 band locks use exact retail action headers", failures: &failures)
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == ""
+            }, "MC7530 band locks use the verified SID-authenticated header form",
+               failures: &failures)
         } catch {
             failures.append("MC7530 NR/LTE band locks: \(error)")
         }
@@ -2712,9 +2791,10 @@ enum DirectTests {
                   failures: &failures)
             let records = await http.records()
             let reset = records.first { $0.ubusMethod == "nwinfo_reset_band_cell_setting" }
-            check(reset?.parameters.isEmpty == true && reset?.header("Z-Mode") == "1" &&
-                    reset?.header("Z-Tag") == "nwinfo_reset_band_cell_setting",
-                  "MC7530 restore sends exact global reset action", failures: &failures)
+            check(reset?.parameters.isEmpty == true && reset?.header("Z-Mode") == "0" &&
+                    reset?.header("Z-Tag") == "",
+                  "MC7530 restore sends the exact reset with the verified header form",
+                  failures: &failures)
             let mode = records.last { $0.ubusMethod == "nwinfo_set_netselect" }
             check(mode?.parameters == ["net_select": "WL_AND_NSA"],
                   "MC7530 restore finishes with exact WL_AND_NSA token", failures: &failures)
@@ -4332,7 +4412,16 @@ private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
     }
 
     private static func successResponse() throws -> ZTEHTTPResponse {
-        try response(["result": "success"])
+        let json: [[String: Any]] = [[
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": [0]
+        ]]
+        return ZTEHTTPResponse(
+            statusCode: 200,
+            headers: [:],
+            body: try JSONSerialization.data(withJSONObject: json)
+        )
     }
 
     private static func response(_ payload: [String: Any]) throws -> ZTEHTTPResponse {
