@@ -1282,6 +1282,7 @@ enum DirectTests {
         var failures: [String] = []
         await runCredentialTests(failures: &failures)
         runFailureClassificationTests(failures: &failures)
+        await runVOSNetworkScanSafetyTests(failures: &failures)
         await runVOSCancellationTests(failures: &failures)
         runMC7530ParserTests(failures: &failures)
         await runZTEAuthTests(failures: &failures)
@@ -1604,6 +1605,155 @@ enum DirectTests {
             "authentication-like English text does not alter structured classification",
             failures: &failures
         )
+    }
+
+    private static func runVOSNetworkScanSafetyTests(failures: inout [String]) async {
+        let configuration = DeviceConfiguration(
+            host: "192.168.225.1",
+            username: "root",
+            password: "fixture",
+            refreshInterval: 30
+        )
+        let baseline = DirectVOSControlTransport.baselinePreferences
+        let lteBands = LTEBandMask(bands: [2, 4, 66])!
+        let scenarios: [(String, NRSystemSelectionPreferences)] = [
+            ("automatic", baseline),
+            ("SA only", NRSystemSelectionPreferences(
+                modePreference: 0x0040,
+                saBands: baseline.saBands,
+                nsaBands: .zero,
+                lteBands: lteBands
+            )),
+            ("NSA only", NRSystemSelectionPreferences(
+                modePreference: 0x0050,
+                saBands: .zero,
+                nsaBands: baseline.nsaBands,
+                lteBands: lteBands
+            )),
+            ("LTE only", NRSystemSelectionPreferences(
+                modePreference: 0x0010,
+                saBands: .zero,
+                nsaBands: .zero,
+                lteBands: lteBands
+            ))
+        ]
+
+        for (name, previous) in scenarios {
+            do {
+                let transport = DirectVOSControlTransport()
+                await transport.seedPreferences(previous)
+                let session = try await VOSControlSession.open(
+                    client: transport,
+                    configuration: configuration,
+                    timing: .immediate
+                )
+                let result = try await session.perform(.scanNetworks)
+                let state = await transport.snapshot()
+                let expectedWrites = previous.architectureMode == .lteOnly ? 1 : 2
+                check(
+                    result.scannedNetworks?.first?.plmn == "00101" &&
+                        result.state.architecture == previous.architectureMode &&
+                        state.scanArchitectures == [.lteOnly] &&
+                        state.preferences == previous &&
+                        state.preferenceHistory.count == expectedWrites &&
+                        state.preferenceHistory.first?.architectureMode == .lteOnly &&
+                        state.preferenceHistory.last == previous,
+                    "VOS \(name) scan enters verified LTE-only mode and restores the exact tuple",
+                    failures: &failures
+                )
+            } catch {
+                failures.append("VOS \(name) safe network scan: \(error)")
+            }
+        }
+
+        do {
+            let unavailable = NRSystemSelectionPreferences(
+                modePreference: 0x0040,
+                saBands: .zero,
+                nsaBands: .zero,
+                lteBands: lteBands
+            )
+            let transport = DirectVOSControlTransport()
+            await transport.seedPreferences(unavailable)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration,
+                timing: .immediate
+            )
+            do {
+                _ = try await session.perform(.scanNetworks)
+                failures.append("VOS unavailable radio mode must block the unsafe AT scan")
+            } catch let error as ModemControlError {
+                guard case .invalidState = error else {
+                    failures.append("VOS unavailable scan error type: \(error)")
+                    return
+                }
+            }
+            let state = await transport.snapshot()
+            check(
+                state.scanArchitectures.isEmpty && state.preferenceHistory.isEmpty,
+                "VOS unavailable radio mode fails closed before any scan or write",
+                failures: &failures
+            )
+        } catch {
+            failures.append("VOS unavailable scan guard: \(error)")
+        }
+
+        do {
+            let previous = scenarios[1].1
+            let transport = DirectVOSControlTransport(scanFailures: 1)
+            await transport.seedPreferences(previous)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration,
+                timing: .immediate
+            )
+            do {
+                _ = try await session.perform(.scanNetworks)
+                failures.append("VOS failed scan must not report success")
+            } catch {
+                let state = await transport.snapshot()
+                check(
+                    state.scanArchitectures == [.lteOnly] &&
+                        state.preferences == previous &&
+                        state.preferenceHistory.map(\.architectureMode) == [.lteOnly, .saOnly],
+                    "VOS failed scan restores the exact pre-scan SA tuple",
+                    failures: &failures
+                )
+            }
+        } catch {
+            failures.append("VOS failed scan rollback: \(error)")
+        }
+
+        do {
+            let previous = scenarios[2].1
+            let transport = DirectVOSControlTransport(suspendScanOnce: true)
+            await transport.seedPreferences(previous)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration,
+                timing: .immediate
+            )
+            let operation = Task { try await session.perform(.scanNetworks) }
+            let scanStarted = await transport.waitForScan()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS cancelled scan must not report success")
+            } catch {
+                let state = await transport.snapshot()
+                check(
+                    scanStarted && error is CancellationError &&
+                        state.scanArchitectures == [.lteOnly] &&
+                        state.preferences == previous &&
+                        state.preferenceHistory.map(\.architectureMode) == [.lteOnly, .nsaOnly],
+                    "VOS cancelled scan restores the exact pre-scan NSA tuple",
+                    failures: &failures
+                )
+            }
+        } catch {
+            failures.append("VOS cancelled scan rollback: \(error)")
+        }
     }
 
     private static func runVOSCancellationTests(failures: inout [String]) async {
@@ -4848,19 +4998,28 @@ private actor DirectVOSControlTransport: VOSControlTransport {
     private var preferences = baselinePreferences
     private var suspendManualSelectionOnce: Bool
     private var suspendAutomaticSelectionOnce: Bool
+    private var suspendScanOnce: Bool
     private var automaticFailures: Int
+    private var scanFailures: Int
     private var manualWrites = 0
     private var automaticWrites = 0
     private var preferenceWrites = 0
+    private var scanCalls = 0
+    private var scanArchitectures: [NRArchitectureMode] = []
+    private var preferenceHistory: [NRSystemSelectionPreferences] = []
 
     init(
         suspendManualSelectionOnce: Bool = false,
         suspendAutomaticSelectionOnce: Bool = false,
-        automaticFailures: Int = 0
+        automaticFailures: Int = 0,
+        suspendScanOnce: Bool = false,
+        scanFailures: Int = 0
     ) {
         self.suspendManualSelectionOnce = suspendManualSelectionOnce
         self.suspendAutomaticSelectionOnce = suspendAutomaticSelectionOnce
         self.automaticFailures = automaticFailures
+        self.suspendScanOnce = suspendScanOnce
+        self.scanFailures = scanFailures
     }
 
     func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String {
@@ -4874,7 +5033,23 @@ private actor DirectVOSControlTransport: VOSControlTransport {
     }
 
     func scanNetworks(configuration: DeviceConfiguration) async throws -> [CellularNetwork] {
-        []
+        scanCalls += 1
+        scanArchitectures.append(preferences.architectureMode)
+        if suspendScanOnce {
+            suspendScanOnce = false
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        if scanFailures > 0 {
+            scanFailures -= 1
+            throw DirectTestSupportError.plannedSnapshotFailure
+        }
+        return [CellularNetwork(
+            longName: "Fixture Carrier",
+            shortName: "Fixture",
+            plmn: "00101",
+            availability: .available,
+            accessTechnologies: [.lte]
+        )]
     }
 
     func selectNetwork(
@@ -4930,13 +5105,23 @@ private actor DirectVOSControlTransport: VOSControlTransport {
         configuration: DeviceConfiguration
     ) async throws -> NRSystemSelectionPreferences {
         preferenceWrites += 1
-        preferences = NRSystemSelectionPreferences(
+        let updated = NRSystemSelectionPreferences(
             modePreference: modePreference,
             saBands: saBands,
             nsaBands: nsaBands,
             lteBands: lteBands
         )
+        preferences = updated
+        preferenceHistory.append(updated)
         return preferences
+    }
+
+    func seedPreferences(_ value: NRSystemSelectionPreferences) {
+        preferences = value
+        preferenceWrites = 0
+        preferenceHistory = []
+        scanCalls = 0
+        scanArchitectures = []
     }
 
     func seedNondefaultState() {
@@ -4954,6 +5139,17 @@ private actor DirectVOSControlTransport: VOSControlTransport {
         )
         automaticWrites = 0
         preferenceWrites = 0
+        preferenceHistory = []
+        scanCalls = 0
+        scanArchitectures = []
+    }
+
+    func waitForScan() async -> Bool {
+        for _ in 0..<2_000 {
+            if scanCalls > 0 { return true }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        return false
     }
 
     func waitForManualMutation() async {
@@ -4974,9 +5170,18 @@ private actor DirectVOSControlTransport: VOSControlTransport {
         selection: OperatorSelection,
         preferences: NRSystemSelectionPreferences,
         automaticWrites: Int,
-        preferenceWrites: Int
+        preferenceWrites: Int,
+        scanArchitectures: [NRArchitectureMode],
+        preferenceHistory: [NRSystemSelectionPreferences]
     ) {
-        (selection, preferences, automaticWrites, preferenceWrites)
+        (
+            selection,
+            preferences,
+            automaticWrites,
+            preferenceWrites,
+            scanArchitectures,
+            preferenceHistory
+        )
     }
 }
 

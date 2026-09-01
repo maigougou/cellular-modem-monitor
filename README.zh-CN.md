@@ -216,10 +216,12 @@ DSD 通过明确的 service-option 位返回 SA/NSA。QRTR 节点与端口会在
 
 ### VOS 5G 控制路径
 
-- **扫描网络**使用 `AT+COPS=?`；手动与自动选网使用
-  `AT+COPS=1,2,"MCCMNC"` 和 `AT+COPS=0`，并以 `AT+COPS?` 验证。
-- 运营商操作前后会保留当前 Qualcomm QMI mode 与频段 tuple。SA/NSA/LTE 偏好
-  和锁频都会精确读回，并持续到本次断电。
+- **扫描网络**使用 `AT+COPS=?`。该 VOS 固件在 NR 开启时执行此命令可能重启，
+  因此应用会先记录完整 Qualcomm QMI tuple，切换并读回验证仅 LTE 模式，等待无线
+  模式稳定后再扫描；无论成功、失败还是取消，都会恢复并验证原来的 LTE/SA/NSA tuple。
+- 手动与自动选网使用 `AT+COPS=1,2,"MCCMNC"` 和 `AT+COPS=0`，并以 `AT+COPS?`
+  验证。运营商操作前后会保留当前 Qualcomm QMI mode 与频段 tuple。SA/NSA/LTE
+  偏好和锁频都会精确读回，并持续到本次断电。
 - **恢复自动默认值**写回本次 app session 捕获的自动 tuple，并恢复自动选网。
 - session 绑定到 VOS USB serial 的 SHA-256 摘要，原始 serial 不会保存或返回。
 - **邻区测量**读取 Qualcomm 当前 LTE 测量，并不是主动射频扫描；该固件没有

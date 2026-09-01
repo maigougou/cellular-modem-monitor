@@ -26,6 +26,17 @@ protocol VOSControlTransport: Sendable {
 
 extension VOSClient: VOSControlTransport {}
 
+struct VOSControlTiming: Sendable {
+    var networkScanLTETransitionDelayNanoseconds: UInt64
+
+    static let production = VOSControlTiming(
+        networkScanLTETransitionDelayNanoseconds: 3_000_000_000
+    )
+    static let immediate = VOSControlTiming(
+        networkScanLTETransitionDelayNanoseconds: 0
+    )
+}
+
 /// Verified control session for VOS's SSH/AT/QMI implementation.
 ///
 /// All VOS-specific ordering and exact QMI tuple rollback live here rather
@@ -38,6 +49,7 @@ actor VOSControlSession: ModemControlSession {
     private let client: any VOSControlTransport
     private let configuration: DeviceConfiguration
     private let expectedFingerprint: String
+    private let timing: VOSControlTiming
     private var invalidated = false
     private var operationInProgress = false
     private var operationMutationAttempted = false
@@ -48,23 +60,27 @@ actor VOSControlSession: ModemControlSession {
     private init(
         client: any VOSControlTransport,
         configuration: DeviceConfiguration,
-        expectedFingerprint: String
+        expectedFingerprint: String,
+        timing: VOSControlTiming
     ) {
         self.client = client
         self.configuration = configuration
         self.expectedFingerprint = expectedFingerprint
+        self.timing = timing
         self.stableIdentifier = expectedFingerprint
     }
 
     static func open(
         client: any VOSControlTransport,
-        configuration: DeviceConfiguration
+        configuration: DeviceConfiguration,
+        timing: VOSControlTiming = .production
     ) async throws -> VOSControlSession {
         let fingerprint = try await client.fetchDeviceFingerprint(configuration: configuration)
         return VOSControlSession(
             client: client,
             configuration: configuration,
-            expectedFingerprint: fingerprint
+            expectedFingerprint: fingerprint,
+            timing: timing
         )
     }
 
@@ -108,7 +124,8 @@ actor VOSControlSession: ModemControlSession {
 
         switch command {
         case .scanNetworks:
-            let preserved = try await preservingCurrentPreferences {
+            let preserved = try await preservingCurrentPreferences { previous in
+                try await self.prepareForNetworkScan(previous)
                 try await self.validateDevice()
                 try self.markMutationAttempt()
                 return try await self.client.scanNetworks(configuration: self.configuration)
@@ -172,7 +189,7 @@ actor VOSControlSession: ModemControlSession {
         _ network: CellularNetwork
     ) async throws -> (selection: OperatorSelection, preferences: NRSystemSelectionPreferences) {
         do {
-            let preserved = try await preservingCurrentPreferences {
+            let preserved = try await preservingCurrentPreferences { _ in
                 try await self.validateDevice()
                 try self.markMutationAttempt()
                 return try await self.client.selectNetwork(
@@ -213,7 +230,7 @@ actor VOSControlSession: ModemControlSession {
 
     private func selectAutomaticNetwork(
     ) async throws -> (selection: OperatorSelection, preferences: NRSystemSelectionPreferences) {
-        let preserved = try await preservingCurrentPreferences {
+        let preserved = try await preservingCurrentPreferences { _ in
             try await self.validateDevice()
             try self.markMutationAttempt()
             return try await self.client.selectAutomaticNetwork(configuration: self.configuration)
@@ -453,13 +470,54 @@ actor VOSControlSession: ModemControlSession {
         )
     }
 
+    /// AT+COPS=? is stable on the affected VOS firmware only after Qualcomm
+    /// NAS has entered LTE-only mode. Issuing it while SA or NSA is enabled can
+    /// reset the modem. Switch temporarily, verify the LTE-only read-back, let
+    /// the radio transition settle, and let preservingCurrentPreferences
+    /// restore the complete pre-scan tuple on every success/error path.
+    private func prepareForNetworkScan(
+        _ previous: NRSystemSelectionPreferences
+    ) async throws {
+        switch previous.architectureMode {
+        case .lteOnly:
+            return
+        case .automatic, .saOnly, .nsaOnly:
+            let lteBands = previous.lteBands.flatMap { $0.isEmpty ? nil : $0 }
+            try await validateDevice()
+            try markMutationAttempt()
+            let applied = try await client.setNRSystemSelectionPreferences(
+                modePreference: 0x0010,
+                saBands: .zero,
+                nsaBands: .zero,
+                lteBands: lteBands,
+                configuration: configuration
+            )
+            guard applied.architectureMode == .lteOnly else {
+                throw VOSClientError.verificationFailed(
+                    "VOS did not confirm LTE-only mode, so the network scan was not started."
+                )
+            }
+            try await validateDevice()
+            if timing.networkScanLTETransitionDelayNanoseconds > 0 {
+                try await Task.sleep(
+                    nanoseconds: timing.networkScanLTETransitionDelayNanoseconds
+                )
+            }
+            try await validateDevice()
+        case .unavailable:
+            throw ModemControlError.invalidState(
+                "The current VOS radio preference is unavailable. The network scan was not started because this firmware requires a verified LTE-only mode first."
+            )
+        }
+    }
+
     private func preservingCurrentPreferences<T: Sendable>(
-        operation: () async throws -> T
+        operation: (NRSystemSelectionPreferences) async throws -> T
     ) async throws -> (value: T, preferences: NRSystemSelectionPreferences) {
         let previous = try await client.fetchNRSystemSelectionPreferences(configuration: configuration)
         let result: T
         do {
-            result = try await operation()
+            result = try await operation(previous)
         } catch {
             guard operationMutationAttempted else { throw error }
             if let rollback = try await runRollbackUncancelled(previous) {

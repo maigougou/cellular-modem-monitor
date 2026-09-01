@@ -260,11 +260,15 @@ the active modem, endpoint or credential invalidates that session.
 
 ### VOS 5G control path
 
-- **Scan Networks** uses `AT+COPS=?`; manual and automatic selection use
-  `AT+COPS=1,2,"MCCMNC"` and `AT+COPS=0`, with `AT+COPS?` verification.
-- The current Qualcomm QMI mode and band tuple is preserved around operator
-  actions. SA/NSA/LTE preferences and band locks are read back exactly and are
-  scoped to the current power cycle.
+- **Scan Networks** uses `AT+COPS=?`. The affected VOS firmware can reset if
+  this command runs while NR is enabled, so the app first captures the exact
+  Qualcomm QMI tuple, switches to read-back-verified LTE-only mode, waits for
+  the transition to settle, scans, and restores the original LTE/SA/NSA tuple
+  on success, failure or cancellation.
+- Manual and automatic selection use `AT+COPS=1,2,"MCCMNC"` and `AT+COPS=0`,
+  with `AT+COPS?` verification. The current Qualcomm QMI mode and band tuple is
+  preserved around operator actions. SA/NSA/LTE preferences and band locks are
+  read back exactly and are scoped to the current power cycle.
 - **Restore automatic defaults** writes the automatic tuple captured in this
   app session and returns operator selection to automatic.
 - The session is bound to a SHA-256 digest of the VOS USB serial. The raw serial
