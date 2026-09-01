@@ -988,6 +988,12 @@ private enum ControlConfirmation: Identifiable {
     ) -> String {
         switch self {
         case .scan:
+            if modemKind == .vos5G {
+                return L10n.text(
+                    "On VOS 5G, the app first switches to verified LTE-only mode, performs the scan, and then restores the exact previous LTE/SA/NSA preference. Data will be interrupted during this process.",
+                    language: language
+                )
+            }
             return L10n.text("A full operator scan can take several minutes and may temporarily interrupt cellular data.", language: language)
         case let .manualNetwork(network):
             return L10n.format(

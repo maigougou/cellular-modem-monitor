@@ -212,6 +212,7 @@ enum L10n {
         "Lock LTE bands?": "锁定 LTE 频段？",
         "Restore automatic defaults?": "恢复自动默认设置？",
         "A full operator scan can take several minutes and may temporarily interrupt cellular data.": "完整的运营商扫描可能需要数分钟，并可能暂时中断蜂窝数据。",
+        "On VOS 5G, the app first switches to verified LTE-only mode, performs the scan, and then restores the exact previous LTE/SA/NSA preference. Data will be interrupted during this process.": "在 VOS 5G 上，应用会先切换到经过验证的仅 LTE 模式，执行扫描，然后精确恢复之前的 LTE/SA/NSA 偏好。此过程中数据连接会中断。",
         "The modem will try %@ (%@) using this exact scan result. Registration and data may be interrupted.": "调制解调器将使用这条扫描结果的精确参数尝试连接 %@（%@）。注册和数据连接可能中断。",
         "The modem will return to automatic operator selection. The resulting selection mode will be read back and verified.": "调制解调器将恢复自动运营商选择，并读回验证最终选择模式。",
         "This changes the modem's radio access mode. Exact values are read back; a failed change triggers an automatic rollback. Selected operator settings are not changed. %@": "此操作会更改调制解调器的无线接入模式。应用会读回精确值进行验证；更改失败时会自动回滚。已选运营商设置不会改变。%@",
