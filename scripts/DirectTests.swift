@@ -47,6 +47,182 @@ enum DirectTests {
             check(NRArchitectureMode.lteOnly.localizedLabel(language: .simplifiedChinese) == "仅 LTE",
                   "localized LTE-only label", failures: &failures)
 
+            check(
+                ModemCapability.neighborMeasurements.supportsDeviceControlSurface,
+                "neighbor measurements expose the shared device-control surface",
+                failures: &failures
+            )
+            check(
+                !ModemCapability.neighborMeasurements.supportsControlSession &&
+                    ModemCapability.networkScan.supportsControlSession,
+                "read-only neighbor capability does not open a control session",
+                failures: &failures
+            )
+            check(
+                !ModemCapability.statusRead.supportsDeviceControlSurface,
+                "status-only capability does not expose device controls",
+                failures: &failures
+            )
+
+            let presentationEndpointA = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en8",
+                interfaceIndex: 8,
+                sourceAddress: "192.168.254.2"
+            )
+            let presentationEndpointB = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en9",
+                interfaceIndex: 9,
+                sourceAddress: "192.168.254.3",
+                connectionPath: .routed,
+                gateway: "192.168.8.1"
+            )
+            check(
+                ControlPresentationInvalidation.transition(
+                    previousModemID: "modem-a",
+                    nextModemID: "modem-a",
+                    previousEndpoint: presentationEndpointA,
+                    nextEndpoint: presentationEndpointA,
+                    previousPLMN: "00101",
+                    nextPLMN: "00102"
+                ) == .operatorContext &&
+                    ControlPresentationInvalidation.transition(
+                        previousModemID: "modem-a",
+                        nextModemID: "modem-b",
+                        previousEndpoint: presentationEndpointA,
+                        nextEndpoint: presentationEndpointA,
+                        previousPLMN: "00101",
+                        nextPLMN: "00101"
+                    ) == .all &&
+                    ControlPresentationInvalidation.transition(
+                        previousModemID: "modem-a",
+                        nextModemID: "modem-a",
+                        previousEndpoint: presentationEndpointA,
+                        nextEndpoint: presentationEndpointA,
+                        previousPLMN: "00101",
+                        nextPLMN: "00101"
+                    ) == .none &&
+                    ControlPresentationInvalidation.transition(
+                        previousModemID: "modem-a",
+                        nextModemID: "modem-a",
+                        previousEndpoint: presentationEndpointA,
+                        nextEndpoint: presentationEndpointB,
+                        previousPLMN: "00101",
+                        nextPLMN: "00101"
+                    ) == .all,
+                "control presentation invalidation distinguishes PLMN and modem changes",
+                failures: &failures
+            )
+            check(
+                ModemOperationInterruption.isCancellation(CancellationError()) &&
+                    !ModemOperationInterruption.isCancellation(
+                        ModemControlError.commandRejected("fixture")
+                    ) &&
+                    ModemOperationInterruption.shouldIgnoreRefreshFailure(
+                        ModemCoordinatorError.noMatchingModem,
+                        taskIsCancelled: true
+                    ) &&
+                    !ModemOperationInterruption.shouldIgnoreRefreshFailure(
+                        ModemControlError.rollbackFailed(
+                            operation: "fixture",
+                            rollback: "fixture"
+                        ),
+                        taskIsCancelled: false
+                    ),
+                "cancellation is quiet while real refresh/control failures remain visible",
+                failures: &failures
+            )
+
+            let priorSelection = OperatorSelection(
+                mode: .manual,
+                operatorName: "Fixture",
+                plmn: "00101",
+                accessTechnology: .lte5GC
+            )
+            let priorControlState = ModemControlState(
+                operatorSelection: priorSelection,
+                architecture: .nsaOnly,
+                saBands: [77],
+                nsaBands: [66, 77],
+                lteBands: [2, 4, 66],
+                canRestoreDefaults: true,
+                preferenceLifetime: .persistent
+            )
+            let plmnChangedState = priorControlState.clearingOperatorSelection()
+            check(
+                plmnChangedState.operatorSelection == nil &&
+                    plmnChangedState.architecture == priorControlState.architecture &&
+                    plmnChangedState.saBands == priorControlState.saBands &&
+                    plmnChangedState.nsaBands == priorControlState.nsaBands &&
+                    plmnChangedState.lteBands == priorControlState.lteBands &&
+                    plmnChangedState.canRestoreDefaults == priorControlState.canRestoreDefaults &&
+                    plmnChangedState.preferenceLifetime == priorControlState.preferenceLifetime,
+                "PLMN change preserves verified radio and restore state",
+                failures: &failures
+            )
+
+            let presentationSuiteName = "DirectTests.control-result.\(UUID().uuidString)"
+            let presentationDefaults = UserDefaults(suiteName: presentationSuiteName)!
+            presentationDefaults.removePersistentDomain(forName: presentationSuiteName)
+            let previousDemoEnvironment = ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"]
+            setenv("SIGNAL_STATUS_DEMO", "1", 1)
+            let presentationModel = await MainActor.run {
+                StatusModel(
+                    defaults: presentationDefaults,
+                    credentialStore: DirectCredentialStore(values: [:])
+                )
+            }
+            if let previousDemoEnvironment {
+                setenv("SIGNAL_STATUS_DEMO", previousDemoEnvironment, 1)
+            } else {
+                unsetenv("SIGNAL_STATUS_DEMO")
+            }
+            let selectionSynchronization = await MainActor.run { () -> (Bool, Bool) in
+                presentationModel.applyControlResult(ModemControlResult(state: priorControlState))
+                let populated = presentationModel.operatorSelection == priorSelection
+                presentationModel.applyControlResult(ModemControlResult(state: plmnChangedState))
+                let cleared = presentationModel.operatorSelection == nil &&
+                    presentationModel.controlState?.operatorSelection == nil &&
+                    presentationModel.controlState?.architecture == .nsaOnly &&
+                    presentationModel.canRestoreControlDefaults
+                return (populated, cleared)
+            }
+            presentationDefaults.removePersistentDomain(forName: presentationSuiteName)
+            check(
+                selectionSynchronization.0 && selectionSynchronization.1,
+                "authoritative nil operator selection clears stale UI state",
+                failures: &failures
+            )
+
+            check(
+                ModemControlError.rollbackFailed(
+                    operation: "Band update failed.",
+                    rollback: "Reset was rejected"
+                ).errorDescription ==
+                    "Band update failed. Automatic rollback also failed: Reset was rejected. The modem control state is unknown.",
+                "rollback failure message separates recovery detail",
+                failures: &failures
+            )
+            check(
+                ModemControlError.rollbackFailed(
+                    operation: "Band update failed.",
+                    rollback: "Reset timed out!"
+                ).errorDescription ==
+                    "Band update failed. Automatic rollback also failed: Reset timed out! The modem control state is unknown.",
+                "rollback failure message preserves existing punctuation",
+                failures: &failures
+            )
+            check(
+                ModemControlError.rollbackFailed(
+                    operation: "Band update failed.",
+                    rollback: ""
+                ).errorDescription ==
+                    "Band update failed. Automatic rollback also failed: No rollback detail was reported. The modem control state is unknown.",
+                "rollback failure message handles missing recovery detail",
+                failures: &failures
+            )
+
             let operationGuard = ControlOperationDeviceGuard(expectedFingerprint: "device-a")
             try operationGuard.validate(currentFingerprint: "device-a")
             check(operationGuard.isValid, "control operation accepts its bound device", failures: &failures)
@@ -817,8 +993,10 @@ enum DirectTests {
         var failures: [String] = []
         await runCredentialTests(failures: &failures)
         runFailureClassificationTests(failures: &failures)
+        await runVOSCancellationTests(failures: &failures)
         runMC7530ParserTests(failures: &failures)
         await runZTEAuthTests(failures: &failures)
+        await runMC7530ControlTests(failures: &failures)
         await runDiscoveryTests(failures: &failures)
         await runCoordinatorTests(failures: &failures)
         return failures
@@ -1010,6 +1188,181 @@ enum DirectTests {
         )
     }
 
+    private static func runVOSCancellationTests(failures: inout [String]) async {
+        let configuration = DeviceConfiguration(
+            host: "192.168.225.1",
+            username: "root",
+            password: "fixture",
+            refreshInterval: 30
+        )
+        let selectedNetwork = CellularNetwork(
+            longName: "Fixture Carrier",
+            shortName: "Fixture",
+            plmn: "00101",
+            availability: .available,
+            accessTechnologies: [.lte]
+        )
+
+        do {
+            let transport = DirectVOSControlTransport(suspendManualSelectionOnce: true)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration
+            )
+            let operation = Task {
+                try await session.perform(.selectNetwork(selectedNetwork))
+            }
+            await transport.waitForManualMutation()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS cancelled manual selection must not report success")
+            } catch {
+                check(
+                    error is CancellationError,
+                    "VOS preserves cancellation after verified automatic recovery",
+                    failures: &failures
+                )
+            }
+            let reconciled = try await session.refresh()
+            let state = await transport.snapshot()
+            check(
+                state.selection.mode == .automatic &&
+                    state.preferences == DirectVOSControlTransport.baselinePreferences &&
+                    state.automaticWrites == 1 &&
+                    state.preferenceWrites >= 2 &&
+                    reconciled.operatorSelection?.mode == .automatic &&
+                    reconciled.architecture == .automatic,
+                "VOS cancelled manual selection restores and reconciles operator/radio state",
+                failures: &failures
+            )
+        } catch {
+            failures.append("VOS cancellation-safe manual selection: \(error)")
+        }
+
+        do {
+            let transport = DirectVOSControlTransport(
+                suspendManualSelectionOnce: true,
+                automaticFailures: 1
+            )
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration
+            )
+            let operation = Task {
+                try await session.perform(.selectNetwork(selectedNetwork))
+            }
+            await transport.waitForManualMutation()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS failed cancellation recovery must not report success")
+            } catch {
+                check(
+                    !(error is CancellationError) &&
+                        error.localizedDescription.contains("state is unknown"),
+                    "VOS failed cancellation recovery remains a visible unknown-state error",
+                    failures: &failures
+                )
+            }
+        } catch {
+            failures.append("VOS cancellation recovery failure: \(error)")
+        }
+
+        do {
+            let transport = DirectVOSControlTransport(suspendAutomaticSelectionOnce: true)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration
+            )
+            _ = try await session.refresh()
+            await transport.seedNondefaultState()
+            let operation = Task {
+                try await session.perform(.restoreDefaults)
+            }
+            await transport.waitForAutomaticMutation()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS cancelled restore must not report success")
+            } catch {
+                check(
+                    error is CancellationError,
+                    "VOS preserves cancellation after completing restore",
+                    failures: &failures
+                )
+            }
+            let reconciled = try await session.refresh()
+            let state = await transport.snapshot()
+            check(
+                state.selection.mode == .automatic &&
+                    state.preferences == DirectVOSControlTransport.baselinePreferences &&
+                    state.automaticWrites == 2 &&
+                    state.preferenceWrites == 1 &&
+                    reconciled.operatorSelection?.mode == .automatic &&
+                    reconciled.architecture == .automatic,
+                "VOS cancelled restore completes both steps and reconciles authoritative state",
+                failures: &failures
+            )
+        } catch {
+            failures.append("VOS cancellation-safe restore defaults: \(error)")
+        }
+
+        do {
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SignalStatusSSHCancel-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(
+                at: temporaryDirectory,
+                withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+            let executable = temporaryDirectory.appendingPathComponent("fake-ssh.sh")
+            let started = temporaryDirectory.appendingPathComponent("started")
+            let script = """
+            #!/bin/sh
+            : > '\(started.path)'
+            sleep 0.05
+            exit 23
+            """
+            try Data(script.utf8).write(to: executable, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: executable.path
+            )
+            let executor = SystemSSHExecutor(
+                sshPath: executable.path,
+                askPassPath: "/usr/bin/true"
+            )
+            let operation = Task {
+                try await executor.run(
+                    host: "192.168.225.1",
+                    username: "root",
+                    password: "fixture",
+                    sourceAddress: nil,
+                    script: "fixture",
+                    timeout: 1
+                )
+            }
+            for _ in 0..<1_000 {
+                if FileManager.default.fileExists(atPath: started.path) { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("cancelled failing SSH worker must not report success")
+            } catch {
+                check(
+                    error is CancellationError,
+                    "cancelled SSH caller wins over the detached worker's later command error",
+                    failures: &failures
+                )
+            }
+        } catch {
+            failures.append("SSH cancellation/error precedence: \(error)")
+        }
+    }
+
     private static func runMC7530ParserTests(failures: inout [String]) {
         do {
             let endc = try MC7530Parser.parse(data: fixture("MC7530CA/endc-mixed-types.json"))
@@ -1121,6 +1474,51 @@ enum DirectTests {
         }
 
         do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+                zteCallResponse(#"{"values":{"modem_msn":"fixture-device-alpha"}}"#)
+            ])
+            let backend = MC7530Backend(httpTransport: http)
+            let identity = try await backend.identify(
+                endpoint: ScopedEndpoint(
+                    baseURL: URL(string: "http://192.168.254.1")!,
+                    interfaceName: "en8",
+                    interfaceIndex: 18,
+                    sourceAddress: "192.168.254.20",
+                    connectionPath: .directUSB,
+                    gateway: "192.168.254.1"
+                ),
+                credentials: .none
+            )
+            let expected = try MC7530ControlSession.fingerprint(
+                modemMSN: "fixture-device-alpha"
+            )
+            check(identity?.kind == .zteMC7530CA &&
+                    identity?.stableIdentifier == expected,
+                  "ZTE anonymous discovery binds exact model and MSN digest",
+                  failures: &failures)
+            let records = await http.records()
+            check(records.count == 3 &&
+                    records.allSatisfy { $0.sessionID == ZTEUBusTransport.zeroSessionID },
+                  "ZTE discovery sends no administrator session",
+                  failures: &failures)
+            check(records.map(\.ubusMethod) == [nil, "get", "get"] &&
+                    records[1].parameters == [
+                        "config": "zwrt_common_info", "section": "common_config"
+                    ] && records[2].parameters == [
+                        "config": "zwrt_zte_mdm", "section": "device_info"
+                    ],
+                  "ZTE discovery uses exact retail anonymous UCI identity fields",
+                  failures: &failures)
+            check(records.allSatisfy { $0.ubusMethod != "web_login" },
+                  "ZTE discovery never submits the Web password",
+                  failures: &failures)
+        } catch {
+            failures.append("ZTE anonymous exact identity: \(error)")
+        }
+
+        do {
             let expectedHash = "8D1C7328B6F8EFB7E5D58D42216F27B67BE22C038BF4468A546DBA881440F62C"
             check(ZTEAuthSession.loginHash(password: "secret", salt: "pepper") == expectedHash,
                   "ZTE double SHA-256 login hash", failures: &failures)
@@ -1178,6 +1576,160 @@ enum DirectTests {
 
         do {
             let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"write-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"write-sid"}"#),
+                zteCallResponse(#"{"result":"success"}"#)
+            ])
+            let session = ZTEAuthSession(
+                transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+                password: "fixture-password"
+            )
+            let payload = try await session.call(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_set_netselect",
+                parameters: ["net_select": .string("Only_LTE")],
+                mode: .write,
+                zTag: "fixture-tag"
+            )
+            check(payload["result"]?.stringValue == "success",
+                  "ZTE generic write returns payload", failures: &failures)
+            let records = await http.records()
+            if let write = records.last {
+                check(write.sessionID == "write-sid" && write.ubusMethod == "nwinfo_set_netselect",
+                      "ZTE generic write uses authenticated SID", failures: &failures)
+                check(write.header("Z-Mode") == "1" && write.header("Z-Tag") == "fixture-tag",
+                      "ZTE generic write uses retail action headers", failures: &failures)
+                check(write.bodyText.contains(#""net_select":"Only_LTE""#),
+                      "ZTE generic write preserves parameters", failures: &failures)
+            } else {
+                failures.append("ZTE generic write request was not recorded")
+            }
+            check(records.prefix(2).allSatisfy { $0.header("Z-Mode") == "0" },
+                  "ZTE login requests remain read mode", failures: &failures)
+        } catch {
+            failures.append("ZTE generic authenticated write: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"salt-one"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+                zteStatusResponse(6),
+                zteCallResponse(#"{"zte_web_sault":"salt-two"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+                zteCallResponse(#"{"result":"success"}"#)
+            ])
+            let session = ZTEAuthSession(
+                transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+                password: "fixture-password"
+            )
+            _ = try await session.call(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_set_lte_ext_band",
+                parameters: ["lte_band": .string("2,4,66")],
+                mode: .write,
+                zTag: "band-lock"
+            )
+            let records = await http.records()
+            let writes = records.filter { $0.ubusMethod == "nwinfo_set_lte_ext_band" }
+            check(writes.map(\.sessionID) == ["sid-one", "sid-two"],
+                  "ZTE expired generic write replaces SID once", failures: &failures)
+            check(writes.allSatisfy {
+                $0.header("Z-Mode") == "1" && $0.header("Z-Tag") == "band-lock"
+            }, "ZTE expired generic write preserves headers", failures: &failures)
+            check(records.filter { $0.ubusMethod == "web_login" }.count == 2,
+                  "ZTE expired generic write relogs once", failures: &failures)
+        } catch {
+            failures.append("ZTE generic write expiry retry: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"salt-one"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+                zteStatusResponse(6),
+                zteCallResponse(#"{"zte_web_sault":"salt-two"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+                zteResponse(#"[{"jsonrpc":"2.0","id":3,"error":{"code":-32002,"message":"Access denied"}}]"#)
+            ])
+            let session = ZTEAuthSession(
+                transport: try ZTEUBusTransport(
+                    baseURL: URL(string: "http://192.168.254.1")!,
+                    http: http
+                ),
+                password: "fixture-password"
+            )
+            do {
+                _ = try await session.call(
+                    object: "zte_nwinfo_api",
+                    method: "nwinfo_set_netselect",
+                    parameters: ["net_select": .string("Only_LTE")],
+                    mode: .write,
+                    zTag: "nwinfo_set_netselect"
+                )
+                failures.append("ZTE replacement SID denial must fail")
+            } catch let error as ZTEUBusError {
+                check(error == .rpc(code: -32_002, message: "Access denied"),
+                      "ZTE replacement SID denial is returned", failures: &failures)
+            }
+            let records = await http.records()
+            check(records.count == 6,
+                  "ZTE replacement SID denial is not retried again", failures: &failures)
+            check(records.filter { $0.ubusMethod == "web_login" }.count == 2,
+                  "ZTE replacement SID denial has only one relogin", failures: &failures)
+            check(records.filter { $0.ubusMethod == "nwinfo_set_netselect" }.map(\.sessionID) == ["sid-one", "sid-two"],
+                  "ZTE replacement SID denial has only two writes", failures: &failures)
+        } catch {
+            failures.append("ZTE replacement SID denial retry bound: \(error)")
+        }
+
+        do {
+            let statusHTTP = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"status-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"status-sid"}"#),
+                zteStatusResponse(5)
+            ])
+            let statusSession = ZTEAuthSession(
+                transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: statusHTTP),
+                password: "fixture-password"
+            )
+            do {
+                _ = try await statusSession.call(
+                    object: "zte_nwinfo_api",
+                    method: "nwinfo_set_netselect",
+                    mode: .write
+                )
+                failures.append("ZTE non-zero UBus status must fail")
+            } catch let error as ZTEUBusError {
+                check(error == .ubusStatus(5), "ZTE non-zero UBus status is typed", failures: &failures)
+            }
+
+            let rpcHTTP = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"rpc-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"rpc-sid"}"#),
+                zteResponse(#"[{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"fixture missing method"}}]"#)
+            ])
+            let rpcSession = ZTEAuthSession(
+                transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: rpcHTTP),
+                password: "fixture-password"
+            )
+            do {
+                _ = try await rpcSession.call(
+                    object: "zte_nwinfo_api",
+                    method: "fixture_missing_method",
+                    mode: .write
+                )
+                failures.append("ZTE JSON-RPC error must fail")
+            } catch let error as ZTEUBusError {
+                check(error == .rpc(code: -32_601, message: "fixture missing method"),
+                      "ZTE JSON-RPC error is typed", failures: &failures)
+            }
+        } catch {
+            failures.append("ZTE generic call status handling: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
                 zteCallResponse(#"{"zte_web_sault":"pepper"}"#),
                 zteCallResponse(#"{"result":"1"}"#)
             ])
@@ -1202,6 +1754,834 @@ enum DirectTests {
         } catch {
             failures.append("ZTE wrong-password gate setup: \(error)")
         }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"bad-routed"}"#),
+                zteCallResponse(#"{"result":"1"}"#),
+                zteCallResponse(#"{"zte_web_sault":"bad-direct"}"#),
+                zteCallResponse(#"{"result":"1"}"#),
+                zteCallResponse(#"{"zte_web_sault":"good-routed"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"good-sid"}"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
+                zteCallResponse(#"{"network_type":"LTE","wan_active_band":"B12","wan_active_channel":5010,"lte_pci":7}"#)
+            ])
+            let backend = MC7530Backend(httpTransport: http)
+            let routed = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en1", interfaceIndex: 11,
+                sourceAddress: "192.168.8.25", connectionPath: .routed,
+                gateway: "192.168.8.1"
+            )
+            let direct = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en8", interfaceIndex: 18,
+                sourceAddress: "192.168.254.20", connectionPath: .directUSB,
+                gateway: "192.168.254.1"
+            )
+            let rejected: ModemCredentials = .web(
+                WebCredentials(password: "wrong-fixture-password")
+            )
+            for endpoint in [routed, direct] {
+                do {
+                    _ = try await backend.fetchSnapshot(
+                        endpoint: endpoint,
+                        credentials: rejected
+                    )
+                    failures.append("ZTE rejected credential must fail per endpoint")
+                } catch let error as ZTEUBusError {
+                    check(error == .authenticationFailed,
+                          "ZTE scoped rejected credential error", failures: &failures)
+                }
+            }
+            let afterRejected = await http.requestCount()
+            check(afterRejected == 4,
+                  "ZTE rejected endpoint does not poison another scope",
+                  failures: &failures)
+            let snapshot = try await backend.fetchSnapshot(
+                endpoint: routed,
+                credentials: .web(WebCredentials(password: "changed-fixture-password"))
+            )
+            let finalRequestCount = await http.requestCount()
+            check(snapshot.lteBand == "B12" && finalRequestCount == 8,
+                  "ZTE credential change reopens only its scoped session",
+                  failures: &failures)
+        } catch {
+            failures.append("ZTE per-endpoint credential gate: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+                zteCallResponse(#"{"values":{"wa_inner_version":"MC889V1.0"}}"#)
+            ])
+            let backend = MC7530Backend(httpTransport: http)
+            let endpoint = ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!)
+            do {
+                _ = try await backend.fetchSnapshot(
+                    endpoint: endpoint,
+                    credentials: .web(WebCredentials(password: "fixture-password"))
+                )
+                failures.append("ZTE model mismatch must fail before status collection")
+            } catch let error as ModemBackendError {
+                check(
+                    error == .deviceModelMismatch(expected: "MC7530CA", actual: "MC889V1.0"),
+                    "ZTE model mismatch is typed",
+                    failures: &failures
+                )
+            }
+            let records = await http.records()
+            check(records.map(\.ubusMethod) == ["web_login_info", "web_login", "get"],
+                  "ZTE model mismatch stops before netinfo", failures: &failures)
+            check(records.last?.object == "uci" &&
+                    records.last?.header("Z-Mode") == "0" &&
+                    records.last?.header("Z-Tag") == "zwrt_common_info",
+                  "ZTE model identity uses authenticated retail UCI read", failures: &failures)
+        } catch {
+            failures.append("ZTE model identity gate: \(error)")
+        }
+    }
+
+    private static func runMC7530ControlTests(failures: inout [String]) async {
+        let timing = MC7530ControlTiming(
+            pollIntervalNanoseconds: 0,
+            scanAttempts: 3,
+            registrationAttempts: 3,
+            verificationAttempts: 1,
+            resetAttempts: 2
+        )
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(state: .baseline)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let state = try await session.refresh()
+            check(state.architecture == .nsaOnly,
+                  "MC7530 net_select maps to neutral NSA-only state", failures: &failures)
+            check(state.operatorSelection == OperatorSelection(
+                mode: .automatic,
+                operatorName: "Fixture Carrier",
+                plmn: "00101",
+                accessTechnology: .lteNRDualConnectivity
+            ), "MC7530 netinfo maps operator state", failures: &failures)
+            check(state.lteBands == Set([2, 4, 66]) &&
+                    state.saBands == Set([5, 77]) &&
+                    state.nsaBands == Set([2, 66, 77]),
+                  "MC7530 netinfo maps all band sets", failures: &failures)
+            check(state.canRestoreDefaults && state.preferenceLifetime == .persistent,
+                  "MC7530 neutral state reports persistent/restorable controls", failures: &failures)
+            let records = await http.records()
+            let calls = records.filter { $0.object == "zte_nwinfo_api" || $0.object == "zwrt_zte_mdm.api" }
+            check(calls.allSatisfy { $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == $0.ubusMethod },
+                  "MC7530 refresh uses exact read mode and method tags", failures: &failures)
+        } catch {
+            failures.append("MC7530 neutral control-state parsing: \(error)")
+        }
+
+        do {
+            var lte5GC = DirectMC7530FixtureState.baseline
+            lte5GC.netSelect = "Only_LTE"
+            lte5GC.networkType = "LTE 5GC"
+            let http = DirectStatefulMC7530HTTPTransport(state: lte5GC)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let state = try await session.refresh()
+            check(state.operatorSelection?.accessTechnology == .lte5GC,
+                  "MC7530 LTE 5GC readback is not misclassified as generic NR/LTE",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 LTE 5GC mapping: \(error)")
+        }
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: .baseline,
+                emitNumericPLMNComponents: true
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let state = try await session.refresh()
+            check(state.operatorSelection?.plmn == "00101",
+                  "MC7530 numeric MCC/MNC preserves leading zeros with typed formatting",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 numeric PLMN component formatting: \(error)")
+        }
+
+        do {
+            var unknownMode = DirectMC7530FixtureState.baseline
+            unknownMode.netSelect = "UNVERIFIED_VENDOR_TOKEN"
+            var emptyBands = DirectMC7530FixtureState.baseline
+            emptyBands.lteBands = []
+            for (label, fixtureState) in [
+                ("unknown net_select", unknownMode),
+                ("empty LTE band baseline", emptyBands)
+            ] {
+                let http = DirectStatefulMC7530HTTPTransport(state: fixtureState)
+                let session = try await openMC7530ControlSession(http: http, timing: timing)
+                do {
+                    _ = try await session.perform(.lockLTEBands(Set([2])))
+                    failures.append("MC7530 \(label) must fail closed")
+                } catch let error as ZTEUBusError {
+                    check(error == .invalidResponse,
+                          "MC7530 \(label) is rejected as invalid readback",
+                          failures: &failures)
+                }
+                let records = await http.records()
+                check(records.allSatisfy {
+                    !($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") &&
+                        !($0.ubusMethod ?? "").hasPrefix("nwinfo_lock_")
+                }, "MC7530 \(label) blocks all writes", failures: &failures)
+            }
+        } catch {
+            failures.append("MC7530 fail-closed raw state gate: \(error)")
+        }
+
+        do {
+            for polluted in [
+                "2,Fixture,302evil220,13;",
+                "2,Fixture,302-220,13;",
+                "2,Fixture,３０２２２０,13;",
+                "2,Fixture,302220,13junk;"
+            ] {
+                do {
+                    _ = try MC7530ControlSession.parseNetworks(polluted)
+                    failures.append("MC7530 polluted scan PLMN/RAT must be rejected: \(polluted)")
+                } catch let error as ModemControlError {
+                    if case .verificationFailed = error {} else {
+                        failures.append("MC7530 polluted scan token error type: \(error)")
+                    }
+                }
+            }
+            var malformedIdentity = DirectMC7530FixtureState.baseline
+            malformedIdentity.mcc = "00x1"
+            let http = DirectStatefulMC7530HTTPTransport(state: malformedIdentity)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockLTEBands(Set([2])))
+                failures.append("MC7530 malformed MCC must fail closed")
+            } catch let error as ZTEUBusError {
+                check(error == .invalidResponse,
+                      "MC7530 malformed MCC is rejected as authoritative readback",
+                      failures: &failures)
+            }
+            let malformedRecords = await http.records()
+            check(malformedRecords.allSatisfy {
+                !($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") &&
+                    !($0.ubusMethod ?? "").hasPrefix("nwinfo_lock_")
+            }, "MC7530 malformed MCC blocks every write", failures: &failures)
+        } catch {
+            failures.append("MC7530 strict PLMN parsing: \(error)")
+        }
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: .baseline,
+                scanStatuses: ["manual_selecting", "manual_complete"],
+                scanContents: "1,Fixture Alpha,00101,7;2,Fixture Beta,00102,13;3,Fixture Gamma,00103,11;"
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let networks = try await session.perform(.scanNetworks).scannedNetworks ?? []
+            check(networks.map(\.plmn) == ["00102", "00101", "00103"],
+                  "MC7530 scan parses and sorts current/available/forbidden rows", failures: &failures)
+            check(networks.map(\.selectionToken) == ["13", "7", "11"],
+                  "MC7530 scan preserves exact m_rat selection tokens", failures: &failures)
+            check(networks.first?.accessTechnologies == [.lteNRDualConnectivity] &&
+                    networks.last?.accessTechnologies == [.nr5GC],
+                  "MC7530 scan maps registration RAT values", failures: &failures)
+            let records = await http.records()
+            let scanMethods = Set([
+                "nwinfo_manual_scan", "nwinfo_m_netselect_status", "nwinfo_m_netselect_contents"
+            ])
+            let actions = records.filter { scanMethods.contains($0.ubusMethod ?? "") }
+            check(actions.map(\.ubusMethod) == [
+                "nwinfo_manual_scan", "nwinfo_m_netselect_status",
+                "nwinfo_m_netselect_status", "nwinfo_m_netselect_contents"
+            ], "MC7530 scan polls status before reading contents", failures: &failures)
+            check(actions.allSatisfy { $0.header("Z-Mode") == "1" && $0.header("Z-Tag") == $0.ubusMethod },
+                  "MC7530 scan uses exact retail action headers", failures: &failures)
+        } catch {
+            failures.append("MC7530 scan/status/contents: \(error)")
+        }
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: .baseline,
+                registrationResults: ["manual_selecting", "manual_success"]
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let network = CellularNetwork(
+                longName: "Fixture Selected", shortName: "Fixture", plmn: "00102",
+                availability: .available, accessTechnologies: [.lteNRDualConnectivity],
+                selectionToken: "13"
+            )
+            let result = try await session.perform(.selectNetwork(network))
+            check(result.state.operatorSelection?.mode == .manual &&
+                    result.state.operatorSelection?.plmn == "00102",
+                  "MC7530 manual registration verifies selected PLMN", failures: &failures)
+            let records = await http.records()
+            let register = records.first { $0.ubusMethod == "nwinfo_manual_register" }
+            check(register?.parameters == ["m_mcc_mnc": "00102", "m_rat": "13"],
+                  "MC7530 manual registration sends exact PLMN/RAT parameters", failures: &failures)
+            check(register?.header("Z-Mode") == "1" && register?.header("Z-Tag") == "nwinfo_manual_register",
+                  "MC7530 manual registration uses retail action headers", failures: &failures)
+            let polls = records.filter { $0.ubusMethod == "nwinfo_m_netselect_result" }
+            check(polls.count == 2 && polls.allSatisfy {
+                $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == "nwinfo_m_netselect_result"
+            }, "MC7530 manual registration polls authenticated result", failures: &failures)
+        } catch {
+            failures.append("MC7530 manual registration/readback: \(error)")
+        }
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: .baseline,
+                scanContents: "2,Fixture Carrier,00101,13;"
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            _ = try await session.perform(.selectNetwork(CellularNetwork(
+                longName: "Fixture LTE",
+                shortName: "Fixture",
+                plmn: "00101",
+                availability: .available,
+                accessTechnologies: [.lte],
+                selectionToken: "7"
+            )))
+            _ = try await session.perform(.scanNetworks)
+            _ = try await session.perform(.setArchitecture(.nsaOnly))
+            let registrations = await http.records()
+                .filter { $0.ubusMethod == "nwinfo_manual_register" }
+            check(registrations.map { $0.parameters["m_rat"] } == ["7", "13"],
+                  "MC7530 fresh current scan row replaces cached RAT for same PLMN",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 fresh scan RAT cache replacement: \(error)")
+        }
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(state: .baseline)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let incompatible = CellularNetwork(
+                longName: "Fixture SA", shortName: "Fixture", plmn: "00102",
+                availability: .available, accessTechnologies: [.nr5GC],
+                selectionToken: "11"
+            )
+            do {
+                _ = try await session.perform(.selectNetwork(incompatible))
+                failures.append("MC7530 incompatible manual RAT must fail")
+            } catch let error as ModemControlError {
+                if case .invalidState = error {} else {
+                    failures.append("MC7530 incompatible manual RAT error type: \(error)")
+                }
+            }
+            let records = await http.records()
+            check(records.allSatisfy {
+                $0.ubusMethod != "nwinfo_manual_register" &&
+                    $0.ubusMethod != "nwinfo_reset_band_cell_setting"
+            }, "MC7530 incompatible manual RAT is rejected before every write", failures: &failures)
+        } catch {
+            failures.append("MC7530 manual RAT/net_select compatibility: \(error)")
+        }
+
+        for (mode, token) in [
+            (NRArchitectureMode.automatic, "WL_AND_NSA"),
+            (.nsaOnly, "LTE_AND_5G"), (.saOnly, "Only_5G"), (.lteOnly, "Only_LTE")
+        ] {
+            do {
+                let http = DirectStatefulMC7530HTTPTransport(state: .baseline)
+                let session = try await openMC7530ControlSession(http: http, timing: timing)
+                let result = try await session.perform(.setArchitecture(mode))
+                let writes = await http.records().filter { $0.ubusMethod == "nwinfo_set_netselect" }
+                check(writes.count == 1 && writes[0].parameters == ["net_select": token],
+                      "MC7530 \(mode.rawValue) uses exact ZTE token", failures: &failures)
+                check(writes[0].header("Z-Mode") == "1" && writes[0].header("Z-Tag") == "nwinfo_set_netselect",
+                      "MC7530 \(mode.rawValue) uses exact action headers", failures: &failures)
+                check(result.state.architecture == mode,
+                      "MC7530 \(mode.rawValue) verifies neutral readback", failures: &failures)
+            } catch {
+                failures.append("MC7530 architecture token \(token): \(error)")
+            }
+        }
+
+        do {
+            var manualSA = DirectMC7530FixtureState.baseline
+            manualSA.netSelect = "Only_5G"
+            manualSA.netSelectMode = "manual_select"
+            manualSA.networkType = "NR5G SA"
+            let blockedHTTP = DirectStatefulMC7530HTTPTransport(state: manualSA)
+            let blockedSession = try await openMC7530ControlSession(http: blockedHTTP, timing: timing)
+            do {
+                _ = try await blockedSession.perform(.selectAutomaticNetwork)
+                failures.append("MC7530 unknown manual RAT must block automatic selection")
+            } catch let error as ModemControlError {
+                if case .invalidState = error {} else {
+                    failures.append("MC7530 unknown manual RAT error type: \(error)")
+                }
+            }
+            let blockedRecords = await blockedHTTP.records()
+            check(blockedRecords.allSatisfy { $0.ubusMethod != "nwinfo_set_netselect" },
+                  "MC7530 unknown manual RAT fails before destructive write", failures: &failures)
+
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: manualSA,
+                scanContents: "2,Fixture Carrier,00101,11;"
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            _ = try await session.perform(.scanNetworks)
+            let result = try await session.perform(.selectAutomaticNetwork)
+            let write = await http.records().first { $0.ubusMethod == "nwinfo_set_netselect" }
+            check(write?.parameters == ["net_select": "Only_5G"],
+                  "MC7530 scanned manual RAT allows automatic selection with preserved architecture", failures: &failures)
+            check(result.state.operatorSelection?.mode == .automatic && result.state.architecture == .saOnly,
+                  "MC7530 automatic operator selection readback preserves SA-only mode", failures: &failures)
+
+            let incompatibleHTTP = DirectStatefulMC7530HTTPTransport(
+                state: manualSA,
+                scanContents: "2,Fixture Carrier,00101,11;"
+            )
+            let incompatibleSession = try await openMC7530ControlSession(
+                http: incompatibleHTTP,
+                timing: timing
+            )
+            _ = try await incompatibleSession.perform(.scanNetworks)
+            do {
+                _ = try await incompatibleSession.perform(.setArchitecture(.lteOnly))
+                failures.append("MC7530 manual SA RAT must not be replayed into LTE-only")
+            } catch let error as ModemControlError {
+                if case .invalidState = error {} else {
+                    failures.append("MC7530 incompatible architecture replay type: \(error)")
+                }
+            }
+            let incompatibleRecords = await incompatibleHTTP.records()
+            check(incompatibleRecords.allSatisfy {
+                $0.ubusMethod != "nwinfo_set_netselect" &&
+                    $0.ubusMethod != "nwinfo_manual_register"
+            }, "MC7530 incompatible architecture is blocked before persistent writes",
+               failures: &failures)
+        } catch {
+            failures.append("MC7530 automatic operator selection: \(error)")
+        }
+
+        do {
+            var automatic = DirectMC7530FixtureState.baseline
+            automatic.netSelect = "WL_AND_NSA"
+            let http = DirectStatefulMC7530HTTPTransport(state: automatic)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let nrResult = try await session.perform(.lockNRBands(Set([5, 77])))
+            let lteResult = try await session.perform(.lockLTEBands(Set([2, 66])))
+            check(nrResult.state.saBands == Set([5, 77]) && nrResult.state.nsaBands == Set([5, 77]),
+                  "MC7530 automatic mode verifies both SA and NSA locks", failures: &failures)
+            check(lteResult.state.lteBands == Set([2, 66]),
+                  "MC7530 verifies LTE lock readback", failures: &failures)
+            let records = await http.records()
+            let nrWrites = records.filter { $0.ubusMethod == "nwinfo_set_nrbandlock" }
+            check(nrWrites.map(\.parameters) == [
+                ["nr5g_band": "5,77", "nr5g_type": "0"],
+                ["nr5g_band": "5,77", "nr5g_type": "1"]
+            ], "MC7530 NR lock writes exact sorted SA/NSA parameters", failures: &failures)
+            let lteWrite = records.first { $0.ubusMethod == "nwinfo_set_lte_ext_band" }
+            check(lteWrite?.parameters == ["lte_band": "2,66"],
+                  "MC7530 LTE lock writes exact sorted parameters", failures: &failures)
+            check((nrWrites + [lteWrite].compactMap { $0 }).allSatisfy {
+                $0.header("Z-Mode") == "1" && $0.header("Z-Tag") == $0.ubusMethod
+            }, "MC7530 band locks use exact retail action headers", failures: &failures)
+        } catch {
+            failures.append("MC7530 NR/LTE band locks: \(error)")
+        }
+
+        await runMC7530RollbackRestoreAndIdentityTests(timing: timing, failures: &failures)
+    }
+
+    private static func runMC7530RollbackRestoreAndIdentityTests(
+        timing: MC7530ControlTiming,
+        failures: inout [String]
+    ) async {
+        do {
+            let baseline = DirectMC7530FixtureState.baseline
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: baseline,
+                ignoredLTEWriteApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                failures.append("MC7530 unverified LTE setter must fail")
+            } catch let error as ModemControlError {
+                if case .verificationFailed = error {} else {
+                    failures.append("MC7530 LTE readback failure type: \(error)")
+                }
+            }
+            let records = await http.records()
+            let lteWrites = records.filter { $0.ubusMethod == "nwinfo_set_lte_ext_band" }
+            check(lteWrites.map(\.parameters) == [
+                ["lte_band": "2,66"], ["lte_band": "2,4,66"]
+            ], "MC7530 accepted-but-unverified LTE write restores original bands", failures: &failures)
+            check(records.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" } &&
+                    records.contains { $0.ubusMethod == "nwinfo_set_nrbandlock" } &&
+                    records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
+                  "MC7530 LTE failure rebuilds every persistent field from the verified baseline",
+                  failures: &failures)
+            let recovered = await http.currentState()
+            check(recovered == baseline,
+                  "MC7530 LTE rollback confirms full original state", failures: &failures)
+        } catch {
+            failures.append("MC7530 LTE readback rollback: \(error)")
+        }
+
+        do {
+            let baseline = DirectMC7530FixtureState.baseline
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: baseline,
+                collateralGWChangesAfterLTEApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                failures.append("MC7530 collateral setter change must fail verification")
+            } catch let error as ModemControlError {
+                if case .verificationFailed = error {} else {
+                    failures.append("MC7530 collateral change failure type: \(error)")
+                }
+            }
+            let recovered = await http.currentState()
+            check(recovered == baseline,
+                  "MC7530 collateral GW change is detected and fully restored",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 collateral write detection: \(error)")
+        }
+
+        do {
+            let baseline = DirectMC7530FixtureState.baseline
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: baseline,
+                lostLTEResponsesAfterApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                failures.append("MC7530 lost applied-write response must fail the command")
+            } catch {}
+            let recovered = await http.currentState()
+            check(recovered == baseline,
+                  "MC7530 ambiguous applied LTE write is reconciled by full readback/restore",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 ambiguous write recovery: \(error)")
+        }
+
+        do {
+            let baseline = DirectMC7530FixtureState.baseline
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: baseline,
+                ignoredLTEWriteApplications: 1,
+                lostResetResponsesAfterApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                failures.append("MC7530 unverified write with lost reset response must fail")
+            } catch let error as ModemControlError {
+                if case .verificationFailed = error {} else {
+                    failures.append("MC7530 reconciled rollback should preserve original error: \(error)")
+                }
+            }
+            let records = await http.records()
+            let recovered = await http.currentState()
+            check(recovered == baseline &&
+                    records.contains { $0.ubusMethod == "nwinfo_set_gwl_bandlock" } &&
+                    records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
+                  "MC7530 rollback continues after a lost reset response and trusts exact final readback",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 best-effort rollback sequencing: \(error)")
+        }
+
+        do {
+            let baseline = DirectMC7530FixtureState.baseline
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: baseline,
+                suspendedLTEResponsesAfterApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let operation = Task {
+                try await session.perform(.lockLTEBands(Set([2, 66])))
+            }
+            for _ in 0..<200 {
+                if (await http.records()).contains(where: {
+                    $0.ubusMethod == "nwinfo_set_lte_ext_band"
+                }) { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("MC7530 canceled applied write must not report success")
+            } catch {
+                check(error is CancellationError,
+                      "MC7530 preserves cancellation after cleanup", failures: &failures)
+            }
+            let recovered = await http.currentState()
+            let records = await http.records()
+            check(recovered == baseline && records.contains {
+                $0.ubusMethod == "nwinfo_reset_band_cell_setting"
+            },
+                  "MC7530 cancellation runs rollback in an uncancelled cleanup task",
+                  failures: &failures)
+        } catch {
+            failures.append("MC7530 cancellation-safe rollback: \(error)")
+        }
+
+        do {
+            var automatic = DirectMC7530FixtureState.baseline
+            automatic.netSelect = "WL_AND_NSA"
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: automatic,
+                ignoredNRWriteApplications: ["1": 1]
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockNRBands(Set([5, 71])))
+                failures.append("MC7530 partially applied NR setter must fail")
+            } catch let error as ModemControlError {
+                if case .verificationFailed = error {} else {
+                    failures.append("MC7530 NR readback failure type: \(error)")
+                }
+            }
+            let records = await http.records()
+            let nrWrites = records.filter { $0.ubusMethod == "nwinfo_set_nrbandlock" }
+            check(nrWrites.map(\.parameters) == [
+                ["nr5g_band": "5,71", "nr5g_type": "0"],
+                ["nr5g_band": "5,71", "nr5g_type": "1"],
+                ["nr5g_band": "5,77", "nr5g_type": "0"],
+                ["nr5g_band": "2,66,77", "nr5g_type": "1"]
+            ], "MC7530 partial NR write restores original SA/NSA bands", failures: &failures)
+            check(records.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" } &&
+                    records.contains { $0.ubusMethod == "nwinfo_set_lte_ext_band" } &&
+                    records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
+                  "MC7530 NR failure rebuilds every persistent field from the verified baseline",
+                  failures: &failures)
+            let recovered = await http.currentState()
+            check(recovered == automatic,
+                  "MC7530 NR rollback confirms full original state", failures: &failures)
+        } catch {
+            failures.append("MC7530 NR readback rollback: \(error)")
+        }
+
+        do {
+            let baseline = DirectMC7530FixtureState.baseline
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: baseline,
+                ignoredNetSelectWriteApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.setArchitecture(.lteOnly))
+                failures.append("MC7530 unverified architecture setter must fail")
+            } catch let error as ModemControlError {
+                if case .verificationFailed = error {} else {
+                    failures.append("MC7530 architecture readback failure type: \(error)")
+                }
+            }
+            let tokens = await http.records()
+                .filter { $0.ubusMethod == "nwinfo_set_netselect" }
+                .compactMap { $0.parameters["net_select"] }
+            check(tokens == ["Only_LTE", baseline.netSelect],
+                  "MC7530 failed mode readback restores exact original token", failures: &failures)
+            let recovered = await http.currentState()
+            check(recovered == baseline,
+                  "MC7530 mode rollback confirms full original state", failures: &failures)
+        } catch {
+            failures.append("MC7530 architecture readback rollback: \(error)")
+        }
+
+        do {
+            var malformed = DirectMC7530FixtureState.baseline
+            malformed.lteCellLock = "17,5010,unexpected"
+            let http = DirectStatefulMC7530HTTPTransport(state: malformed)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.restoreDefaults)
+                failures.append("MC7530 malformed rollback cell state must block restore")
+            } catch let error as ModemControlError {
+                if case .invalidState = error {} else {
+                    failures.append("MC7530 malformed rollback preflight type: \(error)")
+                }
+            }
+            let records = await http.records()
+            check(records.allSatisfy {
+                $0.ubusMethod != "nwinfo_reset_band_cell_setting" &&
+                    !($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") &&
+                    !($0.ubusMethod ?? "").hasPrefix("nwinfo_lock_")
+            }, "MC7530 malformed cell rollback is rejected before every write", failures: &failures)
+        } catch {
+            failures.append("MC7530 restore rollback preflight: \(error)")
+        }
+
+        do {
+            var nondefaultNRDC = DirectMC7530FixtureState.baseline
+            nondefaultNRDC.nrdcBands = Set([77])
+            let http = DirectStatefulMC7530HTTPTransport(state: nondefaultNRDC)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                failures.append("MC7530 nondefault NRDC must block an unrecoverable write")
+            } catch let error as ModemControlError {
+                if case .invalidState = error {} else {
+                    failures.append("MC7530 nondefault NRDC preflight type: \(error)")
+                }
+            }
+            let records = await http.records()
+            check(records.allSatisfy {
+                $0.ubusMethod != "nwinfo_reset_band_cell_setting" &&
+                    !($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") &&
+                    !($0.ubusMethod ?? "").hasPrefix("nwinfo_lock_")
+            }, "MC7530 nondefault NRDC blocks every write before mutation", failures: &failures)
+        } catch {
+            failures.append("MC7530 NRDC rollback preflight: \(error)")
+        }
+
+        do {
+            var restricted = DirectMC7530FixtureState.baseline
+            restricted.netSelect = "Only_LTE"
+            restricted.lteBands = Set([2, 66])
+            restricted.saBands = Set([77])
+            restricted.nsaBands = Set([66, 77])
+            restricted.gwBandLock = "0x123"
+            restricted.lteCellLock = "17,5010"
+            restricted.nrCellLock = "42,640000,77"
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: restricted,
+                ignoredNetSelectWriteApplications: 1
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            do {
+                _ = try await session.perform(.restoreDefaults)
+                failures.append("MC7530 unverified restore mode must fail")
+            } catch let error as ModemControlError {
+                if case .verificationFailed = error {} else {
+                    failures.append("MC7530 failed restore readback type: \(error)")
+                }
+            }
+            let recovered = await http.currentState()
+            check(recovered == restricted,
+                  "MC7530 failed global restore recovers exact GW/band/cell/mode state",
+                  failures: &failures)
+            let rollbackRecords = await http.records()
+            let gwWrite = rollbackRecords.first {
+                $0.ubusMethod == "nwinfo_set_gwl_bandlock"
+            }
+            check(gwWrite?.parameters == [
+                "is_gw_band": "1", "gw_band_mask": "0x123",
+                "is_lte_band": "0", "lte_band_mask": "0"
+            ], "MC7530 rollback uses exact GW UBus schema", failures: &failures)
+        } catch {
+            failures.append("MC7530 complete global restore rollback: \(error)")
+        }
+
+        do {
+            var restricted = DirectMC7530FixtureState.baseline
+            restricted.netSelect = "Only_LTE"
+            restricted.lteBands = Set([2, 66])
+            restricted.saBands = Set([77])
+            restricted.nsaBands = Set([66, 77])
+            restricted.gwBandLock = "0x123"
+            restricted.lteCellLock = "17,5010"
+            restricted.nrCellLock = "42,640000,77"
+            let http = DirectStatefulMC7530HTTPTransport(state: restricted)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let result = try await session.perform(.restoreDefaults)
+            check(result.state.architecture == .automatic &&
+                    result.state.lteBands == MC7530ControlSession.defaultLTEBands &&
+                    result.state.saBands == MC7530ControlSession.defaultNRBands &&
+                    result.state.nsaBands == MC7530ControlSession.defaultNRBands,
+                  "MC7530 restore verifies automatic mode and retail default bands", failures: &failures)
+            let restored = await http.currentState()
+            check(restored.gwBandLock == MC7530ControlSession.defaultGWBandMask &&
+                    restored.nrdcBands == restricted.nrdcBands &&
+                    restored.lteCellLock.isEmpty && restored.nrCellLock.isEmpty,
+                  "MC7530 restore verifies GW default, NRDC invariant, and cleared cell locks",
+                  failures: &failures)
+            let records = await http.records()
+            let reset = records.first { $0.ubusMethod == "nwinfo_reset_band_cell_setting" }
+            check(reset?.parameters.isEmpty == true && reset?.header("Z-Mode") == "1" &&
+                    reset?.header("Z-Tag") == "nwinfo_reset_band_cell_setting",
+                  "MC7530 restore sends exact global reset action", failures: &failures)
+            let mode = records.last { $0.ubusMethod == "nwinfo_set_netselect" }
+            check(mode?.parameters == ["net_select": "WL_AND_NSA"],
+                  "MC7530 restore finishes with exact WL_AND_NSA token", failures: &failures)
+        } catch {
+            failures.append("MC7530 restore defaults: \(error)")
+        }
+
+        do {
+            let http = DirectScriptedZTEHTTPTransport(responses: [
+                zteCallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+                zteCallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+                zteCallResponse(#"{"serial":"fixture-but-unverified-field"}"#)
+            ])
+            let auth = ZTEAuthSession(
+                transport: try ZTEUBusTransport(
+                    baseURL: URL(string: "http://192.0.2.1")!, http: http
+                ),
+                password: "fixture-password"
+            )
+            do {
+                _ = try await MC7530ControlSession.open(
+                    session: auth,
+                    timing: timing,
+                    sleep: { _ in }
+                )
+                failures.append("MC7530 unknown MSN field must fail closed")
+            } catch let error as ModemBackendError {
+                check(error == .identityUnavailable,
+                      "MC7530 unknown MSN field error", failures: &failures)
+            }
+            let records = await http.records()
+            check(records.count == 3 && records.last?.ubusMethod == "get_modem_msn",
+                  "MC7530 unknown MSN field stops during session binding", failures: &failures)
+            check(records.allSatisfy { !($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") },
+                  "MC7530 unknown MSN field performs no write", failures: &failures)
+        } catch {
+            failures.append("MC7530 unknown MSN fail-closed setup: \(error)")
+        }
+
+        do {
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: .baseline,
+                fingerprintSequence: ["fixture-device-alpha", "fixture-device-beta"]
+            )
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            for attempt in 1...2 {
+                do {
+                    _ = try await session.perform(.setArchitecture(.lteOnly))
+                    failures.append("MC7530 changed-device attempt \(attempt) must fail")
+                } catch let error as ModemControlError {
+                    check(error == .deviceChanged,
+                          "MC7530 changed-device error \(attempt)", failures: &failures)
+                }
+            }
+            let records = await http.records()
+            check(records.filter { $0.ubusMethod == "get_modem_msn" }.count == 2,
+                  "MC7530 fingerprint mismatch permanently invalidates session", failures: &failures)
+            check(records.allSatisfy { $0.ubusMethod != "nwinfo_set_netselect" },
+                  "MC7530 fingerprint mismatch blocks all writes", failures: &failures)
+        } catch {
+            failures.append("MC7530 fingerprint change guard: \(error)")
+        }
+    }
+
+    private static func openMC7530ControlSession(
+        http: DirectStatefulMC7530HTTPTransport,
+        timing: MC7530ControlTiming
+    ) async throws -> MC7530ControlSession {
+        let auth = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
+            password: "fixture-password"
+        )
+        return try await MC7530ControlSession.open(
+            session: auth,
+            timing: timing,
+            sleep: { _ in }
+        )
     }
 
     private static func runDiscoveryTests(failures: inout [String]) async {
@@ -1731,6 +3111,9 @@ enum DirectTests {
         do {
             let reader = DirectVOSStatusReader()
             let backend = VOSBackend(client: reader)
+            check(!backend.capabilities.contains(.deviceControls),
+                  "VOS status-only client does not advertise device controls",
+                  failures: &failures)
             let firstEndpoint = ScopedEndpoint(
                 baseURL: URL(string: "http://192.168.225.1")!,
                 interfaceName: "en9",
@@ -1787,6 +3170,124 @@ enum DirectTests {
                   "standard registry VOS SSH identity policy", failures: &failures)
         } catch {
             failures.append("standard backend registry: \(error)")
+        }
+
+        do {
+            let openGate = DirectAsyncGate()
+            let backend = DirectCoordinatorControlBackend(openGate: openGate)
+            let endpoint = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en8",
+                interfaceIndex: 18,
+                sourceAddress: "192.168.254.20"
+            )
+            let report = ModemDiscoveryReport(
+                topology: .empty,
+                attempts: [ModemDiscoveryAttempt(
+                    candidate: ModemDiscoveryCandidate(
+                        kind: .zteMC7530CA,
+                        endpoint: endpoint,
+                        sources: [.knownDefault],
+                        priority: ModemDiscoveryCandidateSource.knownDefault.rawValue
+                    ),
+                    result: .matched(directIdentity(.zteMC7530CA))
+                )]
+            )
+            let coordinator = ModemCoordinator(
+                registry: try directControlRegistry(backend: backend)
+            ) { _, _, _ in report }
+            let credentials = ModemConnectionCredentials([
+                .zteMC7530CA: .web(WebCredentials(password: "fixture-web-password"))
+            ])
+            _ = try await coordinator.read(
+                preferences: ModemConnectionPreferences(selection: .zteMC7530CA),
+                credentials: credentials
+            )
+
+            let firstOpen = Task {
+                try await coordinator.controlSession(credentials: credentials)
+            }
+            let secondOpen = Task {
+                try await coordinator.controlSession(credentials: credentials)
+            }
+            await openGate.waitForArrivals(2)
+            await openGate.releaseAll()
+            let first = try await firstOpen.value
+            let second = try await secondOpen.value
+            guard let firstSession = first as? DirectCoordinatorControlSession,
+                  let secondSession = second as? DirectCoordinatorControlSession
+            else {
+                failures.append("coordinator concurrent control open returns fixture sessions")
+                return
+            }
+            check(firstSession.instanceID == secondSession.instanceID,
+                  "coordinator concurrent same-key opens return one cached session",
+                  failures: &failures)
+            let created = await backend.controlSessions()
+            var liveSessionIDs: [Int] = []
+            for session in created where !(await session.isInvalidated()) {
+                liveSessionIDs.append(session.instanceID)
+            }
+            check(created.count == 2 && liveSessionIDs == [firstSession.instanceID],
+                  "coordinator concurrent same-key open retires the losing session",
+                  failures: &failures)
+        } catch {
+            failures.append("coordinator concurrent control-session cache: \(error)")
+        }
+
+        do {
+            let fetchGate = DirectAsyncGate()
+            let backend = DirectCoordinatorControlBackend(
+                fetchGate: fetchGate,
+                gatedFetchCall: 2
+            )
+            let endpoint = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en8",
+                interfaceIndex: 18,
+                sourceAddress: "192.168.254.20"
+            )
+            let report = ModemDiscoveryReport(
+                topology: .empty,
+                attempts: [ModemDiscoveryAttempt(
+                    candidate: ModemDiscoveryCandidate(
+                        kind: .zteMC7530CA,
+                        endpoint: endpoint,
+                        sources: [.knownDefault],
+                        priority: ModemDiscoveryCandidateSource.knownDefault.rawValue
+                    ),
+                    result: .matched(directIdentity(.zteMC7530CA))
+                )]
+            )
+            let coordinator = ModemCoordinator(
+                registry: try directControlRegistry(backend: backend)
+            ) { _, _, _ in report }
+            let credentials = ModemConnectionCredentials([
+                .zteMC7530CA: .web(WebCredentials(password: "fixture-web-password"))
+            ])
+            let preferences = ModemConnectionPreferences(selection: .zteMC7530CA)
+            _ = try await coordinator.read(preferences: preferences, credentials: credentials)
+
+            let staleRead = Task {
+                try await coordinator.read(preferences: preferences, credentials: credentials)
+            }
+            await fetchGate.waitForArrivals(1)
+            await coordinator.invalidateActiveModem()
+            await fetchGate.releaseAll()
+            do {
+                _ = try await staleRead.value
+                failures.append("coordinator invalidated read must not commit")
+            } catch let error as ModemControlError {
+                check(error == .deviceChanged,
+                      "coordinator invalidated read reports generation change",
+                      failures: &failures)
+            }
+            let activeAfterInvalidation = await coordinator.currentActiveModem()
+            check(activeAfterInvalidation == nil,
+                  "coordinator invalidated read leaves no active modem",
+                  failures: &failures)
+        } catch {
+            failures.append("coordinator read/invalidate generation race: \(error)")
         }
     }
 
@@ -1863,6 +3364,20 @@ enum DirectTests {
             ))
         }
         return try ModemBackendRegistry(registrations: registrations)
+    }
+
+    private static func directControlRegistry(
+        backend: DirectCoordinatorControlBackend
+    ) throws -> ModemBackendRegistry {
+        try ModemBackendRegistry(registrations: [ModemBackendRegistration(
+            backend: backend,
+            discoveryProfile: ModemDiscoveryProfile(
+                kind: .zteMC7530CA,
+                defaultBaseURLs: [URL(string: "http://192.168.254.1")!]
+            ),
+            identificationCredentials: .anonymous,
+            statusCredentials: .configured(.web)
+        )])
     }
 
     private static func data(_ hex: String) -> Data {
@@ -1978,6 +3493,144 @@ private enum DirectTestSupportError: Error {
     case plannedCredentialFailure
 }
 
+/// Deterministic suspension point for actor-reentrancy tests. Tests first wait
+/// until the expected number of operations have arrived, then open the gate.
+private actor DirectAsyncGate {
+    private struct ArrivalWaiter {
+        let target: Int
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private var arrivalCount = 0
+    private var isReleased = false
+    private var blocked: [CheckedContinuation<Void, Never>] = []
+    private var arrivalWaiters: [ArrivalWaiter] = []
+
+    func arriveAndWait() async {
+        arrivalCount += 1
+        let ready = arrivalWaiters.filter { arrivalCount >= $0.target }
+        arrivalWaiters.removeAll { arrivalCount >= $0.target }
+        for waiter in ready { waiter.continuation.resume() }
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            blocked.append(continuation)
+        }
+    }
+
+    func waitForArrivals(_ target: Int) async {
+        guard arrivalCount < target else { return }
+        await withCheckedContinuation { continuation in
+            arrivalWaiters.append(ArrivalWaiter(
+                target: target,
+                continuation: continuation
+            ))
+        }
+    }
+
+    func releaseAll() {
+        isReleased = true
+        let continuations = blocked
+        blocked.removeAll()
+        for continuation in continuations { continuation.resume() }
+    }
+}
+
+private actor DirectCoordinatorControlSession: ModemControlSession {
+    nonisolated let instanceID: Int
+    nonisolated let kind: ModemKind = .zteMC7530CA
+    nonisolated let capabilities: ModemCapability = [.operatorSelection]
+    nonisolated let stableIdentifier = directIdentity(.zteMC7530CA).stableIdentifier!
+
+    private var invalidated = false
+
+    init(instanceID: Int) {
+        self.instanceID = instanceID
+    }
+
+    func invalidate() async {
+        invalidated = true
+    }
+
+    func refresh() async throws -> ModemControlState {
+        guard !invalidated else { throw ModemControlError.deviceChanged }
+        return ModemControlState(
+            operatorSelection: nil,
+            architecture: .automatic,
+            saBands: [],
+            nsaBands: [],
+            lteBands: [],
+            canRestoreDefaults: true,
+            preferenceLifetime: .persistent
+        )
+    }
+
+    func perform(_ command: ModemControlCommand) async throws -> ModemControlResult {
+        guard !invalidated else { throw ModemControlError.deviceChanged }
+        return ModemControlResult(state: try await refresh())
+    }
+
+    func isInvalidated() -> Bool { invalidated }
+}
+
+private actor DirectCoordinatorControlBackend: ModemControlBackend {
+    nonisolated let kind: ModemKind = .zteMC7530CA
+    nonisolated let capabilities: ModemCapability = [
+        .identityRead,
+        .statusRead,
+        .operatorSelection
+    ]
+
+    private let identity = directIdentity(.zteMC7530CA)
+    private let openGate: DirectAsyncGate?
+    private let fetchGate: DirectAsyncGate?
+    private let gatedFetchCall: Int?
+    private var fetchCallCount = 0
+    private var sessions: [DirectCoordinatorControlSession] = []
+
+    init(
+        openGate: DirectAsyncGate? = nil,
+        fetchGate: DirectAsyncGate? = nil,
+        gatedFetchCall: Int? = nil
+    ) {
+        self.openGate = openGate
+        self.fetchGate = fetchGate
+        self.gatedFetchCall = gatedFetchCall
+    }
+
+    func identify(
+        endpoint: ScopedEndpoint,
+        credentials: ModemCredentials
+    ) async throws -> ModemIdentity? {
+        identity
+    }
+
+    func fetchSnapshot(
+        endpoint: ScopedEndpoint,
+        credentials: ModemCredentials
+    ) async throws -> DeviceSnapshot {
+        fetchCallCount += 1
+        if fetchCallCount == gatedFetchCall, let fetchGate {
+            await fetchGate.arriveAndWait()
+        }
+        var snapshot = DeviceSnapshot.empty
+        snapshot.host = endpoint.host ?? "fixture"
+        snapshot.interfaceName = endpoint.interfaceName
+        return snapshot
+    }
+
+    func openControlSession(
+        endpoint: ScopedEndpoint,
+        credentials: ModemCredentials
+    ) async throws -> any ModemControlSession {
+        let session = DirectCoordinatorControlSession(instanceID: sessions.count + 1)
+        sessions.append(session)
+        if let openGate { await openGate.arriveAndWait() }
+        return session
+    }
+
+    func controlSessions() -> [DirectCoordinatorControlSession] { sessions }
+}
+
 private struct DirectMisleadingAuthenticationError: LocalizedError {
     var errorDescription: String? {
         "A password or credential was rejected and requires attention."
@@ -2054,6 +3707,7 @@ private struct DirectZTERequestRecord: Sendable {
     let sessionID: String?
     let object: String?
     let ubusMethod: String?
+    let parameters: [String: String]
     let loginUsername: String?
     let loginPassword: String?
 
@@ -2100,6 +3754,293 @@ private actor DirectScriptedZTEHTTPTransport: ZTEHTTPTransport {
             sessionID: params?.first as? String,
             object: params.flatMap { $0.count > 1 ? $0[1] as? String : nil },
             ubusMethod: params.flatMap { $0.count > 2 ? $0[2] as? String : nil },
+            parameters: callParameters?.reduce(into: [:]) { result, pair in
+                if let value = pair.value as? String { result[pair.key] = value }
+            } ?? [:],
+            loginUsername: callParameters?["username"] as? String,
+            loginPassword: callParameters?["password"] as? String
+        )
+    }
+}
+
+private struct DirectMC7530FixtureState: Equatable, Sendable {
+    var netSelect: String
+    var netSelectMode: String
+    var operatorName: String
+    var mcc: String
+    var mnc: String
+    var networkType: String
+    var lteBands: Set<Int>
+    var saBands: Set<Int>
+    var nsaBands: Set<Int>
+    var nrdcBands: Set<Int>
+    var gwBandLock: String
+    var lteCellLock: String
+    var nrCellLock: String
+
+    static let baseline = DirectMC7530FixtureState(
+        netSelect: "LTE_AND_5G",
+        netSelectMode: "auto_select",
+        operatorName: "Fixture Carrier",
+        mcc: "001",
+        mnc: "01",
+        networkType: "ENDC",
+        lteBands: Set([2, 4, 66]),
+        saBands: Set([5, 77]),
+        nsaBands: Set([2, 66, 77]),
+        nrdcBands: MC7530ControlSession.defaultNRDCBands,
+        gwBandLock: "0x006800000",
+        lteCellLock: "",
+        nrCellLock: ""
+    )
+}
+
+/// Stateful retail-UBus fixture. Setter responses always return success; the
+/// optional ignored-application counters model firmware that accepts a call
+/// but fails to change authoritative `nwinfo_get_netinfo` readback.
+private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
+    private var state: DirectMC7530FixtureState
+    private var scanStatuses: [String]
+    private let scanContents: String
+    private var registrationResults: [String]
+    private var pendingManualPLMN: String?
+    private var pendingManualRAT: String?
+    private var ignoredLTEWriteApplications: Int
+    private var collateralGWChangesAfterLTEApplications: Int
+    private var lostLTEResponsesAfterApplications: Int
+    private var suspendedLTEResponsesAfterApplications: Int
+    private var ignoredNRWriteApplications: [String: Int]
+    private var ignoredNetSelectWriteApplications: Int
+    private var lostResetResponsesAfterApplications: Int
+    private let fingerprintSequence: [String]
+    private let emitNumericPLMNComponents: Bool
+    private var fingerprintIndex = 0
+    private var requestRecords: [DirectZTERequestRecord] = []
+
+    init(
+        state: DirectMC7530FixtureState,
+        scanStatuses: [String] = ["manual_complete"],
+        scanContents: String = "2,Fixture Carrier,00101,13;",
+        registrationResults: [String] = ["manual_success"],
+        ignoredLTEWriteApplications: Int = 0,
+        collateralGWChangesAfterLTEApplications: Int = 0,
+        lostLTEResponsesAfterApplications: Int = 0,
+        suspendedLTEResponsesAfterApplications: Int = 0,
+        ignoredNRWriteApplications: [String: Int] = [:],
+        ignoredNetSelectWriteApplications: Int = 0,
+        lostResetResponsesAfterApplications: Int = 0,
+        fingerprintSequence: [String] = ["fixture-device-alpha"],
+        emitNumericPLMNComponents: Bool = false
+    ) {
+        self.state = state
+        self.scanStatuses = scanStatuses
+        self.scanContents = scanContents
+        self.registrationResults = registrationResults
+        self.ignoredLTEWriteApplications = ignoredLTEWriteApplications
+        self.collateralGWChangesAfterLTEApplications = collateralGWChangesAfterLTEApplications
+        self.lostLTEResponsesAfterApplications = lostLTEResponsesAfterApplications
+        self.suspendedLTEResponsesAfterApplications = suspendedLTEResponsesAfterApplications
+        self.ignoredNRWriteApplications = ignoredNRWriteApplications
+        self.ignoredNetSelectWriteApplications = ignoredNetSelectWriteApplications
+        self.lostResetResponsesAfterApplications = lostResetResponsesAfterApplications
+        self.fingerprintSequence = fingerprintSequence.isEmpty
+            ? ["fixture-device-alpha"] : fingerprintSequence
+        self.emitNumericPLMNComponents = emitNumericPLMNComponents
+    }
+
+    func send(_ request: URLRequest, route: ZTEHTTPRoute) async throws -> ZTEHTTPResponse {
+        let record = try Self.record(request, route: route)
+        requestRecords.append(record)
+
+        switch record.ubusMethod {
+        case "web_login_info":
+            return try Self.response(["zte_web_sault": "fixture-salt"])
+        case "web_login":
+            return try Self.response(["result": "0", "ubus_rpc_session": "fixture-session"])
+        case "get_modem_msn":
+            let index = min(fingerprintIndex, fingerprintSequence.count - 1)
+            let value = fingerprintSequence[index]
+            fingerprintIndex += 1
+            return try Self.response(["modem_msn": value])
+        case "nwinfo_get_netinfo":
+            return try Self.response(netinfoObject())
+        case "nwinfo_manual_scan":
+            return try Self.successResponse()
+        case "nwinfo_m_netselect_status":
+            let value = scanStatuses.isEmpty ? "manual_complete" : scanStatuses.removeFirst()
+            return try Self.response(["m_netselect_status": value])
+        case "nwinfo_m_netselect_contents":
+            return try Self.response(["m_netselect_contents": scanContents])
+        case "nwinfo_manual_register":
+            pendingManualPLMN = record.parameters["m_mcc_mnc"]
+            pendingManualRAT = record.parameters["m_rat"]
+            return try Self.successResponse()
+        case "nwinfo_m_netselect_result":
+            let value = registrationResults.isEmpty ? "manual_success" : registrationResults.removeFirst()
+            if value == "manual_success" { applyPendingManualRegistration() }
+            return try Self.response(["m_netselect_result": value])
+        case "nwinfo_set_netselect":
+            if ignoredNetSelectWriteApplications > 0 {
+                ignoredNetSelectWriteApplications -= 1
+            } else if let token = record.parameters["net_select"] {
+                state.netSelect = token
+                state.netSelectMode = "auto_select"
+            }
+            return try Self.successResponse()
+        case "nwinfo_set_lte_ext_band":
+            if ignoredLTEWriteApplications > 0 {
+                ignoredLTEWriteApplications -= 1
+            } else if let value = record.parameters["lte_band"] {
+                state.lteBands = Self.parseBands(value)
+                if collateralGWChangesAfterLTEApplications > 0 {
+                    collateralGWChangesAfterLTEApplications -= 1
+                    state.gwBandLock = "0xDEADBEEF"
+                }
+                if lostLTEResponsesAfterApplications > 0 {
+                    lostLTEResponsesAfterApplications -= 1
+                    throw URLError(.timedOut)
+                }
+                if suspendedLTEResponsesAfterApplications > 0 {
+                    suspendedLTEResponsesAfterApplications -= 1
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                }
+            }
+            return try Self.successResponse()
+        case "nwinfo_set_nrbandlock":
+            guard let value = record.parameters["nr5g_band"],
+                  let type = record.parameters["nr5g_type"]
+            else { throw DirectTestSupportError.missingScriptedResponse }
+            if ignoredNRWriteApplications[type, default: 0] > 0 {
+                ignoredNRWriteApplications[type, default: 0] -= 1
+            } else {
+                if type == "0" { state.saBands = Self.parseBands(value) }
+                if type == "1" { state.nsaBands = Self.parseBands(value) }
+            }
+            return try Self.successResponse()
+        case "nwinfo_set_gwl_bandlock":
+            guard record.parameters["is_gw_band"] == "1",
+                  record.parameters["is_lte_band"] == "0",
+                  let value = record.parameters["gw_band_mask"]
+            else { throw DirectTestSupportError.missingScriptedResponse }
+            state.gwBandLock = value
+            return try Self.successResponse()
+        case "nwinfo_reset_band_cell_setting":
+            state.lteBands = MC7530ControlSession.defaultLTEBands
+            state.saBands = MC7530ControlSession.defaultNRBands
+            state.nsaBands = MC7530ControlSession.defaultNRBands
+            state.gwBandLock = "0x006800000"
+            state.lteCellLock = ""
+            state.nrCellLock = ""
+            if lostResetResponsesAfterApplications > 0 {
+                lostResetResponsesAfterApplications -= 1
+                throw URLError(.timedOut)
+            }
+            return try Self.successResponse()
+        case "nwinfo_lock_lte_cell":
+            guard let pci = record.parameters["lock_lte_pci"],
+                  let earfcn = record.parameters["lock_lte_earfcn"]
+            else { throw DirectTestSupportError.missingScriptedResponse }
+            state.lteCellLock = "\(pci),\(earfcn)"
+            return try Self.successResponse()
+        case "nwinfo_lock_nr_cell":
+            guard let pci = record.parameters["lock_nr_pci"],
+                  let earfcn = record.parameters["lock_nr_earfcn"],
+                  let band = record.parameters["lock_nr_cell_band"]
+            else { throw DirectTestSupportError.missingScriptedResponse }
+            state.nrCellLock = "\(pci),\(earfcn),\(band)"
+            return try Self.successResponse()
+        default:
+            throw DirectTestSupportError.missingScriptedResponse
+        }
+    }
+
+    func records() -> [DirectZTERequestRecord] { requestRecords }
+    func currentState() -> DirectMC7530FixtureState { state }
+
+    private func netinfoObject() -> [String: Any] {
+        [
+            "net_select": state.netSelect,
+            "net_select_mode": state.netSelectMode,
+            "network_provider_fullname": state.operatorName,
+            "rmcc": emitNumericPLMNComponents ? (Int(state.mcc) ?? -1) : state.mcc,
+            "rmnc": emitNumericPLMNComponents ? (Int(state.mnc) ?? -1) : state.mnc,
+            "network_type": state.networkType,
+            "lte_band": Self.bandCSV(state.lteBands),
+            "nr5g_sa_band_lock": Self.bandCSV(state.saBands),
+            "nr5g_nsa_band_lock": Self.bandCSV(state.nsaBands),
+            "nr5g_nrdc_band_lock": Self.bandCSV(state.nrdcBands),
+            "gw_band_lock": state.gwBandLock,
+            "lock_lte_cell": state.lteCellLock,
+            "lock_nr_cell": state.nrCellLock
+        ]
+    }
+
+    private func applyPendingManualRegistration() {
+        if let plmn = pendingManualPLMN, plmn.count >= 5 {
+            state.mcc = String(plmn.prefix(3))
+            state.mnc = String(plmn.dropFirst(3))
+        }
+        switch pendingManualRAT {
+        case "13": state.networkType = "ENDC"
+        case "9", "11", "12": state.networkType = "NR5G SA"
+        case "14": state.networkType = "LTE 5GC"
+        case "7": state.networkType = "LTE"
+        case "2": state.networkType = "WCDMA"
+        case "0": state.networkType = "GSM"
+        default: break
+        }
+        state.netSelectMode = "manual_select"
+    }
+
+    private static func parseBands(_ value: String) -> Set<Int> {
+        Set(value.split(separator: ",").compactMap { Int($0) })
+    }
+
+    private static func bandCSV(_ values: Set<Int>) -> String {
+        values.sorted().map(String.init).joined(separator: ",")
+    }
+
+    private static func successResponse() throws -> ZTEHTTPResponse {
+        try response(["result": "success"])
+    }
+
+    private static func response(_ payload: [String: Any]) throws -> ZTEHTTPResponse {
+        let json: [[String: Any]] = [[
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": [0, payload]
+        ]]
+        return ZTEHTTPResponse(
+            statusCode: 200,
+            headers: [:],
+            body: try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+        )
+    }
+
+    private static func record(
+        _ request: URLRequest,
+        route: ZTEHTTPRoute
+    ) throws -> DirectZTERequestRecord {
+        let body = request.httpBody ?? Data()
+        guard let batch = try JSONSerialization.jsonObject(with: body) as? [[String: Any]],
+              let rpc = batch.first,
+              let params = rpc["params"] as? [Any]
+        else { throw DirectTestSupportError.missingScriptedResponse }
+        let callParameters = params.count > 3 ? params[3] as? [String: Any] : nil
+        let strings = callParameters?.reduce(into: [String: String]()) { result, pair in
+            if let value = pair.value as? String { result[pair.key] = value }
+        } ?? [:]
+        return DirectZTERequestRecord(
+            httpMethod: request.httpMethod ?? "",
+            urlPath: request.url?.path ?? "",
+            headers: request.allHTTPHeaderFields ?? [:],
+            bodyText: String(decoding: body, as: UTF8.self),
+            route: route,
+            rpcMethod: rpc["method"] as? String,
+            sessionID: params.first as? String,
+            object: params.count > 1 ? params[1] as? String : nil,
+            ubusMethod: params.count > 2 ? params[2] as? String : nil,
+            parameters: strings,
             loginUsername: callParameters?["username"] as? String,
             loginPassword: callParameters?["password"] as? String
         )
@@ -2177,6 +4118,155 @@ private actor DirectMockModemBackend: ModemStatusBackend {
             identifyScopeKeys: identifyScopeKeys,
             fetchScopeKeys: fetchScopeKeys
         )
+    }
+}
+
+private actor DirectVOSControlTransport: VOSControlTransport {
+    static let baselinePreferences = NRSystemSelectionPreferences(
+        modePreference: 0x0050,
+        saBands: NRBandMask(bands: [77, 78])!,
+        nsaBands: NRBandMask(bands: [66, 77, 78])!,
+        lteBands: LTEBandMask(bands: [2, 4, 66])!
+    )
+
+    private var selection = OperatorSelection(
+        mode: .automatic,
+        operatorName: "Fixture Carrier",
+        plmn: "00101",
+        accessTechnology: .lteNRDualConnectivity
+    )
+    private var preferences = baselinePreferences
+    private var suspendManualSelectionOnce: Bool
+    private var suspendAutomaticSelectionOnce: Bool
+    private var automaticFailures: Int
+    private var manualWrites = 0
+    private var automaticWrites = 0
+    private var preferenceWrites = 0
+
+    init(
+        suspendManualSelectionOnce: Bool = false,
+        suspendAutomaticSelectionOnce: Bool = false,
+        automaticFailures: Int = 0
+    ) {
+        self.suspendManualSelectionOnce = suspendManualSelectionOnce
+        self.suspendAutomaticSelectionOnce = suspendAutomaticSelectionOnce
+        self.automaticFailures = automaticFailures
+    }
+
+    func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String {
+        "fixture-vos-control-device"
+    }
+
+    func fetchOperatorSelection(
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection {
+        selection
+    }
+
+    func scanNetworks(configuration: DeviceConfiguration) async throws -> [CellularNetwork] {
+        []
+    }
+
+    func selectNetwork(
+        plmn: String,
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection {
+        manualWrites += 1
+        selection = OperatorSelection(
+            mode: .manual,
+            operatorName: "Fixture Carrier",
+            plmn: plmn,
+            accessTechnology: .lte
+        )
+        if suspendManualSelectionOnce {
+            suspendManualSelectionOnce = false
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        return selection
+    }
+
+    func selectAutomaticNetwork(
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection {
+        automaticWrites += 1
+        selection = OperatorSelection(
+            mode: .automatic,
+            operatorName: "Fixture Carrier",
+            plmn: "00101",
+            accessTechnology: .lteNRDualConnectivity
+        )
+        if suspendAutomaticSelectionOnce {
+            suspendAutomaticSelectionOnce = false
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        if automaticFailures > 0 {
+            automaticFailures -= 1
+            throw DirectTestSupportError.plannedSnapshotFailure
+        }
+        return selection
+    }
+
+    func fetchNRSystemSelectionPreferences(
+        configuration: DeviceConfiguration
+    ) async throws -> NRSystemSelectionPreferences {
+        preferences
+    }
+
+    func setNRSystemSelectionPreferences(
+        modePreference: UInt16,
+        saBands: NRBandMask,
+        nsaBands: NRBandMask,
+        lteBands: LTEBandMask?,
+        configuration: DeviceConfiguration
+    ) async throws -> NRSystemSelectionPreferences {
+        preferenceWrites += 1
+        preferences = NRSystemSelectionPreferences(
+            modePreference: modePreference,
+            saBands: saBands,
+            nsaBands: nsaBands,
+            lteBands: lteBands
+        )
+        return preferences
+    }
+
+    func seedNondefaultState() {
+        selection = OperatorSelection(
+            mode: .manual,
+            operatorName: "Other Carrier",
+            plmn: "00102",
+            accessTechnology: .lte
+        )
+        preferences = NRSystemSelectionPreferences(
+            modePreference: 0x0010,
+            saBands: .zero,
+            nsaBands: .zero,
+            lteBands: LTEBandMask(bands: [2])!
+        )
+        automaticWrites = 0
+        preferenceWrites = 0
+    }
+
+    func waitForManualMutation() async {
+        for _ in 0..<2_000 {
+            if manualWrites > 0 { return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func waitForAutomaticMutation() async {
+        for _ in 0..<2_000 {
+            if automaticWrites > 0 { return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func snapshot() -> (
+        selection: OperatorSelection,
+        preferences: NRSystemSelectionPreferences,
+        automaticWrites: Int,
+        preferenceWrites: Int
+    ) {
+        (selection, preferences, automaticWrites, preferenceWrites)
     }
 }
 

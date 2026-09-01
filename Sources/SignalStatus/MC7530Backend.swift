@@ -1,31 +1,38 @@
 import Foundation
 
-/// Read-only adapter for the MC7530CA / G5 MAX Web UBus API.
+/// Authenticated status and control adapter for the MC7530CA / G5 MAX Web
+/// UBus API.
 ///
 /// Discovery is anonymous. The administrator credential is accepted only by
-/// `fetchSnapshot`, retained in memory with its scoped session, and never
-/// persisted or logged by this backend.
-actor MC7530Backend: ModemStatusBackend {
+/// authenticated status/control calls, retained in memory with its scoped
+/// session, and never persisted or logged by this backend.
+actor MC7530Backend: ModemControlBackend {
     nonisolated let kind = ModemKind.zteMC7530CA
     nonisolated let capabilities: ModemCapability = [
         .statusRead,
         .identityRead,
-        .webUI
+        .webUI,
+        .operatorSelection,
+        .networkScan,
+        .radioAccessPreference,
+        .nrBandLock,
+        .lteBandLock
     ]
 
-    private struct CachedSession {
+    private struct CachedSession: Sendable {
+        let token: UUID
         let endpoint: ScopedEndpoint
         let credentials: WebCredentials
         let session: ZTEAuthSession
+        var credentialsValidated: Bool
+        var credentialsRejected: Bool
+        var credentialValidationTask: Task<Void, Error>?
     }
 
     private let httpTransport: any ZTEHTTPTransport
     private var sessionsByScope: [String: CachedSession] = [:]
-    private var activeCredentials: WebCredentials?
-    private var credentialGeneration: UInt64 = 0
-    private var credentialsValidated = false
-    private var credentialsRejected = false
-    private var credentialValidationTask: Task<Void, Error>?
+
+    private static let requiredModelPrefix = "MC7530CA"
 
     init(httpTransport: any ZTEHTTPTransport = NetworkBoundZTEHTTPTransport()) {
         self.httpTransport = httpTransport
@@ -38,11 +45,44 @@ actor MC7530Backend: ModemStatusBackend {
         _ = credentials
         let transport = try makeTransport(endpoint: endpoint)
         guard try await transport.hasMC7530Schema() else { return nil }
+        let modelReply = try await transport.call(
+            sessionID: ZTEUBusTransport.zeroSessionID,
+            object: "uci",
+            method: "get",
+            parameters: [
+                "config": .string("zwrt_common_info"),
+                "section": .string("common_config")
+            ],
+            mode: .read,
+            zTag: "zwrt_common_info"
+        )
+        guard modelReply.status == 0,
+              let modelPayload = modelReply.payload,
+              let reportedModel = try? Self.reportedModel(from: modelPayload),
+              reportedModel.uppercased().hasPrefix(Self.requiredModelPrefix)
+        else { return nil }
+
+        let identityReply = try await transport.call(
+            sessionID: ZTEUBusTransport.zeroSessionID,
+            object: "uci",
+            method: "get",
+            parameters: [
+                "config": .string("zwrt_zte_mdm"),
+                "section": .string("device_info")
+            ],
+            mode: .read,
+            zTag: "zwrt_zte_mdm"
+        )
+        guard identityReply.status == 0,
+              let msn = identityReply.payload?["values"]?["modem_msn"]?.stringValue
+        else { throw ModemBackendError.identityUnavailable }
+        let fingerprint = try MC7530ControlSession.fingerprint(modemMSN: msn)
         return ModemIdentity(
             kind: kind,
             manufacturer: "ZTE",
             model: "MC7530CA",
-            displayName: "ZTE MC7530CA / G5 MAX"
+            displayName: "ZTE MC7530CA / G5 MAX",
+            stableIdentifier: fingerprint
         )
     }
 
@@ -50,6 +90,95 @@ actor MC7530Backend: ModemStatusBackend {
         endpoint: ScopedEndpoint,
         credentials: ModemCredentials
     ) async throws -> DeviceSnapshot {
+        let context = try await authenticatedSession(
+            endpoint: endpoint,
+            credentials: credentials
+        )
+        do {
+            try await validateTargetModel(session: context.session)
+            let payload = try await context.session.read(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_get_netinfo"
+            )
+            guard let host = endpoint.host else { throw ModemBackendError.invalidEndpoint }
+            return try MC7530Parser.makeSnapshot(
+                from: payload,
+                host: host,
+                interfaceName: endpoint.interfaceName
+            )
+        } catch {
+            rememberAuthenticationFailureIfCurrent(
+                error,
+                scopeKey: context.scopeKey,
+                token: context.token
+            )
+            throw error
+        }
+    }
+
+    func openControlSession(
+        endpoint: ScopedEndpoint,
+        credentials: ModemCredentials
+    ) async throws -> any ModemControlSession {
+        let context = try await authenticatedSession(
+            endpoint: endpoint,
+            credentials: credentials
+        )
+        do {
+            try await validateTargetModel(session: context.session)
+            return try await MC7530ControlSession.open(session: context.session)
+        } catch {
+            rememberAuthenticationFailureIfCurrent(
+                error,
+                scopeKey: context.scopeKey,
+                token: context.token
+            )
+            throw error
+        }
+    }
+
+    private struct AuthenticatedContext {
+        let session: ZTEAuthSession
+        let scopeKey: String
+        let token: UUID
+    }
+
+    /// The anonymous nwinfo object exists on several ZTE generations. Before
+    /// status capabilities or any MC7530-specific write session are exposed,
+    /// require the authenticated product identity used by this retail Web UI.
+    private func validateTargetModel(session: ZTEAuthSession) async throws {
+        let payload = try await session.call(
+            object: "uci",
+            method: "get",
+            parameters: [
+                "config": .string("zwrt_common_info"),
+                "section": .string("common_config")
+            ],
+            mode: .read,
+            zTag: "zwrt_common_info"
+        )
+        let reported = try Self.reportedModel(from: payload)
+        guard reported.uppercased().hasPrefix(Self.requiredModelPrefix) else {
+            throw ModemBackendError.deviceModelMismatch(
+                expected: Self.requiredModelPrefix,
+                actual: reported
+            )
+        }
+    }
+
+    private static func reportedModel(from payload: ZTEJSONValue) throws -> String {
+        guard let reported = payload["values"]?["wa_inner_version"]?.stringValue?
+            .replacingOccurrences(of: "\0", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !reported.isEmpty
+        else { throw ModemBackendError.identityUnavailable }
+        return reported
+    }
+
+    private func authenticatedSession(
+        endpoint: ScopedEndpoint,
+        credentials: ModemCredentials
+    ) async throws -> AuthenticatedContext {
         let suppliedCredentials: WebCredentials
         switch credentials {
         case let .web(value):
@@ -63,48 +192,31 @@ actor MC7530Backend: ModemStatusBackend {
             )
         }
         let webCredentials = Self.normalized(suppliedCredentials)
-        let generation = try prepare(credentials: webCredentials)
 
         let transport = try makeTransport(endpoint: endpoint)
-        let session = session(
+        let cached = session(
             for: endpoint,
             credentials: webCredentials,
             transport: transport
         )
         do {
             try await validateCredentialsIfNeeded(
-                session: session,
-                credentials: webCredentials,
-                generation: generation
+                scopeKey: endpoint.scopeKey,
+                token: cached.token,
+                session: cached.session
             )
         } catch {
             rememberAuthenticationFailureIfCurrent(
                 error,
-                credentials: webCredentials,
-                generation: generation
+                scopeKey: endpoint.scopeKey,
+                token: cached.token
             )
             throw error
         }
-
-        let payload: ZTEJSONValue
-        do {
-            payload = try await session.read(
-                object: "zte_nwinfo_api",
-                method: "nwinfo_get_netinfo"
-            )
-        } catch {
-            rememberAuthenticationFailureIfCurrent(
-                error,
-                credentials: webCredentials,
-                generation: generation
-            )
-            throw error
-        }
-        guard let host = endpoint.host else { throw ModemBackendError.invalidEndpoint }
-        return try MC7530Parser.makeSnapshot(
-            from: payload,
-            host: host,
-            interfaceName: endpoint.interfaceName
+        return AuthenticatedContext(
+            session: cached.session,
+            scopeKey: endpoint.scopeKey,
+            token: cached.token
         )
     }
 
@@ -126,50 +238,38 @@ actor MC7530Backend: ModemStatusBackend {
         )
     }
 
-    private func prepare(credentials: WebCredentials) throws -> UInt64 {
-        if activeCredentials != credentials {
-            activeCredentials = credentials
-            credentialGeneration &+= 1
-            credentialsValidated = false
-            credentialsRejected = false
-            credentialValidationTask?.cancel()
-            credentialValidationTask = nil
-            sessionsByScope.removeAll()
-        }
-        guard !credentialsRejected else { throw ZTEUBusError.authenticationFailed }
-        return credentialGeneration
-    }
-
     private func validateCredentialsIfNeeded(
+        scopeKey: String,
+        token: UUID,
         session: ZTEAuthSession,
-        credentials: WebCredentials,
-        generation: UInt64
     ) async throws {
-        guard activeCredentials == credentials,
-              credentialGeneration == generation
-        else { return }
-        guard !credentialsRejected else { throw ZTEUBusError.authenticationFailed }
-        guard !credentialsValidated else { return }
+        guard var cached = sessionsByScope[scopeKey], cached.token == token else {
+            throw CancellationError()
+        }
+        guard !cached.credentialsRejected else { throw ZTEUBusError.authenticationFailed }
+        guard !cached.credentialsValidated else { return }
 
         let task: Task<Void, Error>
-        if let credentialValidationTask {
+        if let credentialValidationTask = cached.credentialValidationTask {
             task = credentialValidationTask
         } else {
             task = Task { try await session.ensureAuthenticated() }
-            credentialValidationTask = task
+            cached.credentialValidationTask = task
+            sessionsByScope[scopeKey] = cached
         }
 
         do {
             try await task.value
-            if activeCredentials == credentials,
-               credentialGeneration == generation {
-                credentialsValidated = true
-                credentialValidationTask = nil
+            guard var current = sessionsByScope[scopeKey], current.token == token else {
+                throw CancellationError()
             }
+            current.credentialsValidated = true
+            current.credentialValidationTask = nil
+            sessionsByScope[scopeKey] = current
         } catch {
-            if activeCredentials == credentials,
-               credentialGeneration == generation {
-                credentialValidationTask = nil
+            if var current = sessionsByScope[scopeKey], current.token == token {
+                current.credentialValidationTask = nil
+                sessionsByScope[scopeKey] = current
             }
             throw error
         }
@@ -177,16 +277,17 @@ actor MC7530Backend: ModemStatusBackend {
 
     private func rememberAuthenticationFailureIfCurrent(
         _ error: Error,
-        credentials: WebCredentials,
-        generation: UInt64
+        scopeKey: String,
+        token: UUID
     ) {
         guard error as? ZTEUBusError == .authenticationFailed,
-              activeCredentials == credentials,
-              credentialGeneration == generation
+              var cached = sessionsByScope[scopeKey],
+              cached.token == token
         else { return }
-        credentialsValidated = false
-        credentialsRejected = true
-        credentialValidationTask = nil
+        cached.credentialsValidated = false
+        cached.credentialsRejected = true
+        cached.credentialValidationTask = nil
+        sessionsByScope[scopeKey] = cached
     }
 
     private static func normalized(_ credentials: WebCredentials) -> WebCredentials {
@@ -201,23 +302,29 @@ actor MC7530Backend: ModemStatusBackend {
         for endpoint: ScopedEndpoint,
         credentials: WebCredentials,
         transport: ZTEUBusTransport
-    ) -> ZTEAuthSession {
+    ) -> CachedSession {
         if let cached = sessionsByScope[endpoint.scopeKey],
            cached.endpoint == endpoint,
            cached.credentials == credentials {
-            return cached.session
+            return cached
         }
 
+        sessionsByScope[endpoint.scopeKey]?.credentialValidationTask?.cancel()
         let replacement = ZTEAuthSession(
             transport: transport,
             username: credentials.username,
             password: credentials.password
         )
-        sessionsByScope[endpoint.scopeKey] = CachedSession(
+        let cached = CachedSession(
+            token: UUID(),
             endpoint: endpoint,
             credentials: credentials,
-            session: replacement
+            session: replacement,
+            credentialsValidated: false,
+            credentialsRejected: false,
+            credentialValidationTask: nil
         )
-        return replacement
+        sessionsByScope[endpoint.scopeKey] = cached
+        return cached
     }
 }

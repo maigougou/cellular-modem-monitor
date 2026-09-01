@@ -59,6 +59,190 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(NRArchitectureMode.lteOnly.localizedLabel(language: .simplifiedChinese), "仅 LTE")
     }
 
+    func testNeighborMeasurementsExposeDeviceControlSurface() {
+        XCTAssertTrue(ModemCapability.neighborMeasurements.supportsDeviceControlSurface)
+        XCTAssertFalse(ModemCapability.neighborMeasurements.supportsControlSession)
+        XCTAssertTrue(ModemCapability.networkScan.supportsControlSession)
+        XCTAssertFalse(ModemCapability.statusRead.supportsDeviceControlSurface)
+    }
+
+    func testControlPresentationInvalidationDistinguishesPLMNFromModemChanges() {
+        let endpointA = ScopedEndpoint(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            interfaceName: "en8",
+            interfaceIndex: 8,
+            sourceAddress: "192.168.254.2"
+        )
+        let endpointB = ScopedEndpoint(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            interfaceName: "en9",
+            interfaceIndex: 9,
+            sourceAddress: "192.168.254.3",
+            connectionPath: .routed,
+            gateway: "192.168.8.1"
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-a",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointA,
+                previousPLMN: "00101",
+                nextPLMN: "00102"
+            ),
+            .operatorContext
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-b",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointA,
+                previousPLMN: "00101",
+                nextPLMN: "00101"
+            ),
+            .all
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-a",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointA,
+                previousPLMN: "00101",
+                nextPLMN: "00101"
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-a",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointB,
+                previousPLMN: "00101",
+                nextPLMN: "00101"
+            ),
+            .all
+        )
+    }
+
+    func testOnlyTrueTaskCancellationIsSilentlyIgnored() {
+        XCTAssertTrue(ModemOperationInterruption.isCancellation(CancellationError()))
+        XCTAssertFalse(ModemOperationInterruption.isCancellation(
+            ModemControlError.commandRejected("fixture")
+        ))
+        XCTAssertTrue(ModemOperationInterruption.shouldIgnoreRefreshFailure(
+            ModemCoordinatorError.noMatchingModem,
+            taskIsCancelled: true
+        ))
+        XCTAssertFalse(ModemOperationInterruption.shouldIgnoreRefreshFailure(
+            ModemControlError.rollbackFailed(operation: "fixture", rollback: "fixture"),
+            taskIsCancelled: false
+        ))
+    }
+
+    func testPLMNChangeClearsOnlyOperatorFromVerifiedControlState() {
+        let selection = OperatorSelection(
+            mode: .manual,
+            operatorName: "Fixture",
+            plmn: "00101",
+            accessTechnology: .lte5GC
+        )
+        let state = ModemControlState(
+            operatorSelection: selection,
+            architecture: .nsaOnly,
+            saBands: [77],
+            nsaBands: [66, 77],
+            lteBands: [2, 4, 66],
+            canRestoreDefaults: true,
+            preferenceLifetime: .persistent
+        )
+
+        let updated = state.clearingOperatorSelection()
+
+        XCTAssertNil(updated.operatorSelection)
+        XCTAssertEqual(updated.architecture, state.architecture)
+        XCTAssertEqual(updated.saBands, state.saBands)
+        XCTAssertEqual(updated.nsaBands, state.nsaBands)
+        XCTAssertEqual(updated.lteBands, state.lteBands)
+        XCTAssertEqual(updated.canRestoreDefaults, state.canRestoreDefaults)
+        XCTAssertEqual(updated.preferenceLifetime, state.preferenceLifetime)
+    }
+
+    @MainActor
+    func testApplyingAuthoritativeControlStateClearsStaleOperatorSelection() {
+        let suiteName = "SignalStatusTests.control-result.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let previousDemo = ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"]
+        setenv("SIGNAL_STATUS_DEMO", "1", 1)
+        defer {
+            if let previousDemo {
+                setenv("SIGNAL_STATUS_DEMO", previousDemo, 1)
+            } else {
+                unsetenv("SIGNAL_STATUS_DEMO")
+            }
+        }
+
+        let model = StatusModel(
+            defaults: defaults,
+            credentialStore: EmptyTestCredentialStore()
+        )
+        let selected = OperatorSelection(
+            mode: .manual,
+            operatorName: "Fixture",
+            plmn: "00101",
+            accessTechnology: .lte5GC
+        )
+        let radioState = ModemControlState(
+            operatorSelection: selected,
+            architecture: .nsaOnly,
+            saBands: [77],
+            nsaBands: [66, 77],
+            lteBands: [2, 4, 66],
+            canRestoreDefaults: true,
+            preferenceLifetime: .persistent
+        )
+
+        model.applyControlResult(ModemControlResult(state: radioState))
+        XCTAssertEqual(model.operatorSelection, selected)
+
+        model.applyControlResult(ModemControlResult(
+            state: radioState.clearingOperatorSelection()
+        ))
+        XCTAssertNil(model.operatorSelection)
+        XCTAssertNil(model.controlState?.operatorSelection)
+        XCTAssertEqual(model.controlState?.architecture, .nsaOnly)
+        XCTAssertTrue(model.controlState?.canRestoreDefaults == true)
+    }
+
+    func testRollbackFailureMessageSeparatesRecoveryDetail() {
+        XCTAssertEqual(
+            ModemControlError.rollbackFailed(
+                operation: "Band update failed.",
+                rollback: "Reset was rejected"
+            ).errorDescription,
+            "Band update failed. Automatic rollback also failed: Reset was rejected. The modem control state is unknown."
+        )
+        XCTAssertEqual(
+            ModemControlError.rollbackFailed(
+                operation: "Band update failed.",
+                rollback: "Reset timed out!"
+            ).errorDescription,
+            "Band update failed. Automatic rollback also failed: Reset timed out! The modem control state is unknown."
+        )
+        XCTAssertEqual(
+            ModemControlError.rollbackFailed(
+                operation: "Band update failed.",
+                rollback: ""
+            ).errorDescription,
+            "Band update failed. Automatic rollback also failed: No rollback detail was reported. The modem control state is unknown."
+        )
+    }
+
     func testLanguageDisplayNamesAndLocales() {
         XCTAssertEqual(AppLanguage.english.displayName, "English")
         XCTAssertEqual(AppLanguage.simplifiedChinese.displayName, "简体中文")
@@ -563,6 +747,293 @@ final class SignalStatusTests: XCTestCase {
         )
     }
 
+    func testZTEAuthenticatedGenericWriteUsesRetailHeadersAndParameters() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"write-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"write-sid"}"#),
+            testZTECallResponse(#"{"result":"success"}"#)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+            password: "fixture-password"
+        )
+
+        let payload = try await session.call(
+            object: "zte_nwinfo_api",
+            method: "nwinfo_set_netselect",
+            parameters: ["net_select": .string("Only_LTE")],
+            mode: .write,
+            zTag: "fixture-tag"
+        )
+
+        XCTAssertEqual(payload["result"]?.stringValue, "success")
+        let records = await http.records()
+        let write = try XCTUnwrap(records.last)
+        XCTAssertEqual(write.sessionID, "write-sid")
+        XCTAssertEqual(write.ubusMethod, "nwinfo_set_netselect")
+        XCTAssertEqual(write.header("Z-Mode"), "1")
+        XCTAssertEqual(write.header("Z-Tag"), "fixture-tag")
+        XCTAssertTrue(write.bodyText.contains(#""net_select":"Only_LTE""#))
+        XCTAssertEqual(records[0].header("Z-Mode"), "0")
+        XCTAssertEqual(records[1].header("Z-Mode"), "0")
+    }
+
+    func testZTEGenericWriteRelogsOnceAndPreservesHeaders() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"salt-one"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+            testZTEStatusResponse(6),
+            testZTECallResponse(#"{"zte_web_sault":"salt-two"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+            testZTECallResponse(#"{"result":"success"}"#)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: http),
+            password: "fixture-password"
+        )
+
+        _ = try await session.call(
+            object: "zte_nwinfo_api",
+            method: "nwinfo_set_lte_ext_band",
+            parameters: ["lte_band": .string("2,4,66")],
+            mode: .write,
+            zTag: "band-lock"
+        )
+
+        let records = await http.records()
+        let writes = records.filter { $0.ubusMethod == "nwinfo_set_lte_ext_band" }
+        XCTAssertEqual(writes.map(\.sessionID), ["sid-one", "sid-two"])
+        XCTAssertEqual(writes.map { $0.header("Z-Mode") }, ["1", "1"])
+        XCTAssertEqual(writes.map { $0.header("Z-Tag") }, ["band-lock", "band-lock"])
+        XCTAssertEqual(records.filter { $0.ubusMethod == "web_login" }.count, 2)
+    }
+
+    func testZTEReplacementSIDDenialDoesNotTriggerASecondRetry() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"salt-one"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-one"}"#),
+            testZTEStatusResponse(6),
+            testZTECallResponse(#"{"zte_web_sault":"salt-two"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"sid-two"}"#),
+            testZTEResponse(#"[{"jsonrpc":"2.0","id":3,"error":{"code":-32002,"message":"Access denied"}}]"#)
+        ])
+        let session = ZTEAuthSession(
+            transport: try ZTEUBusTransport(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                http: http
+            ),
+            password: "fixture-password"
+        )
+
+        do {
+            _ = try await session.call(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_set_netselect",
+                parameters: ["net_select": .string("Only_LTE")],
+                mode: .write,
+                zTag: "nwinfo_set_netselect"
+            )
+            XCTFail("A replacement SID rejected by rpcd must fail")
+        } catch let error as ZTEUBusError {
+            XCTAssertEqual(error, .rpc(code: -32_002, message: "Access denied"))
+        }
+
+        let records = await http.records()
+        XCTAssertEqual(records.count, 6)
+        XCTAssertEqual(records.filter { $0.ubusMethod == "web_login" }.count, 2)
+        XCTAssertEqual(
+            records.filter { $0.ubusMethod == "nwinfo_set_netselect" }.map(\.sessionID),
+            ["sid-one", "sid-two"]
+        )
+    }
+
+    func testZTEGenericCallReportsUBusAndJSONRPCErrors() async throws {
+        let ubusHTTP = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"status-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"status-sid"}"#),
+            testZTEStatusResponse(5)
+        ])
+        let ubusSession = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: ubusHTTP),
+            password: "fixture-password"
+        )
+        do {
+            _ = try await ubusSession.call(
+                object: "zte_nwinfo_api",
+                method: "nwinfo_set_netselect",
+                mode: .write
+            )
+            XCTFail("A non-zero UBus result status must fail")
+        } catch let error as ZTEUBusError {
+            XCTAssertEqual(error, .ubusStatus(5))
+        }
+
+        let rpcHTTP = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"rpc-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"rpc-sid"}"#),
+            testZTEResponse(#"[{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"fixture missing method"}}]"#)
+        ])
+        let rpcSession = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.168.254.1")!, http: rpcHTTP),
+            password: "fixture-password"
+        )
+        do {
+            _ = try await rpcSession.call(
+                object: "zte_nwinfo_api",
+                method: "fixture_missing_method",
+                mode: .write
+            )
+            XCTFail("A JSON-RPC error must fail")
+        } catch let error as ZTEUBusError {
+            XCTAssertEqual(error, .rpc(code: -32_601, message: "fixture missing method"))
+        }
+    }
+
+    func testMC7530ScanContentsPreserveExactRegistrationTokens() throws {
+        let networks = try MC7530ControlSession.parseNetworks(
+            "1,Fixture LTE,00101,7;2,Fixture NSA,00102,13;3,Fixture SA,00103,11;"
+        )
+
+        XCTAssertEqual(networks.map(\.plmn), ["00102", "00101", "00103"])
+        XCTAssertEqual(networks.map(\.selectionToken), ["13", "7", "11"])
+        XCTAssertEqual(networks.map(\.accessTechnologies), [
+            [.lteNRDualConnectivity], [.lte], [.nr5GC]
+        ])
+    }
+
+    func testMC7530ControlRefreshMapsNetinfoToNeutralState() async throws {
+        let netinfo = #"{"net_select":"LTE_AND_5G","net_select_mode":"auto_select","network_provider_fullname":"Fixture Carrier","rmcc":"001","rmnc":"01","network_type":"ENDC","lte_band":"2,4,66","nr5g_sa_band_lock":"5,77","nr5g_nsa_band_lock":"2,66,77","nr5g_nrdc_band_lock":"2,66,77,78","gw_band_lock":"0x006800000","lock_lte_cell":"","lock_nr_cell":""}"#
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#),
+            testZTECallResponse(netinfo),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#)
+        ])
+        let auth = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
+            password: "fixture-password"
+        )
+        let session = try await MC7530ControlSession.open(
+            session: auth,
+            timing: MC7530ControlTiming(
+                pollIntervalNanoseconds: 0,
+                scanAttempts: 1,
+                registrationAttempts: 1,
+                verificationAttempts: 1,
+                resetAttempts: 1
+            ),
+            sleep: { _ in }
+        )
+
+        let state = try await session.refresh()
+        XCTAssertEqual(state.architecture, .nsaOnly)
+        XCTAssertEqual(state.operatorSelection, OperatorSelection(
+            mode: .automatic,
+            operatorName: "Fixture Carrier",
+            plmn: "00101",
+            accessTechnology: .lteNRDualConnectivity
+        ))
+        XCTAssertEqual(state.lteBands, Set([2, 4, 66]))
+        XCTAssertEqual(state.saBands, Set([5, 77]))
+        XCTAssertEqual(state.nsaBands, Set([2, 66, 77]))
+        XCTAssertEqual(state.preferenceLifetime, .persistent)
+
+        let records = await http.records().filter {
+            $0.ubusMethod == "get_modem_msn" || $0.ubusMethod == "nwinfo_get_netinfo"
+        }
+        XCTAssertTrue(records.allSatisfy {
+            $0.header("Z-Mode") == "0" && $0.header("Z-Tag") == $0.ubusMethod
+        })
+    }
+
+    func testMC7530FingerprintMismatchPermanentlyBlocksWrites() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-beta"}"#)
+        ])
+        let auth = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
+            password: "fixture-password"
+        )
+        let session = try await MC7530ControlSession.open(
+            session: auth,
+            timing: MC7530ControlTiming(
+                pollIntervalNanoseconds: 0,
+                scanAttempts: 1,
+                registrationAttempts: 1,
+                verificationAttempts: 1,
+                resetAttempts: 1
+            ),
+            sleep: { _ in }
+        )
+
+        for _ in 0..<2 {
+            do {
+                _ = try await session.perform(.setArchitecture(.lteOnly))
+                XCTFail("A changed modem must reject every write")
+            } catch let error as ModemControlError {
+                XCTAssertEqual(error, .deviceChanged)
+            }
+        }
+        let records = await http.records()
+        XCTAssertEqual(records.filter { $0.ubusMethod == "get_modem_msn" }.count, 2)
+        XCTAssertFalse(records.contains { $0.ubusMethod == "nwinfo_set_netselect" })
+    }
+
+    func testMC7530UnknownMSNFieldFailsClosed() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTECallResponse(#"{"serial":"fixture-but-unverified-field"}"#)
+        ])
+        let auth = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
+            password: "fixture-password"
+        )
+
+        do {
+            _ = try await MC7530ControlSession.open(session: auth)
+            XCTFail("Only the verified modem_msn field may bind a control session")
+        } catch let error as ModemBackendError {
+            XCTAssertEqual(error, .identityUnavailable)
+        }
+        let records = await http.records()
+        XCTAssertEqual(records.count, 3)
+        XCTAssertFalse(records.contains { ($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") })
+    }
+
+    func testMC7530UnknownManualRATFailsBeforeDestructiveWrite() async throws {
+        let manualNetinfo = #"{"net_select":"Only_5G","net_select_mode":"manual_select","network_provider_fullname":"Fixture Carrier","rmcc":"001","rmnc":"01","network_type":"NR5G SA","lte_band":"2,4,66","nr5g_sa_band_lock":"5,77","nr5g_nsa_band_lock":"2,66,77","nr5g_nrdc_band_lock":"2,66,77,78","gw_band_lock":"0x006800000","lock_lte_cell":"","lock_nr_cell":""}"#
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#),
+            testZTECallResponse(#"{"modem_msn":"fixture-device-alpha"}"#),
+            testZTECallResponse(manualNetinfo)
+        ])
+        let auth = ZTEAuthSession(
+            transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
+            password: "fixture-password"
+        )
+        let session = try await MC7530ControlSession.open(session: auth)
+
+        do {
+            _ = try await session.perform(.selectAutomaticNetwork)
+            XCTFail("A broad network_type must never be guessed into a manual m_rat token")
+        } catch let error as ModemControlError {
+            guard case .invalidState = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        let records = await http.records()
+        XCTAssertFalse(records.contains { $0.ubusMethod == "nwinfo_set_netselect" })
+        XCTAssertFalse(records.contains { $0.ubusMethod == "nwinfo_manual_register" })
+    }
+
     func testZTEWrongPasswordStopsFurtherLoginAttempts() async throws {
         let http = TestScriptedZTEHTTPTransport(responses: [
             testZTECallResponse(#"{"zte_web_sault":"pepper"}"#),
@@ -584,12 +1055,15 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(await http.requestCount(), 2)
     }
 
-    func testZTEBackendRejectsBadCredentialsAcrossEndpointsUntilTheyChange() async throws {
+    func testZTEBackendScopesCredentialRejectionPerEndpointUntilItChanges() async throws {
         let http = TestScriptedZTEHTTPTransport(responses: [
-            testZTECallResponse(#"{"zte_web_sault":"bad-salt"}"#),
+            testZTECallResponse(#"{"zte_web_sault":"bad-salt-routed"}"#),
+            testZTECallResponse(#"{"result":"1"}"#),
+            testZTECallResponse(#"{"zte_web_sault":"bad-salt-direct"}"#),
             testZTECallResponse(#"{"result":"1"}"#),
             testZTECallResponse(#"{"zte_web_sault":"good-salt"}"#),
             testZTECallResponse(#"{"result":"0","ubus_rpc_session":"good-sid"}"#),
+            testZTECallResponse(#"{"values":{"wa_inner_version":"MC7530CAV2.6"}}"#),
             testZTECallResponse(#"{"network_type":"LTE","wan_active_band":"B12","wan_active_channel":5010,"lte_pci":7}"#)
         ])
         let backend = MC7530Backend(httpTransport: http)
@@ -619,7 +1093,11 @@ final class SignalStatusTests: XCTestCase {
                 XCTAssertEqual(error, .authenticationFailed)
             }
         }
-        XCTAssertEqual(await http.requestCount(), 2, "A second endpoint must not retry rejected credentials")
+        XCTAssertEqual(
+            await http.requestCount(),
+            4,
+            "A rejected candidate must not poison authentication on another scoped endpoint"
+        )
 
         let snapshot = try await backend.fetchSnapshot(
             endpoint: routed,
@@ -627,10 +1105,40 @@ final class SignalStatusTests: XCTestCase {
         )
         XCTAssertEqual(snapshot.lteBand, "B12")
         let records = await http.records()
-        XCTAssertEqual(records.count, 5)
-        XCTAssertTrue(records.allSatisfy { $0.route.interfaceName == "en1" || $0.route.interfaceName == nil })
+        XCTAssertEqual(records.count, 8)
+        XCTAssertEqual(records.prefix(2).map(\.route.interfaceName), ["en1", "en1"])
+        XCTAssertEqual(records.dropFirst(2).prefix(2).map(\.route.interfaceName), ["en8", "en8"])
+        XCTAssertEqual(records.suffix(4).map(\.route.interfaceName), ["en1", "en1", "en1", "en1"])
         XCTAssertTrue(records.allSatisfy { $0.route.sourceAddress == nil })
         XCTAssertEqual(records.last?.route.interfaceIndex, 11)
+    }
+
+    func testZTEBackendRejectsAnotherModelBeforeStatusOrControls() async throws {
+        let http = TestScriptedZTEHTTPTransport(responses: [
+            testZTECallResponse(#"{"zte_web_sault":"fixture-salt"}"#),
+            testZTECallResponse(#"{"result":"0","ubus_rpc_session":"fixture-sid"}"#),
+            testZTECallResponse(#"{"values":{"wa_inner_version":"MC889V1.0"}}"#)
+        ])
+        let backend = MC7530Backend(httpTransport: http)
+        let endpoint = ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!)
+        let credentials = ModemCredentials.web(WebCredentials(password: "fixture-password"))
+
+        do {
+            _ = try await backend.fetchSnapshot(endpoint: endpoint, credentials: credentials)
+            XCTFail("A generic ZTE nwinfo schema must not identify another model as MC7530CA")
+        } catch let error as ModemBackendError {
+            XCTAssertEqual(
+                error,
+                .deviceModelMismatch(expected: "MC7530CA", actual: "MC889V1.0")
+            )
+        }
+
+        let records = await http.records()
+        XCTAssertEqual(records.map(\.ubusMethod), ["web_login_info", "web_login", "get"])
+        XCTAssertEqual(records.last?.object, "uci")
+        XCTAssertEqual(records.last?.header("Z-Mode"), "0")
+        XCTAssertEqual(records.last?.header("Z-Tag"), "zwrt_common_info")
+        XCTAssertFalse(records.contains { $0.ubusMethod == "nwinfo_get_netinfo" })
     }
 
     func testZTEConcurrentExpiredReadsReuseSingleReplacementSID() async throws {
@@ -1802,6 +2310,12 @@ final class SignalStatusTests: XCTestCase {
         result.append(value)
         return result
     }
+}
+
+private final class EmptyTestCredentialStore: CredentialStoring, @unchecked Sendable {
+    func password(for account: String) throws -> String? { nil }
+    func setPassword(_ password: String, for account: String) throws {}
+    func removePassword(for account: String) throws {}
 }
 
 private struct FixedNetworkTopologyProvider: NetworkTopologyProviding {

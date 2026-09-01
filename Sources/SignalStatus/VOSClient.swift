@@ -141,6 +141,7 @@ actor VOSClient {
         plmn: String,
         configuration: DeviceConfiguration
     ) async throws -> OperatorSelection {
+        try Task.checkCancellation()
         guard (plmn.count == 5 || plmn.count == 6), plmn.allSatisfy(\.isNumber) else {
             throw VOSClientError.invalidPLMN
         }
@@ -153,16 +154,26 @@ actor VOSClient {
                 timeout: 95
             )
             try ATCOPSParser.requireOK(output)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             commandFailure = error
         }
 
         for attempt in 0..<5 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: 1_500_000_000) }
-            if let selection = try? await fetchOperatorSelection(configuration: configuration),
-               selection.mode == .manual,
-               selection.plmn == plmn {
-                return selection
+            if attempt > 0 {
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+            do {
+                let selection = try await fetchOperatorSelection(configuration: configuration)
+                if selection.mode == .manual, selection.plmn == plmn {
+                    return selection
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A transient read failure is retried below; cancellation is
+                // deliberately never converted into an ordinary retry.
             }
         }
 
@@ -173,19 +184,30 @@ actor VOSClient {
     }
 
     func selectAutomaticNetwork(configuration: DeviceConfiguration) async throws -> OperatorSelection {
+        try Task.checkCancellation()
         var commandFailure: Error?
         do {
             let output = try await runAT("AT+COPS=0", configuration: configuration, timeout: 95)
             try ATCOPSParser.requireOK(output)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             commandFailure = error
         }
 
         for attempt in 0..<5 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: 1_500_000_000) }
-            if let selection = try? await fetchOperatorSelection(configuration: configuration),
-               selection.mode == .automatic {
-                return selection
+            if attempt > 0 {
+                try await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+            do {
+                let selection = try await fetchOperatorSelection(configuration: configuration)
+                if selection.mode == .automatic {
+                    return selection
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Preserve the existing retry behavior for transport errors.
             }
         }
         if let commandFailure {
@@ -234,8 +256,11 @@ actor VOSClient {
 
         var lastReadBack: NRSystemSelectionPreferences?
         for attempt in 0..<5 {
-            if attempt > 0 { try? await Task.sleep(nanoseconds: 750_000_000) }
-            if let verified = try? await fetchNRSystemSelectionPreferences(configuration: configuration) {
+            if attempt > 0 {
+                try await Task.sleep(nanoseconds: 750_000_000)
+            }
+            do {
+                let verified = try await fetchNRSystemSelectionPreferences(configuration: configuration)
                 lastReadBack = verified
                 if verified.modePreference == modePreference,
                    verified.saBands == saBands,
@@ -243,6 +268,10 @@ actor VOSClient {
                    lteBands == nil || verified.lteBands == lteBands {
                     return verified
                 }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A transient read failure is retried; cancellation is not.
             }
         }
         let suffix = lastReadBack == nil ? " No readable preference response was returned." : ""
@@ -256,6 +285,7 @@ actor VOSClient {
         configuration: DeviceConfiguration,
         timeout: TimeInterval
     ) async throws -> String {
+        try Task.checkCancellation()
         guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
         let sourceAddress = configuration.sourceAddress
             ?? (host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil)
@@ -279,6 +309,7 @@ actor VOSClient {
         configuration: DeviceConfiguration,
         timeout: TimeInterval
     ) async throws -> Data {
+        try Task.checkCancellation()
         guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
         let sourceAddress = configuration.sourceAddress
             ?? (host == "192.168.225.1" ? LocalInterface.vosSourceAddress() : nil)
@@ -981,7 +1012,8 @@ final class SystemSSHExecutor: @unchecked Sendable {
         script: String,
         timeout: TimeInterval = 8
     ) async throws -> Data {
-        try await Task.detached(priority: .utility) { [self] in
+        try Task.checkCancellation()
+        let worker = Task.detached(priority: .utility) { [self] in
             try runBlocking(
                 host: host,
                 username: username,
@@ -990,7 +1022,21 @@ final class SystemSSHExecutor: @unchecked Sendable {
                 script: script,
                 timeout: timeout
             )
-        }.value
+        }
+        do {
+            let output = try await worker.value
+            // The blocking Process remains isolated from Swift cooperative
+            // cancellation. Re-check immediately after it returns so its
+            // result cannot be mistaken for success by a retired task.
+            try Task.checkCancellation()
+            return output
+        } catch {
+            // A cancelled caller remains cancelled even if the detached SSH
+            // process later exits with its own timeout/command error. Cleanup
+            // tasks are newly created and therefore preserve their real error.
+            if Task.isCancelled { throw CancellationError() }
+            throw error
+        }
     }
 
     private func runBlocking(

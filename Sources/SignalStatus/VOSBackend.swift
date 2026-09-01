@@ -7,25 +7,28 @@ protocol VOSStatusReading: Sendable {
 
 extension VOSClient: VOSStatusReading {}
 
-/// Adapts the existing SSH/QMI client to the transport-neutral modem backend.
-/// VOS-specific mutating controls remain on `VOSClient` and are intentionally
-/// not part of `ModemStatusBackend`.
-actor VOSBackend: ModemStatusBackend {
+/// Adapts the existing SSH/QMI client to the transport-neutral status and
+/// control backends.
+actor VOSBackend: ModemControlBackend {
     nonisolated let kind = ModemKind.vos5G
-    nonisolated let capabilities: ModemCapability = [
-        .radioStatus,
-        .deviceInformation,
-        .webUI,
-        .vosControls
-    ]
+    nonisolated let capabilities: ModemCapability
 
     private let client: any VOSStatusReading
+    private let controlClient: VOSClient?
     /// One bad username/password must not be replayed against every interface
     /// candidate on every poll. A credential change clears the effective gate.
     private var rejectedCredentials: SSHCredentials?
 
     init(client: any VOSStatusReading = VOSClient()) {
         self.client = client
+        self.controlClient = client as? VOSClient
+        var capabilities: ModemCapability = [
+            .radioStatus,
+            .deviceInformation,
+            .webUI
+        ]
+        if self.controlClient != nil { capabilities.formUnion(.vosControls) }
+        self.capabilities = capabilities
     }
 
     func identify(
@@ -59,6 +62,28 @@ actor VOSBackend: ModemStatusBackend {
             let snapshot = try await client.fetchSnapshot(configuration: resolved.configuration)
             rejectedCredentials = nil
             return snapshot
+        } catch {
+            rememberAuthenticationFailure(error, credentials: resolved.credentials)
+            throw error
+        }
+    }
+
+    func openControlSession(
+        endpoint: ScopedEndpoint,
+        credentials: ModemCredentials
+    ) async throws -> any ModemControlSession {
+        guard let controlClient else {
+            throw ModemBackendError.unsupportedCapability(.deviceControls)
+        }
+        let resolved = try makeConfiguration(endpoint: endpoint, credentials: credentials)
+        try rejectPreviouslyFailed(resolved.credentials)
+        do {
+            let session = try await VOSControlSession.open(
+                client: controlClient,
+                configuration: resolved.configuration
+            )
+            rejectedCredentials = nil
+            return session
         } catch {
             rememberAuthenticationFailure(error, credentials: resolved.credentials)
             throw error

@@ -2,6 +2,44 @@ import AppKit
 import Foundation
 import ServiceManagement
 
+enum ControlPresentationInvalidation: Equatable, Sendable {
+    case none
+    case operatorContext
+    case all
+
+    static func transition(
+        previousModemID: String?,
+        nextModemID: String,
+        previousEndpoint: ScopedEndpoint?,
+        nextEndpoint: ScopedEndpoint,
+        previousPLMN: String?,
+        nextPLMN: String?
+    ) -> ControlPresentationInvalidation {
+        guard previousModemID == nextModemID,
+              previousEndpoint == nextEndpoint
+        else { return .all }
+        guard previousPLMN == nextPLMN else { return .operatorContext }
+        return .none
+    }
+}
+
+enum ModemOperationInterruption {
+    static func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError
+    }
+
+    /// Discovery is intentionally nonthrowing and may translate a cancelled
+    /// probe into a timeout/no-match result. The task flag therefore remains
+    /// authoritative for status refreshes even when the final error was
+    /// wrapped by a lower layer.
+    static func shouldIgnoreRefreshFailure(
+        _ error: Error,
+        taskIsCancelled: Bool
+    ) -> Bool {
+        taskIsCancelled || isCancellation(error)
+    }
+}
+
 @MainActor
 final class StatusModel: ObservableObject {
     @Published private(set) var snapshot = DeviceSnapshot.empty
@@ -11,7 +49,7 @@ final class StatusModel: ObservableObject {
     @Published private(set) var menuBarTitle = "Cellular …"
     @Published private(set) var operatorSelection: OperatorSelection?
     @Published private(set) var scannedNetworks: [CellularNetwork] = []
-    @Published private(set) var nrSelectionPreferences: NRSystemSelectionPreferences?
+    @Published private(set) var controlState: ModemControlState?
     @Published private(set) var controlOperation: NetworkControlOperation?
     @Published private(set) var controlError: String?
     @Published private(set) var controlNotice: String?
@@ -33,24 +71,32 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    private let client: VOSClient
     private let coordinator: ModemCoordinator?
     private let credentialStore: any CredentialStoring
     private let backendSetupError: Error?
     private let defaults: UserDefaults
     private var pollingTask: Task<Void, Never>?
     private var pollingGeneration: UInt64 = 0
+    private var settingsGeneration: UInt64 = 0
     private var refreshCoalescer = RefreshCoalescer()
     private var consecutiveFailures = 0
     private var candidateTitle: String?
     private var candidateTitleCount = 0
     private let demoMode: Bool
-    private var controlDeviceFingerprint: String?
-    private var originalNRPreferences: NRSystemSelectionPreferences?
-    private var activeNRBandLock: Set<Int>?
     private var lastSuccessfulScopeKey: String?
     private var lastSuccessfulEndpoint: ModemEndpointPreference?
     private var credentialLoadStates: [ModemKind: CredentialLoadState] = [:]
+    private var queuedControlToken: UUID?
+
+    /// Immutable context captured synchronously at the UI action boundary.
+    /// The queued Task must never reinterpret an action for a later modem.
+    private struct ControlActionContext: Sendable {
+        let token: UUID
+        let modemID: String
+        let endpoint: ScopedEndpoint
+        let settingsGeneration: UInt64
+        let credentials: ModemConnectionCredentials
+    }
 
     private enum Key {
         static let host = "deviceHost"
@@ -82,7 +128,6 @@ final class StatusModel: ObservableObject {
         self.credentialStore = credentialStore
 
         let vosClient = VOSClient()
-        client = vosClient
         do {
             let registry = try ModemBackendRegistry.standard(vosClient: vosClient)
             coordinator = ModemCoordinator(registry: registry)
@@ -257,18 +302,15 @@ final class StatusModel: ObservableObject {
                         accessTechnologies: [.lte, .lteNRDualConnectivity]
                     )
                 ]
-                if let saBands = NRBandMask(bands: [77, 78]),
-                   let nsaBands = NRBandMask(bands: [77, 78]),
-                   let lteBands = LTEBandMask(bands: [2, 4, 25, 66]) {
-                    let preferences = NRSystemSelectionPreferences(
-                        modePreference: 0x0050,
-                        saBands: saBands,
-                        nsaBands: nsaBands,
-                        lteBands: lteBands
-                    )
-                    nrSelectionPreferences = preferences
-                    originalNRPreferences = preferences
-                }
+                controlState = ModemControlState(
+                    operatorSelection: operatorSelection,
+                    architecture: .automatic,
+                    saBands: [77, 78],
+                    nsaBands: [77, 78],
+                    lteBands: [2, 4, 25, 66],
+                    canRestoreDefaults: true,
+                    preferenceLifetime: .untilPowerLoss
+                )
             }
             return
         }
@@ -300,10 +342,16 @@ final class StatusModel: ObservableObject {
     }
 
     var isControlBusy: Bool { controlOperation != nil }
-    var canRestoreNRDefaults: Bool { originalNRPreferences != nil }
-    var supportsVOSControls: Bool {
-        activeModem?.identity.kind == .vos5G &&
-            activeModem?.capabilities.contains(.vosControls) == true
+    var canRestoreControlDefaults: Bool { controlState?.canRestoreDefaults == true }
+    var supportsDeviceControls: Bool {
+        activeModem?.capabilities.supportsDeviceControlSurface == true
+    }
+    var supportsControlSession: Bool {
+        activeModem?.capabilities.supportsControlSession == true
+    }
+
+    func supportsControl(_ capability: ModemCapability) -> Bool {
+        activeModem?.capabilities.contains(capability) == true
     }
 
     var activeModemName: String {
@@ -341,7 +389,7 @@ final class StatusModel: ObservableObject {
     var activeDataSource: String {
         switch activeModem?.identity.kind {
         case .vos5G: return "SSH → QRTR/QMI"
-        case .zteMC7530CA: return L10n.text("Web UBus (read-only)", language: language)
+        case .zteMC7530CA: return L10n.text("Authenticated Web UBus", language: language)
         case nil: return "—"
         }
     }
@@ -370,387 +418,68 @@ final class StatusModel: ObservableObject {
     }
 
     func loadNetworkControls() {
-        Task { [weak self] in
-            await self?.runControl(.loading) { model, configuration, operationGuard in
-                model.operatorSelection = try await model.client.fetchOperatorSelection(configuration: configuration)
-                try await model.verifyControlDevice(
-                    configuration: configuration,
-                    operationGuard: operationGuard
-                )
-                let latestPreferences = try await model.client.fetchNRSystemSelectionPreferences(
-                    configuration: configuration
-                )
-                try await model.verifyControlDevice(
-                    configuration: configuration,
-                    operationGuard: operationGuard
-                )
-                model.rememberOriginalPreferencesIfAutomatic(latestPreferences)
-                model.nrSelectionPreferences = latestPreferences
-            }
-        }
+        enqueueControl(.loading, command: nil)
     }
 
     func scanNetworks() {
-        Task { [weak self] in
-            await self?.runControl(.scanning) { model, configuration, operationGuard in
-                model.scannedNetworks = try await model.preservingCurrentNRPreferences(
-                    configuration: configuration,
-                    operationGuard: operationGuard
-                ) {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    return try await model.client.scanNetworks(configuration: configuration)
-                }
-                model.operatorSelection = try await model.client.fetchOperatorSelection(configuration: configuration)
-                model.controlNotice = L10n.text("Network scan completed.", language: model.language)
-            }
-        }
+        enqueueControl(.scanning, command: .scanNetworks)
     }
 
     func selectNetwork(_ network: CellularNetwork) {
-        Task { [weak self] in
-            await self?.runControl(.selecting(network.formattedPLMN)) { model, configuration, operationGuard in
-                do {
-                    _ = try await model.preservingCurrentNRPreferences(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    ) {
-                        try await model.verifyControlDevice(
-                            configuration: configuration,
-                            operationGuard: operationGuard
-                        )
-                        return try await model.client.selectNetwork(
-                            plmn: network.plmn,
-                            configuration: configuration
-                        )
-                    }
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    let manualFailure = error
-                    let finalSelection = try? await model.client.fetchOperatorSelection(
-                        configuration: configuration
-                    )
-                    if finalSelection?.mode == .automatic { throw manualFailure }
-
-                    var recoveryFailure: Error?
-                    do {
-                        _ = try await model.preservingCurrentNRPreferences(
-                            configuration: configuration,
-                            operationGuard: operationGuard
-                        ) {
-                            try await model.verifyControlDevice(
-                                configuration: configuration,
-                                operationGuard: operationGuard
-                            )
-                            return try await model.client.selectAutomaticNetwork(configuration: configuration)
-                        }
-                    } catch {
-                        guard operationGuard.isValid else { throw error }
-                        recoveryFailure = error
-                    }
-                    let recoveredSelection = try? await model.client.fetchOperatorSelection(
-                        configuration: configuration
-                    )
-                    if recoveryFailure == nil, recoveredSelection?.mode == .automatic {
-                        model.operatorSelection = recoveredSelection
-                        throw VOSClientError.verificationFailed(
-                            "\(manualFailure.localizedDescription) Automatic operator selection was restored and verified."
-                        )
-                    }
-                    throw VOSClientError.verificationFailed(
-                        "\(manualFailure.localizedDescription) Automatic operator recovery could not be verified; state is unknown."
-                    )
-                }
-
-                let finalSelection = try await model.client.fetchOperatorSelection(configuration: configuration)
-                if finalSelection.mode == .manual, finalSelection.plmn == network.plmn {
-                    model.operatorSelection = finalSelection
-                    model.controlNotice = L10n.format(
-                        "Manual selection verified for %@ (%@).",
-                        language: model.language,
-                        network.displayName,
-                        network.formattedPLMN
-                    )
-                    return
-                }
-
-                var recoveryFailure: Error?
-                do {
-                    _ = try await model.preservingCurrentNRPreferences(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    ) {
-                        try await model.verifyControlDevice(
-                            configuration: configuration,
-                            operationGuard: operationGuard
-                        )
-                        return try await model.client.selectAutomaticNetwork(configuration: configuration)
-                    }
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    recoveryFailure = error
-                }
-                let recoveredSelection = try? await model.client.fetchOperatorSelection(configuration: configuration)
-                if recoveryFailure == nil, recoveredSelection?.mode == .automatic {
-                    model.operatorSelection = recoveredSelection
-                    throw VOSClientError.verificationFailed(
-                        "Manual selection did not remain active after restoring the radio preference; automatic operator selection was restored and verified."
-                    )
-                }
-                throw VOSClientError.verificationFailed(
-                    "Manual selection did not remain active, and automatic recovery could not be verified after restoring the radio preference; state is unknown."
-                )
-            }
-        }
+        enqueueControl(
+            .selecting(network.formattedPLMN),
+            command: .selectNetwork(network)
+        )
     }
 
     func selectAutomaticNetwork() {
-        Task { [weak self] in
-            await self?.runControl(.automaticSelection) { model, configuration, operationGuard in
-                _ = try await model.preservingCurrentNRPreferences(
-                    configuration: configuration,
-                    operationGuard: operationGuard
-                ) {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    return try await model.client.selectAutomaticNetwork(configuration: configuration)
-                }
-                let finalSelection = try await model.client.fetchOperatorSelection(configuration: configuration)
-                guard finalSelection.mode == .automatic else {
-                    throw VOSClientError.verificationFailed(
-                        "Automatic operator selection did not remain active after restoring the radio preference; state is unknown."
-                    )
-                }
-                model.operatorSelection = finalSelection
-                model.controlNotice = L10n.text(
-                    "Automatic network selection was verified.",
-                    language: model.language
-                )
-            }
-        }
+        enqueueControl(.automaticSelection, command: .selectAutomaticNetwork)
     }
 
     func setNRArchitecture(_ mode: NRArchitectureMode) {
         guard mode != .unavailable else { return }
-        Task { [weak self] in
-            await self?.runControl(.changingArchitecture(mode)) { model, configuration, operationGuard in
-                let previous = try await model.client.fetchNRSystemSelectionPreferences(configuration: configuration)
-                let preferencePlan = try model.targetPreferences(for: mode, current: previous)
-                let target = preferencePlan.target
-                guard let targetMode = target.modePreference else {
-                    throw VOSClientError.verificationFailed("Qualcomm NAS did not report a mode preference to preserve.")
-                }
-                do {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    model.nrSelectionPreferences = try await model.client.setNRSystemSelectionPreferences(
-                        modePreference: targetMode,
-                        saBands: target.saBands,
-                        nsaBands: target.nsaBands,
-                        lteBands: preferencePlan.lteBandsToWrite,
-                        configuration: configuration
-                    )
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    if let rollbackFailure = try await model.rollbackNRPreferences(
-                        previous,
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    ) {
-                        let originalFailure = (error as? LocalizedError)?.errorDescription
-                            ?? error.localizedDescription
-                        throw VOSClientError.verificationFailed(
-                            "\(originalFailure) Automatic rollback also failed: \(rollbackFailure). Power-cycle VOS to restore its temporary radio preferences."
-                        )
-                    }
-                    throw error
-                }
-                model.controlNotice = L10n.format(
-                    "%@ was applied and verified. The preference resets when VOS loses power.",
-                    language: model.language,
-                    L10n.text(mode.label, language: model.language)
-                )
-            }
-        }
+        enqueueControl(
+            .changingArchitecture(mode),
+            command: .setArchitecture(mode)
+        )
     }
 
     func lockNRBands(_ bands: Set<Int>) {
-        Task { [weak self] in
-            await self?.runControl(.lockingNRBands) { model, configuration, operationGuard in
-                guard !bands.isEmpty, let requested = NRBandMask(bands: bands) else {
-                    throw VOSClientError.verificationFailed("Enter one or more valid NR bands, for example 77,78.")
-                }
-                let previous = try await model.client.fetchNRSystemSelectionPreferences(configuration: configuration)
-                model.rememberOriginalPreferencesIfAutomatic(previous)
-                guard let baseline = model.originalNRPreferences,
-                      let modePreference = previous.modePreference
-                else {
-                    throw VOSClientError.verificationFailed(
-                        "The original band masks were not captured. Power-cycle VOS, then reopen Network & radio controls."
-                    )
-                }
-
-                let plan = try NRBandLockPlan.make(
-                    requested: requested,
-                    baseline: baseline,
-                    architecture: previous.architectureMode
-                )
-
-                do {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    model.nrSelectionPreferences = try await model.client.setNRSystemSelectionPreferences(
-                        modePreference: modePreference,
-                        saBands: plan.saBands,
-                        nsaBands: plan.nsaBands,
-                        configuration: configuration
-                    )
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    if let rollbackFailure = try await model.rollbackNRPreferences(
-                        previous,
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    ) {
-                        throw VOSClientError.verificationFailed(
-                            "\(error.localizedDescription) Rollback also failed: \(rollbackFailure). Power-cycle VOS."
-                        )
-                    }
-                    throw error
-                }
-                model.activeNRBandLock = bands
-                model.controlNotice = L10n.format(
-                    "NR bands %@ were applied and verified until VOS loses power.",
-                    language: model.language,
-                    bands.sorted().map(String.init).joined(separator: ", ")
-                )
-            }
-        }
+        enqueueControl(.lockingNRBands, command: .lockNRBands(bands))
     }
 
     func lockLTEBands(_ bands: Set<Int>) {
-        Task { [weak self] in
-            await self?.runControl(.lockingLTEBands) { model, configuration, operationGuard in
-                guard !bands.isEmpty, let requested = LTEBandMask(bands: bands) else {
-                    throw VOSClientError.verificationFailed("Enter one or more valid LTE bands, for example 2,4,25,66.")
-                }
-                let previous = try await model.client.fetchNRSystemSelectionPreferences(configuration: configuration)
-                model.rememberOriginalPreferencesIfAutomatic(previous)
-                guard let baseline = model.originalNRPreferences?.lteBands,
-                      let previousLTE = previous.lteBands,
-                      let modePreference = previous.modePreference
-                else {
-                    throw VOSClientError.verificationFailed("Qualcomm NAS did not report an extended LTE band mask to preserve.")
-                }
-                let target = baseline.intersecting(requested)
-                let unavailable = bands.subtracting(Set(target.enabledBands)).sorted()
-                guard unavailable.isEmpty else {
-                    throw VOSClientError.verificationFailed(
-                        "These LTE bands are not enabled by the captured modem defaults: \(unavailable.map(String.init).joined(separator: ", "))."
-                    )
-                }
-
-                do {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    model.nrSelectionPreferences = try await model.client.setNRSystemSelectionPreferences(
-                        modePreference: modePreference,
-                        saBands: previous.saBands,
-                        nsaBands: previous.nsaBands,
-                        lteBands: target,
-                        configuration: configuration
-                    )
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    var rollback = previous
-                    rollback.lteBands = previousLTE
-                    if let rollbackFailure = try await model.rollbackNRPreferences(
-                        rollback,
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    ) {
-                        throw VOSClientError.verificationFailed(
-                            "\(error.localizedDescription) Rollback also failed: \(rollbackFailure). Power-cycle VOS."
-                        )
-                    }
-                    throw error
-                }
-                model.controlNotice = L10n.format(
-                    "LTE bands %@ were applied and verified until VOS loses power.",
-                    language: model.language,
-                    bands.sorted().map(String.init).joined(separator: ", ")
-                )
-            }
-        }
+        enqueueControl(.lockingLTEBands, command: .lockLTEBands(bands))
     }
 
     func restoreAutomaticDefaults() {
+        enqueueControl(.restoring, command: .restoreDefaults)
+    }
+
+    private func enqueueControl(
+        _ operation: NetworkControlOperation,
+        command: ModemControlCommand?
+    ) {
+        guard !demoMode,
+              supportsControlSession,
+              controlOperation == nil,
+              queuedControlToken == nil,
+              let activeModem
+        else { return }
+        let token = UUID()
+        let context = ControlActionContext(
+            token: token,
+            modemID: activeModem.id,
+            endpoint: activeModem.endpoint,
+            settingsGeneration: settingsGeneration,
+            credentials: currentCredentials
+        )
+        // Reserve the operation synchronously so two UI actions cannot both be
+        // queued before either Task receives MainActor time.
+        queuedControlToken = token
+        controlOperation = operation
         Task { [weak self] in
-            await self?.runControl(.restoring) { model, configuration, operationGuard in
-                guard let original = model.originalNRPreferences,
-                      let modePreference = original.modePreference
-                else {
-                    throw VOSClientError.verificationFailed(
-                        "No automatic radio baseline is available for this physical VOS. Power-cycle it, then reopen this panel to capture its defaults."
-                    )
-                }
-                var failures: [String] = []
-                // COPS=0 can alter the NAS mode-preference bitmask on 0R05.
-                // Apply it first, then restore the captured QMI tuple last.
-                do {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    model.operatorSelection = try await model.client.selectAutomaticNetwork(configuration: configuration)
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    failures.append("operator selection: \(error.localizedDescription)")
-                }
-
-                do {
-                    try await model.verifyControlDevice(
-                        configuration: configuration,
-                        operationGuard: operationGuard
-                    )
-                    model.nrSelectionPreferences = try await model.client.setNRSystemSelectionPreferences(
-                        modePreference: modePreference,
-                        saBands: original.saBands,
-                        nsaBands: original.nsaBands,
-                        lteBands: original.lteBands,
-                        configuration: configuration
-                    )
-                } catch {
-                    guard operationGuard.isValid else { throw error }
-                    failures.append("radio preference: \(error.localizedDescription)")
-                }
-
-                guard failures.isEmpty else {
-                    throw VOSClientError.verificationFailed(failures.joined(separator: "; "))
-                }
-                let finalSelection = try await model.client.fetchOperatorSelection(configuration: configuration)
-                guard finalSelection.mode == .automatic else {
-                    throw VOSClientError.verificationFailed(
-                        "The original radio tuple was restored, but final automatic operator selection could not be verified."
-                    )
-                }
-                model.operatorSelection = finalSelection
-                model.activeNRBandLock = nil
-                model.controlNotice = L10n.text(
-                    "Original LTE/NR masks and automatic operator selection were restored and verified.",
-                    language: model.language
-                )
-            }
+            await self?.runControl(operation, command: command, context: context)
         }
     }
 
@@ -815,6 +544,7 @@ final class StatusModel: ObservableObject {
             clearLastSuccessfulEndpoint()
         }
         updateMenuTitle(force: true)
+        settingsGeneration &+= 1
         consecutiveFailures = 0
         connectionState = .connecting
         lastError = nil
@@ -866,7 +596,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.0"
+        ) as? String ?? "1.3.3"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -937,6 +667,7 @@ final class StatusModel: ObservableObject {
     }
 
     private func refresh() async {
+        guard !Task.isCancelled else { return }
         guard refreshCoalescer.request(
             isRefreshing: isRefreshing,
             isControlBusy: isControlBusy
@@ -945,6 +676,7 @@ final class StatusModel: ObservableObject {
         repeat {
             refreshCoalescer.beginRefresh()
             await performRefresh()
+            if Task.isCancelled { return }
         } while refreshCoalescer.shouldDrain(
             isRefreshing: isRefreshing,
             isControlBusy: isControlBusy
@@ -952,6 +684,7 @@ final class StatusModel: ObservableObject {
     }
 
     private func performRefresh() async {
+        let generation = settingsGeneration
         isRefreshing = true
         defer { isRefreshing = false }
 
@@ -964,20 +697,39 @@ final class StatusModel: ObservableObject {
                 preferences: currentConnectionPreferences,
                 credentials: currentCredentials
             )
+            // Detached SSH work and nonthrowing discovery can finish after the
+            // polling task has been cancelled. Never commit that retired
+            // result to the visible model.
+            try Task.checkCancellation()
+            guard settingsGeneration == generation else { return }
             let latest = result.snapshot
+            let previousActiveModemID = activeModem?.id
+            let previousActiveEndpoint = activeModem?.endpoint
             let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
-            if snapshot.plmn != latest.plmn {
+            let controlInvalidation = ControlPresentationInvalidation.transition(
+                previousModemID: previousActiveModemID,
+                nextModemID: result.activeModem.id,
+                previousEndpoint: previousActiveEndpoint,
+                nextEndpoint: result.activeModem.endpoint,
+                previousPLMN: snapshot.plmn,
+                nextPLMN: latest.plmn
+            )
+            snapshot = latest
+            activeModem = result.activeModem
+            switch controlInvalidation {
+            case .none:
+                break
+            case .operatorContext:
                 // A powered SIM replacement can leave the USB device and SSH
                 // identity unchanged while registration moves to a different
                 // PLMN (or temporarily disappears). Do not keep presenting a
                 // selection or scan result captured for the previous card.
-                operatorSelection = nil
-                scannedNetworks = []
-                controlError = nil
-                controlNotice = nil
+                // Serving PLMN is not a SIM identity: a normal manual operator
+                // change must not discard the physical modem's restore tuple.
+                clearOperatorContext()
+            case .all:
+                clearControlState()
             }
-            snapshot = latest
-            activeModem = result.activeModem
             persistLastSuccessful(result)
             consecutiveFailures = 0
             // During a physical SIM swap QMI remains reachable but may report
@@ -988,6 +740,11 @@ final class StatusModel: ObservableObject {
             lastError = nil
             updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged)
         } catch {
+            guard !ModemOperationInterruption.shouldIgnoreRefreshFailure(
+                error,
+                taskIsCancelled: Task.isCancelled
+            ) else { return }
+            guard settingsGeneration == generation else { return }
             consecutiveFailures += 1
             lastError = localizedError(error)
             if isAuthenticationError(error) {
@@ -1015,18 +772,45 @@ final class StatusModel: ObservableObject {
 
     private func runControl(
         _ operation: NetworkControlOperation,
-        action: @escaping @MainActor (
-            StatusModel,
-            DeviceConfiguration,
-            ControlOperationDeviceGuard
-        ) async throws -> Void
+        command: ModemControlCommand?,
+        context: ControlActionContext
     ) async {
-        guard !demoMode, supportsVOSControls, controlOperation == nil else { return }
-        controlOperation = operation
+        guard queuedControlToken == context.token,
+              controlOperation == operation
+        else { return }
         defer {
-            controlOperation = nil
-            refreshNow()
+            if queuedControlToken == context.token {
+                queuedControlToken = nil
+                controlOperation = nil
+                refreshNow()
+            }
         }
+        guard !demoMode, supportsControlSession else { return }
+        // Validate the click-time context before doing anything observable.
+        // A refresh or Settings save may have completed while the Task was
+        // merely waiting to be scheduled.
+        guard settingsGeneration == context.settingsGeneration else { return }
+        guard activeModem?.id == context.modemID,
+              activeModem?.endpoint == context.endpoint
+        else {
+            controlError = localizedError(ModemControlError.deviceChanged)
+            return
+        }
+        if let command,
+           activeModem?.capabilities.contains(command.requiredCapability) != true {
+            controlError = localizedError(
+                ModemBackendError.unsupportedCapability(command.requiredCapability)
+            )
+            return
+        }
+        // Bind the user's action to the currently displayed modem before the
+        // first suspension point. A refresh already in flight may replace the
+        // active endpoint while this operation waits for it to finish; that
+        // must cancel the action, never retarget it to the replacement modem.
+        let expectedModemID = context.modemID
+        let expectedEndpoint = context.endpoint
+        let expectedSettingsGeneration = context.settingsGeneration
+        let operationCredentials = context.credentials
         while isRefreshing {
             do {
                 try await Task.sleep(nanoseconds: 50_000_000)
@@ -1035,156 +819,243 @@ final class StatusModel: ObservableObject {
             }
         }
 
+        // A Settings save owns the newer UI generation and must not receive an
+        // error from the retired operation. A same-generation modem change is
+        // still reported to the user as a fail-closed device replacement.
+        guard settingsGeneration == expectedSettingsGeneration else { return }
+        guard activeModem?.id == expectedModemID,
+              activeModem?.endpoint == expectedEndpoint
+        else {
+            controlError = localizedError(ModemControlError.deviceChanged)
+            return
+        }
+
         controlError = nil
         controlNotice = nil
-        let configuration = currentConfiguration
+        var openedSession: (any ModemControlSession)?
         do {
-            let fingerprint = try await client.fetchDeviceFingerprint(configuration: configuration)
-            bindControlState(to: fingerprint)
-            let operationGuard = ControlOperationDeviceGuard(expectedFingerprint: fingerprint)
-            try await action(self, configuration, operationGuard)
+            guard let coordinator else { throw ModemCoordinatorError.noMatchingModem }
+            let session = try await coordinator.controlSession(credentials: operationCredentials)
+            openedSession = session
+            let result: ModemControlResult
+            if let command {
+                result = try await session.perform(command)
+            } else {
+                result = ModemControlResult(state: try await session.refresh())
+            }
+            // A returned control result is already authoritative. The session
+            // observed no cancellation at any suspension point and may have
+            // completed a persistent write, so commit that result rather than
+            // discarding it for a cancellation that arrived afterward.
+            guard activeModem?.id == expectedModemID,
+                  activeModem?.endpoint == expectedEndpoint,
+                  settingsGeneration == expectedSettingsGeneration
+            else {
+                throw ModemControlError.deviceChanged
+            }
+            applyControlResult(result)
+            controlNotice = controlNotice(for: operation, result: result)
         } catch {
-            controlError = localizedError(error)
+            let operationError = error
+            // The backend session owns cancellation-safe rollback for any
+            // ambiguous persistent write. Once it returns CancellationError,
+            // do not turn an intentional interruption into visible failure.
+            // Its cleanup may intentionally settle on a different verified
+            // state (for example automatic operator selection), so reconcile
+            // the panel without starting a second recovery sequence.
+            if ModemOperationInterruption.isCancellation(operationError) {
+                if let openedSession {
+                    await reconcileControlStateAfterCancellation(
+                        session: openedSession,
+                        expectedModemID: expectedModemID,
+                        expectedEndpoint: expectedEndpoint,
+                        expectedSettingsGeneration: expectedSettingsGeneration
+                    )
+                }
+                return
+            }
+            // A settings save owns the new UI/coordinator generation. The old
+            // session has already performed its private recovery; do not let
+            // its completion clear or annotate the newly selected modem.
+            guard settingsGeneration == expectedSettingsGeneration else { return }
+            if operationError as? ModemControlError == .deviceChanged {
+                clearControlState()
+                activeModem = nil
+                if let coordinator {
+                    await coordinator.invalidateActiveModem()
+                }
+                guard settingsGeneration == expectedSettingsGeneration else { return }
+            } else if let openedSession,
+                      activeModem?.id == expectedModemID,
+                      activeModem?.endpoint == expectedEndpoint,
+                      settingsGeneration == expectedSettingsGeneration {
+                // A command can fail after the modem has already completed a
+                // verified rollback or a partial restore. Preserve the
+                // original error, but refresh the authoritative control state
+                // so the panel never remains on a stale pre-error value.
+                do {
+                    let recovered = try await openedSession.refresh()
+                    guard activeModem?.id == expectedModemID,
+                          activeModem?.endpoint == expectedEndpoint,
+                          settingsGeneration == expectedSettingsGeneration
+                    else { throw ModemControlError.deviceChanged }
+                    applyControlResult(ModemControlResult(state: recovered))
+                } catch {
+                    if error as? ModemControlError == .deviceChanged {
+                        clearControlState()
+                        activeModem = nil
+                        if let coordinator {
+                            await coordinator.invalidateActiveModem()
+                        }
+                        guard settingsGeneration == expectedSettingsGeneration else { return }
+                    }
+                }
+            }
+            guard settingsGeneration == expectedSettingsGeneration else { return }
+            controlError = localizedError(operationError)
         }
     }
 
-    private var currentConfiguration: DeviceConfiguration {
-        let endpoint = activeModem?.identity.kind == .vos5G
-            ? activeModem?.endpoint
-            : nil
-        return DeviceConfiguration(
-            host: endpoint?.baseURL.absoluteString ?? host,
-            username: username,
-            password: password,
-            refreshInterval: refreshInterval,
-            sourceAddress: endpoint?.sourceAddress,
-            interfaceName: endpoint?.interfaceName
-        )
-    }
-
-    private func rememberOriginalPreferencesIfAutomatic(_ preferences: NRSystemSelectionPreferences) {
-        guard originalNRPreferences == nil,
-              preferences.architectureMode == .automatic,
-              preferences.modePreference != nil
+    private func reconcileControlStateAfterCancellation(
+        session: any ModemControlSession,
+        expectedModemID: String,
+        expectedEndpoint: ScopedEndpoint,
+        expectedSettingsGeneration: UInt64
+    ) async {
+        guard settingsGeneration == expectedSettingsGeneration,
+              activeModem?.id == expectedModemID,
+              activeModem?.endpoint == expectedEndpoint
         else { return }
-        originalNRPreferences = preferences
-    }
 
-    private func targetPreferences(
-        for mode: NRArchitectureMode,
-        current: NRSystemSelectionPreferences
-    ) throws -> RadioAccessPreferencePlan {
-        rememberOriginalPreferencesIfAutomatic(current)
-        nrSelectionPreferences = current
-        guard let original = originalNRPreferences,
-              original.modePreference != nil
-        else {
-            throw VOSClientError.verificationFailed(
-                "The original automatic radio masks were not captured. Power-cycle VOS, then open Network & radio controls before changing the mode."
-            )
-        }
-
-        return try RadioAccessPreferencePlan.make(
-            mode: mode,
-            baseline: original,
-            current: current,
-            activeNRBandLock: activeNRBandLock
-        )
-    }
-
-    private func rollbackNRPreferences(
-        _ previous: NRSystemSelectionPreferences,
-        configuration: DeviceConfiguration,
-        operationGuard: ControlOperationDeviceGuard
-    ) async throws -> String? {
-        guard let modePreference = previous.modePreference
-        else { return "the pre-operation preference tuple is incomplete" }
+        // The calling operation is cancelled. Run only an authoritative read
+        // in a fresh task; backend sessions have already completed any needed
+        // write recovery before exposing CancellationError.
+        let reconciliation = Task { try await session.refresh() }
         do {
-            try await verifyControlDevice(
-                configuration: configuration,
-                operationGuard: operationGuard
-            )
-            nrSelectionPreferences = try await client.setNRSystemSelectionPreferences(
-                modePreference: modePreference,
-                saBands: previous.saBands,
-                nsaBands: previous.nsaBands,
-                lteBands: previous.lteBands,
-                configuration: configuration
-            )
+            let reconciled = try await reconciliation.value
+            guard settingsGeneration == expectedSettingsGeneration,
+                  activeModem?.id == expectedModemID,
+                  activeModem?.endpoint == expectedEndpoint
+            else { return }
+            applyControlResult(ModemControlResult(state: reconciled))
+        } catch {
+            guard settingsGeneration == expectedSettingsGeneration else { return }
+            if error as? ModemControlError == .deviceChanged {
+                clearControlState()
+                activeModem = nil
+                if let coordinator {
+                    await coordinator.invalidateActiveModem()
+                }
+            } else if activeModem?.id == expectedModemID,
+                      activeModem?.endpoint == expectedEndpoint {
+                // A failed quiet reconciliation must not leave values that no
+                // longer describe the modem. The user can reload the controls
+                // without being shown the intentional cancellation as an error.
+                clearControlState()
+            }
+        }
+    }
+
+    func applyControlResult(_ result: ModemControlResult) {
+        controlState = result.state
+        // The state is authoritative. A nil selection means the backend has
+        // verified that no operator selection is currently available; keeping
+        // the previous non-nil value would present stale UI state.
+        operatorSelection = result.state.operatorSelection
+        if let scannedNetworks = result.scannedNetworks {
+            self.scannedNetworks = scannedNetworks
+        }
+    }
+
+    private func controlNotice(
+        for operation: NetworkControlOperation,
+        result: ModemControlResult
+    ) -> String? {
+        switch operation {
+        case .loading:
             return nil
-        } catch {
-            guard operationGuard.isValid else { throw error }
-            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-    }
-
-    private func preservingCurrentNRPreferences<T>(
-        configuration: DeviceConfiguration,
-        operationGuard: ControlOperationDeviceGuard,
-        operation: @escaping @MainActor () async throws -> T
-    ) async throws -> T {
-        let previous = try await client.fetchNRSystemSelectionPreferences(configuration: configuration)
-        nrSelectionPreferences = previous
-
-        let result: T
-        do {
-            result = try await operation()
-        } catch {
-            guard operationGuard.isValid else { throw error }
-            if let rollbackFailure = try await rollbackNRPreferences(
-                previous,
-                configuration: configuration,
-                operationGuard: operationGuard
-            ) {
-                throw VOSClientError.verificationFailed(
-                    "\(error.localizedDescription) Restoring the pre-operation radio preference also failed: \(rollbackFailure). Power-cycle VOS before another control operation."
+        case .scanning:
+            return L10n.text("Network scan completed.", language: language)
+        case .selecting:
+            let selection = result.state.operatorSelection
+            let name = selection?.operatorName ?? selection?.formattedPLMN ?? "—"
+            return L10n.format(
+                "Manual selection verified for %@.",
+                language: language,
+                name
+            )
+        case .automaticSelection:
+            return L10n.text("Automatic network selection was verified.", language: language)
+        case let .changingArchitecture(mode):
+            return L10n.format(
+                "%@ was applied and verified. %@",
+                language: language,
+                L10n.text(mode.label, language: language),
+                persistenceNotice(result.state.preferenceLifetime)
+            )
+        case .lockingNRBands:
+            let bands = displayedNRBands(in: result.state)
+            return L10n.format(
+                "NR bands %@ were applied and verified. %@",
+                language: language,
+                bands.sorted().map(String.init).joined(separator: ", "),
+                persistenceNotice(result.state.preferenceLifetime)
+            )
+        case .lockingLTEBands:
+            return L10n.format(
+                "LTE bands %@ were applied and verified. %@",
+                language: language,
+                result.state.lteBands.sorted().map(String.init).joined(separator: ", "),
+                persistenceNotice(result.state.preferenceLifetime)
+            )
+        case .restoring:
+            if activeModem?.identity.kind == .zteMC7530CA {
+                return L10n.text(
+                    "Automatic selection and the MC7530CA band/cell defaults were restored and verified.",
+                    language: language
                 )
             }
-            throw error
-        }
-
-        if let rollbackFailure = try await rollbackNRPreferences(
-            previous,
-            configuration: configuration,
-            operationGuard: operationGuard
-        ) {
-            throw VOSClientError.verificationFailed(
-                "The operator operation was verified, but restoring its pre-operation radio preference failed: \(rollbackFailure). Power-cycle VOS before another control operation."
+            return L10n.text(
+                "Automatic operator selection and the original LTE/NR masks were restored and verified.",
+                language: language
             )
         }
-        return result
     }
 
-    private func bindControlState(to fingerprint: String) {
-        guard controlDeviceFingerprint != fingerprint else { return }
-        controlDeviceFingerprint = fingerprint
-        originalNRPreferences = nil
-        activeNRBandLock = nil
-        operatorSelection = nil
-        scannedNetworks = []
-        nrSelectionPreferences = nil
+    private func persistenceNotice(_ lifetime: ModemPreferenceLifetime) -> String {
+        switch lifetime {
+        case .untilPowerLoss:
+            return L10n.text("This setting lasts until the modem loses power.", language: language)
+        case .persistent:
+            return L10n.text("This setting persists until it is changed or restored.", language: language)
+        case .unknown:
+            return L10n.text("The modem did not report this setting's persistence.", language: language)
+        }
     }
 
-    private func verifyControlDevice(
-        configuration: DeviceConfiguration,
-        operationGuard: ControlOperationDeviceGuard
-    ) async throws {
-        let current = try await client.fetchDeviceFingerprint(configuration: configuration)
-        do {
-            try operationGuard.validate(currentFingerprint: current)
-        } catch {
-            bindControlState(to: current)
-            throw error
+    private func displayedNRBands(in state: ModemControlState) -> Set<Int> {
+        switch state.architecture {
+        case .saOnly: return state.saBands
+        case .nsaOnly: return state.nsaBands
+        case .automatic: return state.saBands == state.nsaBands
+            ? state.saBands
+            : state.saBands.union(state.nsaBands)
+        case .lteOnly, .unavailable: return []
         }
     }
 
     private func clearControlState() {
-        controlDeviceFingerprint = nil
-        originalNRPreferences = nil
-        activeNRBandLock = nil
         operatorSelection = nil
         scannedNetworks = []
-        nrSelectionPreferences = nil
+        controlState = nil
+        controlError = nil
+        controlNotice = nil
+    }
+
+    private func clearOperatorContext() {
+        operatorSelection = nil
+        scannedNetworks = []
+        controlState = controlState?.clearingOperatorSelection()
         controlError = nil
         controlNotice = nil
     }

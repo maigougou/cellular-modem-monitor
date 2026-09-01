@@ -50,7 +50,7 @@ struct StatusPanel: View {
                         }
                         deviceDetailsCard
                             .id("device-details")
-                        if model.supportsVOSControls {
+                        if model.supportsDeviceControls {
                             networkControlsCard
                                 .id("network-controls")
                         }
@@ -94,7 +94,9 @@ struct StatusPanel: View {
                         pendingControl = nil
                         return
                     }
-                    model.loadNetworkControls()
+                    if model.supportsControlSession {
+                        model.loadNetworkControls()
+                    }
                     DispatchQueue.main.async {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("network-controls", anchor: .bottom)
@@ -106,13 +108,24 @@ struct StatusPanel: View {
                     // without changing the USB device. Refresh the expanded
                     // read-only control summary once the new registration is
                     // available; do not probe while the modem has no PLMN.
-                    guard showNetworkControls, plmn != nil else { return }
+                    guard showNetworkControls,
+                          plmn != nil,
+                          model.supportsControlSession
+                    else { return }
                     model.loadNetworkControls()
                 }
-                .onChange(of: model.supportsVOSControls) { isSupported in
+                .onChange(of: model.supportsDeviceControls) { isSupported in
                     guard !isSupported else { return }
                     showNetworkControls = false
                     pendingControl = nil
+                }
+                .onChange(of: model.activeModem) { _ in
+                    // Confirmations, restore state and scan rows belong to the
+                    // exact modem + endpoint binding that produced them. Never
+                    // carry them to another device or connection path.
+                    pendingControl = nil
+                    guard showNetworkControls, model.supportsControlSession else { return }
+                    model.loadNetworkControls()
                 }
             }
             panelSeparator
@@ -329,6 +342,8 @@ struct StatusPanel: View {
                 if let confirmation = pendingControl {
                     InlineControlConfirmation(
                         confirmation: confirmation,
+                        modemKind: model.activeModem?.identity.kind,
+                        preferenceLifetime: model.controlState?.preferenceLifetime ?? .unknown,
                         cancel: { pendingControl = nil },
                         confirm: { perform(confirmation) }
                     )
@@ -349,20 +364,9 @@ struct StatusPanel: View {
                     controlMessage(notice, color: .green, icon: "checkmark.circle.fill")
                 }
 
-                HStack(spacing: 8) {
-                    Button(L10n.text("Scan Networks", language: language)) {
-                        pendingControl = .scan
-                    }
-                    .buttonStyle(.borderedProminent)
+                operatorControlButtons
 
-                    Button(L10n.text("Automatic Selection", language: language)) {
-                        pendingControl = .automaticNetwork
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .disabled(controlsDisabled)
-
-                if !model.scannedNetworks.isEmpty {
+                if model.supportsControl(.networkScan), !model.scannedNetworks.isEmpty {
                     Divider()
                     Text(L10n.text("Scanned networks", language: language))
                         .font(.caption.weight(.semibold))
@@ -371,50 +375,30 @@ struct StatusPanel: View {
                         .foregroundStyle(.secondary)
                     VStack(spacing: 7) {
                         ForEach(model.scannedNetworks) { network in
-                            ScannedNetworkRow(network: network, isDisabled: controlsDisabled) {
+                            ScannedNetworkRow(
+                                network: network,
+                                isDisabled: controlsDisabled || !model.supportsControl(.operatorSelection)
+                            ) {
                                 pendingControl = .manualNetwork(network)
                             }
                         }
                     }
                 }
 
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(L10n.text("Radio access preference", language: language))
-                        .font(.caption.weight(.semibold))
-                    LazyVGrid(
-                        columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible())],
-                        spacing: 6
-                    ) {
-                        architectureButton(.automatic)
-                        architectureButton(.saOnly)
-                        architectureButton(.nsaOnly)
-                        architectureButton(.lteOnly)
-                    }
-                    Text(L10n.text("These Qualcomm preferences last until VOS loses power. Auto restores the captured SA/NSA masks; LTE only disables NR while preserving the current LTE band mask.", language: language))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    if model.nrSelectionPreferences != nil, !model.canRestoreNRDefaults {
-                        Label(
-                            L10n.text("Automatic defaults were not available to capture. Power-cycle VOS, then close and reopen this panel before changing radio access mode.", language: language),
-                            systemImage: "info.circle"
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                    }
-
-                    Button(L10n.text("Restore automatic defaults", language: language)) {
-                        pendingControl = .restoreDefaults
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(controlsDisabled || !model.canRestoreNRDefaults)
+                if model.supportsControl(.radioAccessPreference) {
+                    Divider()
+                    architectureControls
                 }
 
-                Divider()
-                bandLockControls
+                if hasBandLockControls {
+                    Divider()
+                    bandLockControls
+                }
 
-                Divider()
-                neighborMeasurements
+                if model.supportsControl(.neighborMeasurements) {
+                    Divider()
+                    neighborMeasurements
+                }
             }
             .padding(.top, 10)
         } label: {
@@ -426,21 +410,82 @@ struct StatusPanel: View {
 
     private var currentNetworkControlSummary: some View {
         VStack(spacing: 7) {
-            DetailRow(
-                label: L10n.text("Operator selection", language: language),
-                value: model.operatorSelection.map { L10n.text($0.mode.label, language: language) } ?? L10n.text("Reading…", language: language),
-                compact: true
-            )
-            DetailRow(
-                label: L10n.text("Selected operator", language: language),
-                value: selectedOperatorText,
-                compact: true
-            )
-            DetailRow(
-                label: L10n.text("Radio preference", language: language),
-                value: model.nrSelectionPreferences.map { L10n.text($0.architectureMode.label, language: language) } ?? L10n.text("Reading…", language: language),
-                compact: true
-            )
+            if hasOperatorControls {
+                DetailRow(
+                    label: L10n.text("Operator selection", language: language),
+                    value: model.operatorSelection.map { L10n.text($0.mode.label, language: language) } ?? L10n.text("Reading…", language: language),
+                    compact: true
+                )
+                DetailRow(
+                    label: L10n.text("Selected operator", language: language),
+                    value: selectedOperatorText,
+                    compact: true
+                )
+            }
+            if model.supportsControl(.radioAccessPreference) {
+                DetailRow(
+                    label: L10n.text("Radio preference", language: language),
+                    value: model.controlState.map { L10n.text($0.architecture.label, language: language) } ?? L10n.text("Reading…", language: language),
+                    compact: true
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var operatorControlButtons: some View {
+        if hasOperatorControls {
+            HStack(spacing: 8) {
+                if model.supportsControl(.networkScan) {
+                    Button(L10n.text("Scan Networks", language: language)) {
+                        pendingControl = .scan
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                if model.supportsControl(.operatorSelection) {
+                    Button(L10n.text("Automatic Selection", language: language)) {
+                        pendingControl = .automaticNetwork
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .disabled(controlsDisabled)
+        }
+    }
+
+    private var architectureControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.text("Radio access preference", language: language))
+                .font(.caption.weight(.semibold))
+            LazyVGrid(
+                columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible())],
+                spacing: 6
+            ) {
+                architectureButton(.automatic)
+                architectureButton(.saOnly)
+                architectureButton(.nsaOnly)
+                architectureButton(.lteOnly)
+            }
+            Text(architecturePersistenceDescription)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if model.controlState != nil, !model.canRestoreControlDefaults {
+                Label(
+                    L10n.text("Automatic defaults were not available to capture. Reconnect or power-cycle the modem, then close and reopen this panel before changing radio access mode.", language: language),
+                    systemImage: "info.circle"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+            }
+
+            if supportsRestoreDefaults {
+                Button(L10n.text("Restore automatic defaults", language: language)) {
+                    pendingControl = .restoreDefaults
+                }
+                .buttonStyle(.bordered)
+                .disabled(controlsDisabled || !model.canRestoreControlDefaults)
+            }
         }
     }
 
@@ -450,7 +495,7 @@ struct StatusPanel: View {
     }
 
     private func architectureButton(_ mode: NRArchitectureMode) -> some View {
-        let isSelected = model.nrSelectionPreferences?.architectureMode == mode
+        let isSelected = model.controlState?.architecture == mode
         return Button {
             pendingControl = .architecture(mode)
         } label: {
@@ -459,46 +504,87 @@ struct StatusPanel: View {
         }
         .buttonStyle(.bordered)
         .tint(isSelected ? AppPalette.blue : Color.gray)
-        .disabled(controlsDisabled || !model.canRestoreNRDefaults)
+        .disabled(controlsDisabled || !model.canRestoreControlDefaults)
     }
 
     private var controlsDisabled: Bool {
-        model.isControlBusy || pendingControl != nil
+        model.isRefreshing || model.isControlBusy || pendingControl != nil
     }
 
     private var bandLockControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L10n.text("Band locking", language: language))
                 .font(.caption.weight(.semibold))
-            Text(L10n.text("Enter comma-separated band numbers. Locks are temporary until VOS loses power; Restore automatic defaults restores the captured masks.", language: language))
+            Text(bandLockPersistenceDescription)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 7) {
-                TextField("NR: 77,78", text: $nrBandLockText)
-                    .textFieldStyle(.roundedBorder)
-                Button {
-                    pendingControl = .nrBandLock(Self.parseBands(nrBandLockText, prefix: "n") ?? [])
-                } label: {
-                    Text(L10n.text("Lock NR", language: language))
-                        .frame(width: 62)
+            if model.supportsControl(.nrBandLock) {
+                HStack(spacing: 7) {
+                    TextField("NR: 77,78", text: $nrBandLockText)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        pendingControl = .nrBandLock(Self.parseBands(nrBandLockText, prefix: "n") ?? [])
+                    } label: {
+                        Text(L10n.text("Lock NR", language: language))
+                            .frame(width: 62)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.controlState?.architecture == .lteOnly)
                 }
-                .buttonStyle(.bordered)
-                .disabled(model.nrSelectionPreferences?.architectureMode == .lteOnly)
             }
-            HStack(spacing: 7) {
-                TextField("LTE: 2,4,25,66", text: $lteBandLockText)
-                    .textFieldStyle(.roundedBorder)
-                Button {
-                    pendingControl = .lteBandLock(Self.parseBands(lteBandLockText, prefix: "b") ?? [])
-                } label: {
-                    Text(L10n.text("Lock LTE", language: language))
-                        .frame(width: 62)
+            if model.supportsControl(.lteBandLock) {
+                HStack(spacing: 7) {
+                    TextField("LTE: 2,4,25,66", text: $lteBandLockText)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        pendingControl = .lteBandLock(Self.parseBands(lteBandLockText, prefix: "b") ?? [])
+                    } label: {
+                        Text(L10n.text("Lock LTE", language: language))
+                            .frame(width: 62)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
         }
-        .disabled(controlsDisabled || !model.canRestoreNRDefaults)
+        .disabled(controlsDisabled || !model.canRestoreControlDefaults)
+    }
+
+    private var hasOperatorControls: Bool {
+        model.supportsControl(.networkScan) || model.supportsControl(.operatorSelection)
+    }
+
+    private var hasBandLockControls: Bool {
+        model.supportsControl(.nrBandLock) || model.supportsControl(.lteBandLock)
+    }
+
+    private var supportsRestoreDefaults: Bool {
+        model.supportsControl(.operatorSelection)
+            && model.supportsControl(.radioAccessPreference)
+            && model.supportsControl(.nrBandLock)
+            && model.supportsControl(.lteBandLock)
+    }
+
+    private var architecturePersistenceDescription: String {
+        switch model.controlState?.preferenceLifetime ?? .unknown {
+        case .untilPowerLoss:
+            return L10n.text("These radio preferences last until the modem loses power. Automatic restores the captured SA/NSA masks; LTE only disables NR while preserving the current LTE band mask.", language: language)
+        case .persistent:
+            return L10n.text("These radio preferences persist across restarts until they are changed or restored. Each change is read back and a failed change is rolled back.", language: language)
+        case .unknown:
+            return L10n.text("Each radio preference change is read back and a failed change is rolled back. The modem did not report whether the setting persists across restarts.", language: language)
+        }
+    }
+
+    private var bandLockPersistenceDescription: String {
+        switch model.controlState?.preferenceLifetime ?? .unknown {
+        case .untilPowerLoss:
+            return L10n.text("Enter comma-separated band numbers. Locks last until the modem loses power; Restore automatic defaults restores the captured masks.", language: language)
+        case .persistent:
+            return L10n.text("Enter comma-separated band numbers. Locks persist across restarts until changed or restored; Restore automatic defaults restores the modem's vendor defaults.", language: language)
+        case .unknown:
+            return L10n.text("Enter comma-separated band numbers. Locks are read back after each change; the modem did not report whether they persist across restarts.", language: language)
+        }
     }
 
     private var neighborMeasurements: some View {
@@ -513,7 +599,7 @@ struct StatusPanel: View {
                     .disabled(model.isRefreshing || model.isControlBusy)
             }
             if model.snapshot.lteNeighborCells.isEmpty {
-                Text(L10n.text("No LTE neighbors were reported. Standard QMI on this firmware does not provide an NR-neighbor list.", language: language))
+                Text(L10n.text("No LTE neighbors were reported.", language: language))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
@@ -815,6 +901,8 @@ private struct InlineControlConfirmation: View {
     @Environment(\.appLanguage) private var language
 
     let confirmation: ControlConfirmation
+    let modemKind: ModemKind?
+    let preferenceLifetime: ModemPreferenceLifetime
     let cancel: () -> Void
     let confirm: () -> Void
 
@@ -827,7 +915,11 @@ private struct InlineControlConfirmation: View {
                     .font(.caption.weight(.semibold))
             }
 
-            Text(confirmation.message(language: language))
+            Text(confirmation.message(
+                language: language,
+                modemKind: modemKind,
+                preferenceLifetime: preferenceLifetime
+            ))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -864,7 +956,7 @@ private enum ControlConfirmation: Identifiable {
     var id: String {
         switch self {
         case .scan: return "scan"
-        case let .manualNetwork(network): return "manual-\(network.plmn)"
+        case let .manualNetwork(network): return "manual-\(network.id)"
         case .automaticNetwork: return "automatic-network"
         case let .architecture(mode): return "architecture-\(mode.rawValue)"
         case let .nrBandLock(bands): return "nr-bands-\(bands.sorted())"
@@ -890,39 +982,66 @@ private enum ControlConfirmation: Identifiable {
         }
     }
 
-    func message(language: AppLanguage) -> String {
+    func message(
+        language: AppLanguage,
+        modemKind: ModemKind?,
+        preferenceLifetime: ModemPreferenceLifetime
+    ) -> String {
         switch self {
         case .scan:
-            return L10n.text("A full operator scan can take up to two minutes and may temporarily interrupt cellular data.", language: language)
+            return L10n.text("A full operator scan can take several minutes and may temporarily interrupt cellular data.", language: language)
         case let .manualNetwork(network):
             return L10n.format(
-                "VOS will try %@ (%@) without forcing LTE or NR. Registration and data may be interrupted.",
+                "The modem will try %@ (%@) using this exact scan result. Registration and data may be interrupted.",
                 language: language,
                 network.displayName,
                 network.formattedPLMN
             )
         case .automaticNetwork:
-            return L10n.text("VOS will return to automatic operator selection and the result will be verified with AT+COPS?.", language: language)
+            return L10n.text("The modem will return to automatic operator selection. The resulting selection mode will be read back and verified.", language: language)
         case .architecture:
-            return L10n.text("This temporarily changes the Qualcomm radio access mode and band masks. LTE only disables NR and preserves the current LTE mask. Exact values are read back; a failed change triggers an automatic rollback. Selected operator settings are not changed.", language: language)
+            return L10n.format(
+                "This changes the modem's radio access mode. Exact values are read back; a failed change triggers an automatic rollback. Selected operator settings are not changed. %@",
+                language: language,
+                persistenceSentence(preferenceLifetime, language: language)
+            )
         case let .nrBandLock(bands):
             return bands.isEmpty
                 ? L10n.text("The NR band list is invalid.", language: language)
                 : L10n.format(
-                    "Allow only NR bands %@. The exact masks will be read back and a failed change will be rolled back.",
+                    "Allow only NR bands %@. The exact values will be read back and a failed change will be rolled back. %@",
                     language: language,
-                    bands.sorted().map(String.init).joined(separator: ", ")
+                    bands.sorted().map(String.init).joined(separator: ", "),
+                    persistenceSentence(preferenceLifetime, language: language)
                 )
         case let .lteBandLock(bands):
             return bands.isEmpty
                 ? L10n.text("The LTE band list is invalid.", language: language)
                 : L10n.format(
-                    "Allow only LTE bands %@. The exact mask will be read back and a failed change will be rolled back.",
+                    "Allow only LTE bands %@. The exact values will be read back and a failed change will be rolled back. %@",
                     language: language,
-                    bands.sorted().map(String.init).joined(separator: ", ")
+                    bands.sorted().map(String.init).joined(separator: ", "),
+                    persistenceSentence(preferenceLifetime, language: language)
                 )
         case .restoreDefaults:
-            return L10n.text("This restores the original LTE, SA and NSA masks captured in this app session and returns operator selection to automatic. Both results will be verified.", language: language)
+            if modemKind == .zteMC7530CA {
+                return L10n.text("This clears configured LTE, SA and NSA band locks and LTE/NR cell locks, restores the modem's vendor band defaults, and returns operator selection to automatic. The result will be read back and verified.", language: language)
+            }
+            return L10n.text("This restores the original LTE, SA and NSA masks captured in this app session and returns operator selection to automatic. Both results will be read back and verified.", language: language)
+        }
+    }
+
+    private func persistenceSentence(
+        _ lifetime: ModemPreferenceLifetime,
+        language: AppLanguage
+    ) -> String {
+        switch lifetime {
+        case .untilPowerLoss:
+            return L10n.text("The setting lasts until the modem loses power.", language: language)
+        case .persistent:
+            return L10n.text("The setting persists across restarts until it is changed or restored.", language: language)
+        case .unknown:
+            return L10n.text("The modem did not report whether the setting persists across restarts.", language: language)
         }
     }
 

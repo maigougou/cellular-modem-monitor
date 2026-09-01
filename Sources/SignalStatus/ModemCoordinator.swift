@@ -356,6 +356,17 @@ actor ModemCoordinator {
     private let registry: ModemBackendRegistry
     private let discoverOperation: DiscoveryOperation
     private var activeModem: ActiveModem?
+    private struct CachedControlSession: Sendable {
+        let token: UUID
+        let activeModemID: String
+        let endpoint: ScopedEndpoint
+        let credentials: ModemCredentials
+        let session: any ModemControlSession
+    }
+    private var cachedControlSession: CachedControlSession?
+    /// Invalidates every read/open request that was suspended under an older
+    /// endpoint/credential routing decision.
+    private var routingGeneration: UInt64 = 0
     private(set) var lastDiscoveryReport: ModemDiscoveryReport?
 
     /// Production initializer. The topology provider and backend registry are
@@ -395,14 +406,141 @@ actor ModemCoordinator {
 
     func currentActiveModem() -> ActiveModem? { activeModem }
 
-    func invalidateActiveModem() {
+    func invalidateActiveModem() async {
+        let retiredSession = cachedControlSession?.session
+        routingGeneration &+= 1
         activeModem = nil
+        cachedControlSession = nil
+        // Clear actor-owned routing state before the await. Otherwise actor
+        // reentrancy could hand the retiring session to another caller.
+        await retiredSession?.invalidate()
+    }
+
+    /// Opens (or reuses) a backend-neutral control session for the modem that
+    /// was positively identified by the latest successful status read.
+    func controlSession(
+        credentials: ModemConnectionCredentials
+    ) async throws -> any ModemControlSession {
+        try Task.checkCancellation()
+        let generation = routingGeneration
+        guard let active = activeModem else {
+            throw ModemCoordinatorError.noMatchingModem
+        }
+        guard let registration = registry.registration(for: active.identity.kind) else {
+            throw ModemCoordinatorError.selectedBackendNotRegistered(active.identity.kind)
+        }
+        guard let controlBackend = registration.backend as? any ModemControlBackend else {
+            throw ModemBackendError.unsupportedCapability(.operatorSelection)
+        }
+        let resolved = try registration.statusCredentials.resolve(
+            kind: active.identity.kind,
+            credentials: credentials
+        )
+        if let cachedControlSession,
+           cachedControlSession.activeModemID == active.id,
+           cachedControlSession.endpoint == active.endpoint,
+           cachedControlSession.credentials == resolved {
+            try Task.checkCancellation()
+            return cachedControlSession.session
+        }
+        if let cachedControlSession {
+            let retiredSession = cachedControlSession.session
+            self.cachedControlSession = nil
+            await retiredSession.invalidate()
+            try Task.checkCancellation()
+            guard routingGeneration == generation,
+                  activeModem?.id == active.id,
+                  activeModem?.endpoint == active.endpoint
+            else {
+                throw ModemControlError.deviceChanged
+            }
+        }
+
+        let opened = try await controlBackend.openControlSession(
+            endpoint: active.endpoint,
+            credentials: resolved
+        )
+        if Task.isCancelled {
+            await opened.invalidate()
+            throw CancellationError()
+        }
+        guard routingGeneration == generation,
+              activeModem?.id == active.id,
+              activeModem?.endpoint == active.endpoint
+        else {
+            await opened.invalidate()
+            throw ModemControlError.deviceChanged
+        }
+        guard opened.kind == active.identity.kind else {
+            await opened.invalidate()
+            throw ModemCoordinatorError.discoveredKindMismatch(
+                expected: active.identity.kind,
+                actual: opened.kind
+            )
+        }
+        guard active.capabilities.contains(opened.capabilities) else {
+            await opened.invalidate()
+            throw ModemBackendError.unsupportedCapability(opened.capabilities)
+        }
+        guard let discoveredIdentifier = active.identity.stableIdentifier else {
+            await opened.invalidate()
+            throw ModemBackendError.identityUnavailable
+        }
+        guard opened.stableIdentifier == discoveredIdentifier else {
+            await opened.invalidate()
+            throw ModemControlError.deviceChanged
+        }
+        // Another caller may have completed an open while this one was
+        // suspended. Never expose two live sessions for the same modem.
+        while let existing = cachedControlSession {
+            let sameKey = existing.activeModemID == active.id &&
+                existing.endpoint == active.endpoint &&
+                existing.credentials == resolved
+            if sameKey {
+                await opened.invalidate()
+                try Task.checkCancellation()
+                guard routingGeneration == generation,
+                      cachedControlSession?.token == existing.token,
+                      activeModem?.id == active.id,
+                      activeModem?.endpoint == active.endpoint
+                else { throw ModemControlError.deviceChanged }
+                return existing.session
+            }
+            cachedControlSession = nil
+            await existing.session.invalidate()
+            if Task.isCancelled {
+                await opened.invalidate()
+                throw CancellationError()
+            }
+            guard routingGeneration == generation,
+                  activeModem?.id == active.id,
+                  activeModem?.endpoint == active.endpoint
+            else {
+                await opened.invalidate()
+                throw ModemControlError.deviceChanged
+            }
+            // Re-evaluate after the await: a third caller may have installed a
+            // different session while the actor was reentrant.
+        }
+        if Task.isCancelled {
+            await opened.invalidate()
+            throw CancellationError()
+        }
+        cachedControlSession = CachedControlSession(
+            token: UUID(),
+            activeModemID: active.id,
+            endpoint: active.endpoint,
+            credentials: resolved,
+            session: opened
+        )
+        return opened
     }
 
     func read(
         preferences: ModemConnectionPreferences,
         credentials: ModemConnectionCredentials
     ) async throws -> ModemReadResult {
+        let generation = routingGeneration
         var priorStructuredFailure: CoordinatedModemFailure?
         let allowedKinds = preferences.selection.allowedKinds(
             registeredKinds: registry.registeredKinds
@@ -433,6 +571,10 @@ actor ModemCoordinator {
                     active: current,
                     credentials: credentials
                 )
+                try Task.checkCancellation()
+                guard routingGeneration == generation else {
+                    throw ModemControlError.deviceChanged
+                }
                 return ModemReadResult(
                     activeModem: current,
                     snapshot: snapshot,
@@ -442,6 +584,10 @@ actor ModemCoordinator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
+                guard routingGeneration == generation else {
+                    throw ModemControlError.deviceChanged
+                }
                 // Re-snapshot topology and identify candidates after any failed
                 // read. The old endpoint is not trusted again unless discovery
                 // positively identifies it in the new topology.
@@ -453,10 +599,24 @@ actor ModemCoordinator {
                         message: error.localizedDescription
                     )
                 }
+                let retiredSession = cachedControlSession?.session
                 activeModem = nil
+                cachedControlSession = nil
+                // A failed status read makes the old route untrusted until
+                // discovery positively identifies it again. Retire its write
+                // session before probing any replacement candidate.
+                await retiredSession?.invalidate()
+                try Task.checkCancellation()
+                guard routingGeneration == generation else {
+                    throw ModemControlError.deviceChanged
+                }
             }
         } else if activeModem != nil {
+            let retiredSession = cachedControlSession?.session
             activeModem = nil
+            cachedControlSession = nil
+            await retiredSession?.invalidate()
+            try Task.checkCancellation()
         }
 
         guard !allowedKinds.isEmpty else {
@@ -468,6 +628,10 @@ actor ModemCoordinator {
             allowedKinds,
             credentials
         )
+        try Task.checkCancellation()
+        guard routingGeneration == generation else {
+            throw ModemControlError.deviceChanged
+        }
         lastDiscoveryReport = report
         let matches = rankedMatches(
             in: report,
@@ -500,6 +664,19 @@ actor ModemCoordinator {
                     active: active,
                     credentials: credentials
                 )
+                try Task.checkCancellation()
+                guard routingGeneration == generation else {
+                    throw ModemControlError.deviceChanged
+                }
+                if cachedControlSession?.activeModemID != active.id ||
+                    cachedControlSession?.endpoint != active.endpoint {
+                    let retiredSession = cachedControlSession?.session
+                    cachedControlSession = nil
+                    await retiredSession?.invalidate()
+                    guard routingGeneration == generation else {
+                        throw ModemControlError.deviceChanged
+                    }
+                }
                 activeModem = active
                 return ModemReadResult(
                     activeModem: active,
@@ -510,6 +687,10 @@ actor ModemCoordinator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
+                guard routingGeneration == generation else {
+                    throw ModemControlError.deviceChanged
+                }
                 failures.append(CoordinatedModemFailure(
                     kind: match.candidate.kind,
                     category: ModemFailureClassifier.category(of: error),
