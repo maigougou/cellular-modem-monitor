@@ -56,7 +56,9 @@ only when the active backend declares that capability.
 
 The current Settings panel contains the Automatic/VOS/ZTE selector, each
 backend's address and credential fields, polling and display preferences, and
-the runtime language selector. Passwords are saved to macOS Keychain.
+the runtime language selector. Passwords are saved unencrypted in an app-local
+file whose directory/file permissions are `0700`/`0600`; the app never requests
+Keychain access.
 
 ## Menu-bar labels
 
@@ -169,14 +171,14 @@ no observable registration change.
 
 ### ZTE G5 MAX / MC7530CA
 
-Discovery uses anonymous UBus reads to require all three target identifiers:
-the expected network-info schema, an exact `MC7530CA` product prefix from
-`zwrt_common_info.common_config.wa_inner_version`, and a SHA-256 digest of
-`zwrt_zte_mdm.device_info.modem_msn`. It never receives the configured Web
-password. Status reads then authenticate with the Web administrator password,
-recheck the exact product identity and reuse a scoped UBus session for that
-endpoint and interface. Before the coordinator exposes writes, the authenticated
-session's modem-MSN digest must match the digest returned by discovery.
+Discovery first uses anonymous UBus reads to require the expected network-info
+schema and an exact `MC7530CA` product prefix from
+`zwrt_common_info.common_config.wa_inner_version`. Only after both checks match
+does it authenticate with the configured Web administrator password and call
+the verified `zwrt_zte_mdm.api/get_modem_msn` method. The app retains only a
+SHA-256 digest of that value as the physical-device identity, reuses the scoped
+authenticated session for that endpoint/interface, and requires the same
+identity before exposing any write operation.
 
 Normal polling calls the read-only `zte_nwinfo_api.nwinfo_get_netinfo` method.
 The parser maps reported operator/PLMN, LTE and NR bands, channels, bandwidth,
@@ -292,18 +294,24 @@ the active modem, endpoint or credential invalidates that session.
 
 ## Connection and security notes
 
-- Modem passwords are stored in the current macOS account's Keychain. They are
-  not stored in UserDefaults, endpoint caches, management URLs or diagnostics.
+- Modem passwords are stored unencrypted in
+  `~/Library/Application Support/Cellular Modem Monitor/credentials.json`.
+  Its containing directory is mode `0700` and the file is mode `0600`, so only
+  the current macOS account can read it. Software running as that same account
+  can still read it. Passwords are not included in UserDefaults, endpoint
+  caches, management URLs or diagnostics.
 - On upgrade, a legacy VOS password previously stored in UserDefaults is moved
-  to Keychain and the old preference is deleted after a successful migration.
-  If Keychain is temporarily unavailable, the old value is retained only so a
-  later launch can retry the migration.
-- ZTE discovery is anonymous and reads only the schema plus the exact product
-  field and modem-MSN digest needed to bind a candidate. Status collection
-  starts only after the user supplies a valid Web administrator password in
-  Settings. Each authenticated session and its credential failure gate remain
-  in process memory and are isolated to one endpoint/interface. Control writes
-  additionally require its modem-MSN digest to match discovery.
+  to this local file and the old preference is deleted only after a successful
+  write. Credentials saved by v1.3.0–v1.3.3 in macOS Keychain are never read or
+  deleted by this version; enter them once in Settings to use the local file.
+- ZTE discovery first reads only the anonymous schema and exact product field.
+  After those match MC7530CA, it authenticates and calls the verified
+  `get_modem_msn` method, retaining only its SHA-256 digest to bind the physical
+  device. Status collection starts only after the user supplies a valid Web
+  administrator password in Settings. Each authenticated session and its
+  credential failure gate remain in process memory and are isolated to one
+  endpoint/interface. Control writes require the modem-MSN digest to match the
+  authenticated discovery identity.
 - Different VOS units can share `192.168.225.1` while using different SSH host
   keys. For this local modem path, the VOS backend disables SSH host-key
   verification and does not modify `~/.ssh/known_hosts`; point it only at a
@@ -353,10 +361,8 @@ SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
 ```
 
 Without `SIGNING_IDENTITY`, the build script intentionally creates an ad-hoc
-signed local build and prints a warning. Because an ad-hoc binary's signing
-identity can change when it is rebuilt, macOS may ask for Keychain access again
-after an upgrade. The app reports Keychain read/write failures in Settings and
-does not silently replace an existing credential when Keychain access fails.
+signed local build and prints a warning. macOS may require the user to approve
+an ad-hoc build again after an upgrade. The app does not access macOS Keychain.
 
 The packaged application archive is written to:
 

@@ -23,7 +23,7 @@ enum ModemSelection: String, CaseIterable, Codable, Hashable, Sendable {
 
 /// Non-secret connection preferences suitable for UserDefaults or a property
 /// list. Passwords are supplied separately through `ModemConnectionCredentials`
-/// and should be backed by Keychain.
+/// and persisted only by the dedicated credential store.
 struct ModemConnectionPreferences: Codable, Equatable, Sendable {
     var selection: ModemSelection
     var manualEndpoints: [ModemEndpointPreference]
@@ -90,7 +90,8 @@ struct ModemEndpointPreference: Codable, Equatable, Hashable, Sendable {
 }
 
 /// Secrets loaded for the current process. Keeping them out of
-/// `ModemConnectionPreferences` prevents accidental serialization.
+/// `ModemConnectionPreferences` prevents accidental inclusion in endpoint or
+/// discovery caches.
 struct ModemConnectionCredentials: Equatable, Sendable {
     private var values: [ModemKind: ModemCredentials]
 
@@ -107,6 +108,10 @@ struct ModemConnectionCredentials: Equatable, Sendable {
 enum ModemCredentialPolicy: Equatable, Sendable {
     /// Identification or reads must not receive a configured password.
     case anonymous
+    /// Supply the configured credential when present, otherwise let the
+    /// backend perform an anonymous product preflight. A matching backend must
+    /// still fail before protected reads when the credential is absent.
+    case configuredOrAnonymous(ModemCredentialKind)
     /// Use the configured credential only if it has the expected transport.
     case configured(ModemCredentialKind)
 
@@ -117,6 +122,15 @@ enum ModemCredentialPolicy: Equatable, Sendable {
         switch self {
         case .anonymous:
             return .none
+        case let .configuredOrAnonymous(expected):
+            guard let configured = credentials[kind] else { return .none }
+            guard configured.kind == expected else {
+                throw ModemBackendError.incompatibleCredentials(
+                    expected: expected,
+                    actual: configured.kind
+                )
+            }
+            return configured
         case let .configured(expected):
             guard let configured = credentials[kind] else {
                 throw ModemBackendError.credentialsRequired(expected)
@@ -283,7 +297,7 @@ struct ModemBackendRegistry: Sendable {
             ModemBackendRegistration(
                 backend: MC7530Backend(httpTransport: zteHTTPTransport),
                 discoveryProfile: zteProfile,
-                identificationCredentials: .anonymous,
+                identificationCredentials: .configuredOrAnonymous(.web),
                 statusCredentials: .configured(.web)
             )
         ])
@@ -320,8 +334,8 @@ struct ModemReadResult: Equatable, Sendable {
 }
 
 /// Registry-backed probe used by the production discovery engine. Credential
-/// policy is evaluated before the backend call, guaranteeing that the ZTE
-/// identity probe remains anonymous while VOS identification uses SSH.
+/// policy is evaluated before the backend call. ZTE first fingerprints its
+/// anonymous schema, then authenticates only that matching local endpoint.
 private struct RegistryModemDiscoveryProbe: ModemDiscoveryProbing {
     let registry: ModemBackendRegistry
     let credentials: ModemConnectionCredentials
@@ -332,10 +346,26 @@ private struct RegistryModemDiscoveryProbe: ModemDiscoveryProbing {
             kind: candidate.kind,
             credentials: credentials
         )
-        guard let identity = try await registration.backend.identify(
-            endpoint: candidate.endpoint,
-            credentials: identityCredentials
-        ) else { return nil }
+        let identity: ModemIdentity
+        do {
+            guard let identified = try await registration.backend.identify(
+                endpoint: candidate.endpoint,
+                credentials: identityCredentials
+            ) else { return nil }
+            identity = identified
+        } catch {
+            let category = ModemFailureClassifier.category(of: error)
+            if case .configuredOrAnonymous = registration.identificationCredentials,
+               category == .authentication {
+                // This policy promises the backend will request credentials
+                // only after anonymous product checks have matched.
+                throw ModemDiscoveryConfirmedProductFailure(
+                    description: String(describing: error),
+                    modemFailureCategory: category
+                )
+            }
+            throw error
+        }
         guard identity.kind == candidate.kind else {
             throw ModemCoordinatorError.discoveredKindMismatch(
                 expected: candidate.kind,
@@ -776,8 +806,9 @@ actor ModemCoordinator {
         var seen: Set<CoordinatedModemFailure> = []
         var failures: [CoordinatedModemFailure] = []
         for attempt in report.attempts {
-            guard case let .failed(message, category) = attempt.result,
-                  includeAll || !attempt.candidate.sources.isDisjoint(with: strongEvidence),
+            guard case let .failed(message, category, confirmedProduct) = attempt.result,
+                  includeAll || confirmedProduct ||
+                    !attempt.candidate.sources.isDisjoint(with: strongEvidence),
                   !message.isEmpty
             else { continue }
             let failure = CoordinatedModemFailure(

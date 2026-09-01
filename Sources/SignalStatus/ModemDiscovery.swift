@@ -92,7 +92,10 @@ struct ModemDiscoveryProfile: Hashable, Sendable {
         ModemDiscoveryProfile(
             kind: .zteMC7530CA,
             defaultBaseURLs: [URL(string: "http://192.168.254.1")!],
-            probeTimeoutNanoseconds: 2_000_000_000
+            // Identification now performs anonymous schema/model checks,
+            // login, and authenticated model/MSN verification. Allow the
+            // complete local RPC chain to finish on a busy Wi-Fi interface.
+            probeTimeoutNanoseconds: 5_000_000_000
         ),
         ModemDiscoveryProfile(
             kind: .vos5G,
@@ -345,10 +348,20 @@ struct ModemCandidateGenerator: Sendable {
 }
 
 /// Discovery probes are intentionally transport-agnostic. A production probe
-/// can call a backend's anonymous `identify`, while tests inject a closure and
-/// never touch the network.
+/// can call a backend's anonymous or two-stage `identify`, while tests inject
+/// a closure and never touch the network.
 protocol ModemDiscoveryProbing: Sendable {
     func identify(candidate: ModemDiscoveryCandidate) async throws -> ModemIdentity?
+}
+
+/// Carries structured evidence that a backend completed its anonymous product
+/// preflight before authentication became necessary. This lets routed
+/// known-default candidates surface the real credential prompt without making
+/// every weak-topology authentication error look like a modem match.
+struct ModemDiscoveryConfirmedProductFailure: Error, CustomStringConvertible,
+    ModemFailureCategorizing, Sendable {
+    let description: String
+    let modemFailureCategory: ModemFailureCategory
 }
 
 struct ClosureModemDiscoveryProbe: ModemDiscoveryProbing {
@@ -369,7 +382,11 @@ enum ModemDiscoveryProbeResult: Equatable, Sendable {
     case matched(ModemIdentity)
     case notMatched
     case timedOut
-    case failed(String, category: ModemFailureCategory)
+    case failed(
+        String,
+        category: ModemFailureCategory,
+        confirmedProduct: Bool
+    )
 }
 
 struct ModemDiscoveryAttempt: Equatable, Sendable {
@@ -552,7 +569,8 @@ struct ModemDiscoveryEngine: Sendable {
                     } catch {
                         result = .failed(
                             String(describing: error),
-                            category: ModemFailureClassifier.category(of: error)
+                            category: ModemFailureClassifier.category(of: error),
+                            confirmedProduct: error is ModemDiscoveryConfirmedProductFailure
                         )
                     }
                     race.resolve(result)

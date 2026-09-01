@@ -67,9 +67,8 @@ chmod 755 "$staging_app/Contents/MacOS/CellularModemMonitor" "$staging_app/Conte
 chmod 644 "$staging_app/Contents/Info.plist" "$staging_app/Contents/Resources/AppIcon.icns"
 xattr -cr "$staging_app"
 if [ "$signing_identity" = "-" ]; then
-  # Useful for local/source builds, but its cdhash changes when the executable
-  # changes. A public release should provide SIGNING_IDENTITY so Keychain can
-  # recognize the same signed application across upgrades.
+  # Useful for local/source builds. A public release should still provide a
+  # stable Developer ID identity for normal Gatekeeper upgrade continuity.
   codesign --force --sign - --timestamp=none "$staging_app" >/dev/null
 else
   codesign --force --options runtime --timestamp --sign "$signing_identity" "$staging_app" >/dev/null

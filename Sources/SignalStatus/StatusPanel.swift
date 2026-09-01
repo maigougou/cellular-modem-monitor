@@ -701,7 +701,7 @@ struct StatusPanel: View {
                 }
             }
 
-            Text(L10n.text("Passwords are stored in macOS Keychain. Addresses, selection and display preferences are stored in app settings.", language: language))
+            Text(L10n.text("Passwords are stored unencrypted in a private local file readable only by your macOS account. They are never stored in diagnostics or management URLs.", language: language))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 

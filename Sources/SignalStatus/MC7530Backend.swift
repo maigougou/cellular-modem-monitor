@@ -3,9 +3,10 @@ import Foundation
 /// Authenticated status and control adapter for the MC7530CA / G5 MAX Web
 /// UBus API.
 ///
-/// Discovery is anonymous. The administrator credential is accepted only by
-/// authenticated status/control calls, retained in memory with its scoped
-/// session, and never persisted or logged by this backend.
+/// Discovery performs only schema/model preflight anonymously. Once those
+/// fields identify this product family, the administrator credential is used
+/// to fetch the device-unique identity and is retained only with its scoped
+/// authenticated session; this backend never persists or logs it.
 actor MC7530Backend: ModemControlBackend {
     nonisolated let kind = ModemKind.zteMC7530CA
     nonisolated let capabilities: ModemCapability = [
@@ -42,7 +43,6 @@ actor MC7530Backend: ModemControlBackend {
         endpoint: ScopedEndpoint,
         credentials: ModemCredentials
     ) async throws -> ModemIdentity? {
-        _ = credentials
         let transport = try makeTransport(endpoint: endpoint)
         guard try await transport.hasMC7530Schema() else { return nil }
         let modelReply = try await transport.call(
@@ -62,28 +62,34 @@ actor MC7530Backend: ModemControlBackend {
               reportedModel.uppercased().hasPrefix(Self.requiredModelPrefix)
         else { return nil }
 
-        let identityReply = try await transport.call(
-            sessionID: ZTEUBusTransport.zeroSessionID,
-            object: "uci",
-            method: "get",
-            parameters: [
-                "config": .string("zwrt_zte_mdm"),
-                "section": .string("device_info")
-            ],
-            mode: .read,
-            zTag: "zwrt_zte_mdm"
+        // This retail firmware exposes its model anonymously but not the
+        // device-unique modem_msn field. Authenticate only after the anonymous
+        // schema/model checks, then use the same verified identity method that
+        // protects every persistent control session.
+        let context = try await authenticatedSession(
+            endpoint: endpoint,
+            credentials: credentials
         )
-        guard identityReply.status == 0,
-              let msn = identityReply.payload?["values"]?["modem_msn"]?.stringValue
-        else { throw ModemBackendError.identityUnavailable }
-        let fingerprint = try MC7530ControlSession.fingerprint(modemMSN: msn)
-        return ModemIdentity(
-            kind: kind,
-            manufacturer: "ZTE",
-            model: "MC7530CA",
-            displayName: "ZTE MC7530CA / G5 MAX",
-            stableIdentifier: fingerprint
-        )
+        do {
+            try await validateTargetModel(session: context.session)
+            let fingerprint = try await MC7530ControlSession.fetchFingerprint(
+                session: context.session
+            )
+            return ModemIdentity(
+                kind: kind,
+                manufacturer: "ZTE",
+                model: "MC7530CA",
+                displayName: "ZTE MC7530CA / G5 MAX",
+                stableIdentifier: fingerprint
+            )
+        } catch {
+            rememberAuthenticationFailureIfCurrent(
+                error,
+                scopeKey: context.scopeKey,
+                token: context.token
+            )
+            throw error
+        }
     }
 
     func fetchSnapshot(

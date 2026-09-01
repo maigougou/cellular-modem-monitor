@@ -101,7 +101,8 @@ final class StatusModel: ObservableObject {
     private enum Key {
         static let host = "deviceHost"
         static let username = "sshUsername"
-        // Legacy only. New versions migrate this value to Keychain and delete it.
+        // Legacy only. New versions migrate this value to the private local
+        // credential file and then delete it from UserDefaults.
         static let password = "sshPassword"
         static let zteHost = "zteDeviceHost"
         static let modemSelection = "modemSelection"
@@ -122,7 +123,7 @@ final class StatusModel: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
-        credentialStore: any CredentialStoring = KeychainCredentialStore.shared
+        credentialStore: any CredentialStoring = LocalCredentialStore.shared
     ) {
         self.defaults = defaults
         self.credentialStore = credentialStore
@@ -160,8 +161,8 @@ final class StatusModel: ObservableObject {
                 credentialLoadErrors.append(message)
             }
         } catch {
-            // A Keychain denial is not the same as a missing item. Do not fall
-            // back to a different password and risk overwriting the stored one.
+            // An unreadable local file is not the same as a missing item. Do
+            // not overwrite a credential that may still exist on disk.
             password = ""
             let message = error.localizedDescription
             initialCredentialStates[.vos5G] = .unavailable(message)
@@ -596,7 +597,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.3"
+        ) as? String ?? "1.3.4"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -1209,7 +1210,7 @@ final class StatusModel: ObservableObject {
             defaults.removeObject(forKey: Key.password)
         } catch {
             // Keep the legacy value as the only durable copy and mark it
-            // unavailable so Save retries the Keychain write before deletion.
+            // unavailable so Save retries the local-file write before cleanup.
             return CredentialLoadResult(
                 password: legacy,
                 state: .unavailable(error.localizedDescription)
@@ -1264,8 +1265,21 @@ final class StatusModel: ObservableObject {
            case let .authenticationFailed(kind, _) = coordinatorError {
             switch kind {
             case .zteMC7530CA:
+                if ztePassword.isEmpty {
+                    return L10n.text(
+                        "Enter the ZTE Web administrator password in Settings.",
+                        language: language
+                    )
+                }
                 return L10n.text("The ZTE administrator password was rejected.", language: language)
             case .vos5G:
+                if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                    password.isEmpty {
+                    return L10n.text(
+                        "Enter the VOS SSH username and password in Settings.",
+                        language: language
+                    )
+                }
                 return L10n.text("The modem SSH username or password was rejected.", language: language)
             case nil:
                 return L10n.text("Authentication failed", language: language)

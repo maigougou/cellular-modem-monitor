@@ -46,7 +46,8 @@
 MC7530CA 偏好会持久保存，直到再次修改或恢复。界面只显示当前后端声明的能力。
 
 当前设置面板包含自动/VOS/ZTE 选择器、各后端的地址与凭据输入、轮询与显示偏好，
-以及运行时语言选择器。密码会保存到 macOS Keychain。
+以及运行时语言选择器。密码以未加密形式保存在应用本地文件中，目录/文件权限为
+`0700`/`0600`；应用不会请求 Keychain 权限。
 
 ## 菜单栏显示规则
 
@@ -145,12 +146,12 @@ PLMN、也未产生可观察注册变化的换卡。
 
 ### ZTE G5 MAX / MC7530CA
 
-发现阶段通过匿名 UBus 读取同时核对三项目标标识：预期网络信息 schema、
-`zwrt_common_info.common_config.wa_inner_version` 中精确的 `MC7530CA` 产品前缀，
-以及 `zwrt_zte_mdm.device_info.modem_msn` 的 SHA-256 摘要；此阶段不会收到设置中
-保存的 Web 密码。读取状态时才使用 Web 管理员密码认证，再次核对精确产品身份，并
-为对应 endpoint 与接口复用限定范围的 UBus session。Coordinator 只有在认证 session
-的 modem-MSN 摘要与发现阶段一致后才会开放写入。
+发现阶段先通过匿名 UBus 读取核对预期网络信息 schema，以及
+`zwrt_common_info.common_config.wa_inner_version` 中精确的 `MC7530CA` 产品前缀。
+两项都匹配后，应用才使用设置中的 Web 管理员密码认证并调用已验证的
+`zwrt_zte_mdm.api/get_modem_msn` 方法。应用只保留该值的 SHA-256 摘要作为物理设备
+身份，为对应 endpoint/接口复用限定范围的认证 UBus session，并要求身份一致后才开放
+任何写入操作。
 
 常规轮询调用只读方法 `zte_nwinfo_api.nwinfo_get_netinfo`。解析器映射设备实际
 报告的运营商/PLMN、LTE/NR 频段、信道、带宽、PCI、Cell ID、信号指标和 LTE
@@ -240,14 +241,18 @@ DSD 通过明确的 service-option 位返回 SA/NSA。QRTR 节点与端口会在
 
 ## 连接与安全说明
 
-- Modem 密码保存在当前 macOS 账户的 Keychain 中，不会保存到 UserDefaults、
-  endpoint 缓存、管理 URL 或诊断信息中。
-- 升级时，旧版本曾保存在 UserDefaults 中的 VOS 密码会迁移到 Keychain；迁移成功
-  后才删除旧偏好值。如果 Keychain 暂时不可用，旧值只会为之后再次尝试迁移而保留。
-- ZTE 发现阶段匿名，只读取绑定候选所需的 schema、精确产品字段和 modem-MSN 摘要；
-  只有用户在设置中提供有效 Web 管理员密码后才会读取状态。每个认证 session 及其
-  凭据失败门禁仅保留在进程内存中，并分别限定到一个 endpoint/接口；控制写入还要求
-  modem-MSN 摘要与发现阶段一致。
+- Modem 密码以未加密形式保存在
+  `~/Library/Application Support/Cellular Modem Monitor/credentials.json`。
+  所在目录权限为 `0700`，文件权限为 `0600`，只有当前 macOS 账户能够读取；但以同一
+  账户运行的软件仍可读取它。密码不会写入 UserDefaults、endpoint 缓存、管理 URL
+  或诊断信息。
+- 升级时，旧版本曾保存在 UserDefaults 中的 VOS 密码会迁移到这个本地文件；只有写入
+  成功后才删除旧偏好值。v1.3.0–v1.3.3 保存到 macOS Keychain 的凭据不会被本版本
+  读取或删除；请在设置中重新输入一次。
+- ZTE 发现先匿名读取 schema 和精确产品字段；确认是 MC7530CA 后才认证并调用已验证的
+  `get_modem_msn`，只保留其 SHA-256 摘要以绑定物理设备。只有用户在设置中提供有效
+  Web 管理员密码后才会读取状态。每个认证 session 及凭据失败门禁仅保留在进程内存中，
+  并分别限定到一个 endpoint/接口；控制写入要求 modem-MSN 摘要与认证发现身份一致。
 - 不同 VOS 可能共用 `192.168.225.1`，但使用不同 SSH host key。针对这条本地
   modem 链路，VOS 后端会关闭 SSH host-key 验证，也不会修改
   `~/.ssh/known_hosts`；请只连接可信设备和网络。
@@ -288,9 +293,8 @@ SIGNING_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
 ```
 
 未设置 `SIGNING_IDENTITY` 时，构建脚本会有意生成仅供本地使用的 ad-hoc
-签名版本并输出警告。ad-hoc 二进制在重新构建后签名身份可能变化，因此升级后
-macOS 可能再次请求 Keychain 访问权限。若 Keychain 读取或写入失败，应用会在
-设置中显示错误，并且不会静默替换已经存在的凭据。
+签名版本并输出警告。升级后 macOS 可能要求用户重新批准 ad-hoc 构建。应用不会访问
+macOS Keychain。
 
 生成的应用压缩包位于：
 
