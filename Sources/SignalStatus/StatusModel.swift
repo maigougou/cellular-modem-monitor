@@ -23,6 +23,23 @@ enum ControlPresentationInvalidation: Equatable, Sendable {
     }
 }
 
+enum ModemOperationInterruption {
+    static func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError
+    }
+
+    /// Discovery is intentionally nonthrowing and may translate a cancelled
+    /// probe into a timeout/no-match result. The task flag therefore remains
+    /// authoritative for status refreshes even when the final error was
+    /// wrapped by a lower layer.
+    static func shouldIgnoreRefreshFailure(
+        _ error: Error,
+        taskIsCancelled: Bool
+    ) -> Bool {
+        taskIsCancelled || isCancellation(error)
+    }
+}
+
 @MainActor
 final class StatusModel: ObservableObject {
     @Published private(set) var snapshot = DeviceSnapshot.empty
@@ -579,7 +596,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.2"
+        ) as? String ?? "1.3.3"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -650,6 +667,7 @@ final class StatusModel: ObservableObject {
     }
 
     private func refresh() async {
+        guard !Task.isCancelled else { return }
         guard refreshCoalescer.request(
             isRefreshing: isRefreshing,
             isControlBusy: isControlBusy
@@ -658,6 +676,7 @@ final class StatusModel: ObservableObject {
         repeat {
             refreshCoalescer.beginRefresh()
             await performRefresh()
+            if Task.isCancelled { return }
         } while refreshCoalescer.shouldDrain(
             isRefreshing: isRefreshing,
             isControlBusy: isControlBusy
@@ -678,6 +697,10 @@ final class StatusModel: ObservableObject {
                 preferences: currentConnectionPreferences,
                 credentials: currentCredentials
             )
+            // Detached SSH work and nonthrowing discovery can finish after the
+            // polling task has been cancelled. Never commit that retired
+            // result to the visible model.
+            try Task.checkCancellation()
             guard settingsGeneration == generation else { return }
             let latest = result.snapshot
             let previousActiveModemID = activeModem?.id
@@ -717,6 +740,10 @@ final class StatusModel: ObservableObject {
             lastError = nil
             updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged)
         } catch {
+            guard !ModemOperationInterruption.shouldIgnoreRefreshFailure(
+                error,
+                taskIsCancelled: Task.isCancelled
+            ) else { return }
             guard settingsGeneration == generation else { return }
             consecutiveFailures += 1
             lastError = localizedError(error)
@@ -816,6 +843,10 @@ final class StatusModel: ObservableObject {
             } else {
                 result = ModemControlResult(state: try await session.refresh())
             }
+            // A returned control result is already authoritative. The session
+            // observed no cancellation at any suspension point and may have
+            // completed a persistent write, so commit that result rather than
+            // discarding it for a cancellation that arrived afterward.
             guard activeModem?.id == expectedModemID,
                   activeModem?.endpoint == expectedEndpoint,
                   settingsGeneration == expectedSettingsGeneration
@@ -826,6 +857,23 @@ final class StatusModel: ObservableObject {
             controlNotice = controlNotice(for: operation, result: result)
         } catch {
             let operationError = error
+            // The backend session owns cancellation-safe rollback for any
+            // ambiguous persistent write. Once it returns CancellationError,
+            // do not turn an intentional interruption into visible failure.
+            // Its cleanup may intentionally settle on a different verified
+            // state (for example automatic operator selection), so reconcile
+            // the panel without starting a second recovery sequence.
+            if ModemOperationInterruption.isCancellation(operationError) {
+                if let openedSession {
+                    await reconcileControlStateAfterCancellation(
+                        session: openedSession,
+                        expectedModemID: expectedModemID,
+                        expectedEndpoint: expectedEndpoint,
+                        expectedSettingsGeneration: expectedSettingsGeneration
+                    )
+                }
+                return
+            }
             // A settings save owns the new UI/coordinator generation. The old
             // session has already performed its private recovery; do not let
             // its completion clear or annotate the newly selected modem.
@@ -865,6 +913,46 @@ final class StatusModel: ObservableObject {
             }
             guard settingsGeneration == expectedSettingsGeneration else { return }
             controlError = localizedError(operationError)
+        }
+    }
+
+    private func reconcileControlStateAfterCancellation(
+        session: any ModemControlSession,
+        expectedModemID: String,
+        expectedEndpoint: ScopedEndpoint,
+        expectedSettingsGeneration: UInt64
+    ) async {
+        guard settingsGeneration == expectedSettingsGeneration,
+              activeModem?.id == expectedModemID,
+              activeModem?.endpoint == expectedEndpoint
+        else { return }
+
+        // The calling operation is cancelled. Run only an authoritative read
+        // in a fresh task; backend sessions have already completed any needed
+        // write recovery before exposing CancellationError.
+        let reconciliation = Task { try await session.refresh() }
+        do {
+            let reconciled = try await reconciliation.value
+            guard settingsGeneration == expectedSettingsGeneration,
+                  activeModem?.id == expectedModemID,
+                  activeModem?.endpoint == expectedEndpoint
+            else { return }
+            applyControlResult(ModemControlResult(state: reconciled))
+        } catch {
+            guard settingsGeneration == expectedSettingsGeneration else { return }
+            if error as? ModemControlError == .deviceChanged {
+                clearControlState()
+                activeModem = nil
+                if let coordinator {
+                    await coordinator.invalidateActiveModem()
+                }
+            } else if activeModem?.id == expectedModemID,
+                      activeModem?.endpoint == expectedEndpoint {
+                // A failed quiet reconciliation must not leave values that no
+                // longer describe the modem. The user can reload the controls
+                // without being shown the intentional cancellation as an error.
+                clearControlState()
+            }
         }
     }
 

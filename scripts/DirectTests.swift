@@ -114,6 +114,25 @@ enum DirectTests {
                 "control presentation invalidation distinguishes PLMN and modem changes",
                 failures: &failures
             )
+            check(
+                ModemOperationInterruption.isCancellation(CancellationError()) &&
+                    !ModemOperationInterruption.isCancellation(
+                        ModemControlError.commandRejected("fixture")
+                    ) &&
+                    ModemOperationInterruption.shouldIgnoreRefreshFailure(
+                        ModemCoordinatorError.noMatchingModem,
+                        taskIsCancelled: true
+                    ) &&
+                    !ModemOperationInterruption.shouldIgnoreRefreshFailure(
+                        ModemControlError.rollbackFailed(
+                            operation: "fixture",
+                            rollback: "fixture"
+                        ),
+                        taskIsCancelled: false
+                    ),
+                "cancellation is quiet while real refresh/control failures remain visible",
+                failures: &failures
+            )
 
             let priorSelection = OperatorSelection(
                 mode: .manual,
@@ -974,6 +993,7 @@ enum DirectTests {
         var failures: [String] = []
         await runCredentialTests(failures: &failures)
         runFailureClassificationTests(failures: &failures)
+        await runVOSCancellationTests(failures: &failures)
         runMC7530ParserTests(failures: &failures)
         await runZTEAuthTests(failures: &failures)
         await runMC7530ControlTests(failures: &failures)
@@ -1166,6 +1186,181 @@ enum DirectTests {
             "authentication-like English text does not alter structured classification",
             failures: &failures
         )
+    }
+
+    private static func runVOSCancellationTests(failures: inout [String]) async {
+        let configuration = DeviceConfiguration(
+            host: "192.168.225.1",
+            username: "root",
+            password: "fixture",
+            refreshInterval: 30
+        )
+        let selectedNetwork = CellularNetwork(
+            longName: "Fixture Carrier",
+            shortName: "Fixture",
+            plmn: "00101",
+            availability: .available,
+            accessTechnologies: [.lte]
+        )
+
+        do {
+            let transport = DirectVOSControlTransport(suspendManualSelectionOnce: true)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration
+            )
+            let operation = Task {
+                try await session.perform(.selectNetwork(selectedNetwork))
+            }
+            await transport.waitForManualMutation()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS cancelled manual selection must not report success")
+            } catch {
+                check(
+                    error is CancellationError,
+                    "VOS preserves cancellation after verified automatic recovery",
+                    failures: &failures
+                )
+            }
+            let reconciled = try await session.refresh()
+            let state = await transport.snapshot()
+            check(
+                state.selection.mode == .automatic &&
+                    state.preferences == DirectVOSControlTransport.baselinePreferences &&
+                    state.automaticWrites == 1 &&
+                    state.preferenceWrites >= 2 &&
+                    reconciled.operatorSelection?.mode == .automatic &&
+                    reconciled.architecture == .automatic,
+                "VOS cancelled manual selection restores and reconciles operator/radio state",
+                failures: &failures
+            )
+        } catch {
+            failures.append("VOS cancellation-safe manual selection: \(error)")
+        }
+
+        do {
+            let transport = DirectVOSControlTransport(
+                suspendManualSelectionOnce: true,
+                automaticFailures: 1
+            )
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration
+            )
+            let operation = Task {
+                try await session.perform(.selectNetwork(selectedNetwork))
+            }
+            await transport.waitForManualMutation()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS failed cancellation recovery must not report success")
+            } catch {
+                check(
+                    !(error is CancellationError) &&
+                        error.localizedDescription.contains("state is unknown"),
+                    "VOS failed cancellation recovery remains a visible unknown-state error",
+                    failures: &failures
+                )
+            }
+        } catch {
+            failures.append("VOS cancellation recovery failure: \(error)")
+        }
+
+        do {
+            let transport = DirectVOSControlTransport(suspendAutomaticSelectionOnce: true)
+            let session = try await VOSControlSession.open(
+                client: transport,
+                configuration: configuration
+            )
+            _ = try await session.refresh()
+            await transport.seedNondefaultState()
+            let operation = Task {
+                try await session.perform(.restoreDefaults)
+            }
+            await transport.waitForAutomaticMutation()
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("VOS cancelled restore must not report success")
+            } catch {
+                check(
+                    error is CancellationError,
+                    "VOS preserves cancellation after completing restore",
+                    failures: &failures
+                )
+            }
+            let reconciled = try await session.refresh()
+            let state = await transport.snapshot()
+            check(
+                state.selection.mode == .automatic &&
+                    state.preferences == DirectVOSControlTransport.baselinePreferences &&
+                    state.automaticWrites == 2 &&
+                    state.preferenceWrites == 1 &&
+                    reconciled.operatorSelection?.mode == .automatic &&
+                    reconciled.architecture == .automatic,
+                "VOS cancelled restore completes both steps and reconciles authoritative state",
+                failures: &failures
+            )
+        } catch {
+            failures.append("VOS cancellation-safe restore defaults: \(error)")
+        }
+
+        do {
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SignalStatusSSHCancel-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(
+                at: temporaryDirectory,
+                withIntermediateDirectories: true
+            )
+            defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+            let executable = temporaryDirectory.appendingPathComponent("fake-ssh.sh")
+            let started = temporaryDirectory.appendingPathComponent("started")
+            let script = """
+            #!/bin/sh
+            : > '\(started.path)'
+            sleep 0.05
+            exit 23
+            """
+            try Data(script.utf8).write(to: executable, options: .atomic)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: executable.path
+            )
+            let executor = SystemSSHExecutor(
+                sshPath: executable.path,
+                askPassPath: "/usr/bin/true"
+            )
+            let operation = Task {
+                try await executor.run(
+                    host: "192.168.225.1",
+                    username: "root",
+                    password: "fixture",
+                    sourceAddress: nil,
+                    script: "fixture",
+                    timeout: 1
+                )
+            }
+            for _ in 0..<1_000 {
+                if FileManager.default.fileExists(atPath: started.path) { break }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            operation.cancel()
+            do {
+                _ = try await operation.value
+                failures.append("cancelled failing SSH worker must not report success")
+            } catch {
+                check(
+                    error is CancellationError,
+                    "cancelled SSH caller wins over the detached worker's later command error",
+                    failures: &failures
+                )
+            }
+        } catch {
+            failures.append("SSH cancellation/error precedence: \(error)")
+        }
     }
 
     private static func runMC7530ParserTests(failures: inout [String]) {
@@ -3923,6 +4118,155 @@ private actor DirectMockModemBackend: ModemStatusBackend {
             identifyScopeKeys: identifyScopeKeys,
             fetchScopeKeys: fetchScopeKeys
         )
+    }
+}
+
+private actor DirectVOSControlTransport: VOSControlTransport {
+    static let baselinePreferences = NRSystemSelectionPreferences(
+        modePreference: 0x0050,
+        saBands: NRBandMask(bands: [77, 78])!,
+        nsaBands: NRBandMask(bands: [66, 77, 78])!,
+        lteBands: LTEBandMask(bands: [2, 4, 66])!
+    )
+
+    private var selection = OperatorSelection(
+        mode: .automatic,
+        operatorName: "Fixture Carrier",
+        plmn: "00101",
+        accessTechnology: .lteNRDualConnectivity
+    )
+    private var preferences = baselinePreferences
+    private var suspendManualSelectionOnce: Bool
+    private var suspendAutomaticSelectionOnce: Bool
+    private var automaticFailures: Int
+    private var manualWrites = 0
+    private var automaticWrites = 0
+    private var preferenceWrites = 0
+
+    init(
+        suspendManualSelectionOnce: Bool = false,
+        suspendAutomaticSelectionOnce: Bool = false,
+        automaticFailures: Int = 0
+    ) {
+        self.suspendManualSelectionOnce = suspendManualSelectionOnce
+        self.suspendAutomaticSelectionOnce = suspendAutomaticSelectionOnce
+        self.automaticFailures = automaticFailures
+    }
+
+    func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String {
+        "fixture-vos-control-device"
+    }
+
+    func fetchOperatorSelection(
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection {
+        selection
+    }
+
+    func scanNetworks(configuration: DeviceConfiguration) async throws -> [CellularNetwork] {
+        []
+    }
+
+    func selectNetwork(
+        plmn: String,
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection {
+        manualWrites += 1
+        selection = OperatorSelection(
+            mode: .manual,
+            operatorName: "Fixture Carrier",
+            plmn: plmn,
+            accessTechnology: .lte
+        )
+        if suspendManualSelectionOnce {
+            suspendManualSelectionOnce = false
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        return selection
+    }
+
+    func selectAutomaticNetwork(
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection {
+        automaticWrites += 1
+        selection = OperatorSelection(
+            mode: .automatic,
+            operatorName: "Fixture Carrier",
+            plmn: "00101",
+            accessTechnology: .lteNRDualConnectivity
+        )
+        if suspendAutomaticSelectionOnce {
+            suspendAutomaticSelectionOnce = false
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+        }
+        if automaticFailures > 0 {
+            automaticFailures -= 1
+            throw DirectTestSupportError.plannedSnapshotFailure
+        }
+        return selection
+    }
+
+    func fetchNRSystemSelectionPreferences(
+        configuration: DeviceConfiguration
+    ) async throws -> NRSystemSelectionPreferences {
+        preferences
+    }
+
+    func setNRSystemSelectionPreferences(
+        modePreference: UInt16,
+        saBands: NRBandMask,
+        nsaBands: NRBandMask,
+        lteBands: LTEBandMask?,
+        configuration: DeviceConfiguration
+    ) async throws -> NRSystemSelectionPreferences {
+        preferenceWrites += 1
+        preferences = NRSystemSelectionPreferences(
+            modePreference: modePreference,
+            saBands: saBands,
+            nsaBands: nsaBands,
+            lteBands: lteBands
+        )
+        return preferences
+    }
+
+    func seedNondefaultState() {
+        selection = OperatorSelection(
+            mode: .manual,
+            operatorName: "Other Carrier",
+            plmn: "00102",
+            accessTechnology: .lte
+        )
+        preferences = NRSystemSelectionPreferences(
+            modePreference: 0x0010,
+            saBands: .zero,
+            nsaBands: .zero,
+            lteBands: LTEBandMask(bands: [2])!
+        )
+        automaticWrites = 0
+        preferenceWrites = 0
+    }
+
+    func waitForManualMutation() async {
+        for _ in 0..<2_000 {
+            if manualWrites > 0 { return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func waitForAutomaticMutation() async {
+        for _ in 0..<2_000 {
+            if automaticWrites > 0 { return }
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func snapshot() -> (
+        selection: OperatorSelection,
+        preferences: NRSystemSelectionPreferences,
+        automaticWrites: Int,
+        preferenceWrites: Int
+    ) {
+        (selection, preferences, automaticWrites, preferenceWrites)
     }
 }
 

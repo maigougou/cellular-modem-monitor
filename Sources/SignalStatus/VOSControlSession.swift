@@ -1,5 +1,31 @@
 import Foundation
 
+/// Narrow injectable surface used by the verified VOS control session.
+/// Keeping transport mechanics behind this protocol makes cancellation,
+/// rollback and identity binding testable without an SSH-connected modem.
+protocol VOSControlTransport: Sendable {
+    func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String
+    func fetchOperatorSelection(configuration: DeviceConfiguration) async throws -> OperatorSelection
+    func scanNetworks(configuration: DeviceConfiguration) async throws -> [CellularNetwork]
+    func selectNetwork(
+        plmn: String,
+        configuration: DeviceConfiguration
+    ) async throws -> OperatorSelection
+    func selectAutomaticNetwork(configuration: DeviceConfiguration) async throws -> OperatorSelection
+    func fetchNRSystemSelectionPreferences(
+        configuration: DeviceConfiguration
+    ) async throws -> NRSystemSelectionPreferences
+    func setNRSystemSelectionPreferences(
+        modePreference: UInt16,
+        saBands: NRBandMask,
+        nsaBands: NRBandMask,
+        lteBands: LTEBandMask?,
+        configuration: DeviceConfiguration
+    ) async throws -> NRSystemSelectionPreferences
+}
+
+extension VOSClient: VOSControlTransport {}
+
 /// Verified control session for VOS's SSH/AT/QMI implementation.
 ///
 /// All VOS-specific ordering and exact QMI tuple rollback live here rather
@@ -9,7 +35,7 @@ actor VOSControlSession: ModemControlSession {
     nonisolated let capabilities = ModemCapability.deviceControls
     nonisolated let stableIdentifier: String
 
-    private let client: VOSClient
+    private let client: any VOSControlTransport
     private let configuration: DeviceConfiguration
     private let expectedFingerprint: String
     private var invalidated = false
@@ -20,7 +46,7 @@ actor VOSControlSession: ModemControlSession {
     private var lastKnownSelection: OperatorSelection?
 
     private init(
-        client: VOSClient,
+        client: any VOSControlTransport,
         configuration: DeviceConfiguration,
         expectedFingerprint: String
     ) {
@@ -31,7 +57,7 @@ actor VOSControlSession: ModemControlSession {
     }
 
     static func open(
-        client: VOSClient,
+        client: any VOSControlTransport,
         configuration: DeviceConfiguration
     ) async throws -> VOSControlSession {
         let fingerprint = try await client.fetchDeviceFingerprint(configuration: configuration)
@@ -173,6 +199,12 @@ actor VOSControlSession: ModemControlSession {
                     "\(manualFailure.localizedDescription) Automatic operator recovery could not be verified: \(error.localizedDescription) The state is unknown."
                 )
             }
+            // The manual write may already have reached the modem. Complete
+            // and verify automatic recovery first, then preserve cancellation
+            // as a non-user-facing interruption for StatusModel.
+            if manualFailure is CancellationError {
+                throw CancellationError()
+            }
             throw VOSClientError.verificationFailed(
                 "\(manualFailure.localizedDescription) Automatic operator selection was restored and verified."
             )
@@ -254,6 +286,7 @@ actor VOSControlSession: ModemControlSession {
                 modePreference: modePreference,
                 saBands: plan.saBands,
                 nsaBands: plan.nsaBands,
+                lteBands: nil,
                 configuration: configuration
             )
             try await validateDevice()
@@ -321,6 +354,40 @@ actor VOSControlSession: ModemControlSession {
                 "No automatic radio baseline is available for this physical VOS. Power-cycle it, then reopen this panel to capture its defaults."
             )
         }
+
+        do {
+            return try await restoreDefaultsSequence(
+                original: original,
+                modePreference: modePreference
+            )
+        } catch is CancellationError {
+            guard operationMutationAttempted else { throw CancellationError() }
+            // A cancellation after either write cannot leave a half-restored
+            // tuple. Finish both idempotent restore steps in a fresh task and
+            // verify the final state before reporting cancellation upstream.
+            let cleanup = Task {
+                try await self.restoreDefaultsSequence(
+                    original: original,
+                    modePreference: modePreference
+                )
+            }
+            do {
+                let restored = try await cleanup.value
+                lastKnownSelection = restored.selection
+            } catch {
+                if error as? ModemControlError == .deviceChanged { throw error }
+                throw VOSClientError.verificationFailed(
+                    "The restore operation was cancelled after a write was attempted, and completing the restore could not be verified: \(error.localizedDescription) The modem control state is unknown."
+                )
+            }
+            throw CancellationError()
+        }
+    }
+
+    private func restoreDefaultsSequence(
+        original: NRSystemSelectionPreferences,
+        modePreference: UInt16
+    ) async throws -> (selection: OperatorSelection, preferences: NRSystemSelectionPreferences) {
         var failures: [String] = []
         var restoredSelection: OperatorSelection?
         var restoredPreferences: NRSystemSelectionPreferences?
@@ -328,6 +395,8 @@ actor VOSControlSession: ModemControlSession {
             try await validateDevice()
             try markMutationAttempt()
             restoredSelection = try await client.selectAutomaticNetwork(configuration: configuration)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             guard !invalidated else { throw error }
             failures.append("operator selection: \(error.localizedDescription)")
@@ -342,6 +411,8 @@ actor VOSControlSession: ModemControlSession {
                 lteBands: original.lteBands,
                 configuration: configuration
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             guard !invalidated else { throw error }
             failures.append("radio preference: \(error.localizedDescription)")

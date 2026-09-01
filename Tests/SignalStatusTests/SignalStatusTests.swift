@@ -127,6 +127,21 @@ final class SignalStatusTests: XCTestCase {
         )
     }
 
+    func testOnlyTrueTaskCancellationIsSilentlyIgnored() {
+        XCTAssertTrue(ModemOperationInterruption.isCancellation(CancellationError()))
+        XCTAssertFalse(ModemOperationInterruption.isCancellation(
+            ModemControlError.commandRejected("fixture")
+        ))
+        XCTAssertTrue(ModemOperationInterruption.shouldIgnoreRefreshFailure(
+            ModemCoordinatorError.noMatchingModem,
+            taskIsCancelled: true
+        ))
+        XCTAssertFalse(ModemOperationInterruption.shouldIgnoreRefreshFailure(
+            ModemControlError.rollbackFailed(operation: "fixture", rollback: "fixture"),
+            taskIsCancelled: false
+        ))
+    }
+
     func testPLMNChangeClearsOnlyOperatorFromVerifiedControlState() {
         let selection = OperatorSelection(
             mode: .manual,

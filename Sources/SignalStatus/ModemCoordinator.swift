@@ -421,6 +421,7 @@ actor ModemCoordinator {
     func controlSession(
         credentials: ModemConnectionCredentials
     ) async throws -> any ModemControlSession {
+        try Task.checkCancellation()
         let generation = routingGeneration
         guard let active = activeModem else {
             throw ModemCoordinatorError.noMatchingModem
@@ -439,12 +440,14 @@ actor ModemCoordinator {
            cachedControlSession.activeModemID == active.id,
            cachedControlSession.endpoint == active.endpoint,
            cachedControlSession.credentials == resolved {
+            try Task.checkCancellation()
             return cachedControlSession.session
         }
         if let cachedControlSession {
             let retiredSession = cachedControlSession.session
             self.cachedControlSession = nil
             await retiredSession.invalidate()
+            try Task.checkCancellation()
             guard routingGeneration == generation,
                   activeModem?.id == active.id,
                   activeModem?.endpoint == active.endpoint
@@ -457,6 +460,10 @@ actor ModemCoordinator {
             endpoint: active.endpoint,
             credentials: resolved
         )
+        if Task.isCancelled {
+            await opened.invalidate()
+            throw CancellationError()
+        }
         guard routingGeneration == generation,
               activeModem?.id == active.id,
               activeModem?.endpoint == active.endpoint
@@ -491,6 +498,7 @@ actor ModemCoordinator {
                 existing.credentials == resolved
             if sameKey {
                 await opened.invalidate()
+                try Task.checkCancellation()
                 guard routingGeneration == generation,
                       cachedControlSession?.token == existing.token,
                       activeModem?.id == active.id,
@@ -500,6 +508,10 @@ actor ModemCoordinator {
             }
             cachedControlSession = nil
             await existing.session.invalidate()
+            if Task.isCancelled {
+                await opened.invalidate()
+                throw CancellationError()
+            }
             guard routingGeneration == generation,
                   activeModem?.id == active.id,
                   activeModem?.endpoint == active.endpoint
@@ -509,6 +521,10 @@ actor ModemCoordinator {
             }
             // Re-evaluate after the await: a third caller may have installed a
             // different session while the actor was reentrant.
+        }
+        if Task.isCancelled {
+            await opened.invalidate()
+            throw CancellationError()
         }
         cachedControlSession = CachedControlSession(
             token: UUID(),
@@ -555,6 +571,7 @@ actor ModemCoordinator {
                     active: current,
                     credentials: credentials
                 )
+                try Task.checkCancellation()
                 guard routingGeneration == generation else {
                     throw ModemControlError.deviceChanged
                 }
@@ -567,6 +584,7 @@ actor ModemCoordinator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 guard routingGeneration == generation else {
                     throw ModemControlError.deviceChanged
                 }
@@ -588,6 +606,7 @@ actor ModemCoordinator {
                 // discovery positively identifies it again. Retire its write
                 // session before probing any replacement candidate.
                 await retiredSession?.invalidate()
+                try Task.checkCancellation()
                 guard routingGeneration == generation else {
                     throw ModemControlError.deviceChanged
                 }
@@ -597,6 +616,7 @@ actor ModemCoordinator {
             activeModem = nil
             cachedControlSession = nil
             await retiredSession?.invalidate()
+            try Task.checkCancellation()
         }
 
         guard !allowedKinds.isEmpty else {
@@ -608,6 +628,7 @@ actor ModemCoordinator {
             allowedKinds,
             credentials
         )
+        try Task.checkCancellation()
         guard routingGeneration == generation else {
             throw ModemControlError.deviceChanged
         }
@@ -643,6 +664,7 @@ actor ModemCoordinator {
                     active: active,
                     credentials: credentials
                 )
+                try Task.checkCancellation()
                 guard routingGeneration == generation else {
                     throw ModemControlError.deviceChanged
                 }
@@ -665,6 +687,7 @@ actor ModemCoordinator {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                try Task.checkCancellation()
                 guard routingGeneration == generation else {
                     throw ModemControlError.deviceChanged
                 }
