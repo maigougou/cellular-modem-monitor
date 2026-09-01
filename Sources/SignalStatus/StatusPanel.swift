@@ -52,15 +52,18 @@ struct StatusPanel: View {
                             networkControlsCard
                                 .id("network-controls")
                         }
-                        deviceDetailsCard
-                            .id("device-details")
-                        SpeedTestCard(speedTest: model.speedTestModel)
+                        SpeedTestCard(
+                            networkQuality: model.networkQualitySpeedTestModel,
+                            ookla: model.ooklaSpeedTestModel
+                        )
                             .id("speed-test")
                         if showSettings {
                             settingsCard
                                 .id("settings")
                                 .transition(.opacity.combined(with: .move(edge: .bottom)))
                         }
+                        deviceDetailsCard
+                            .id("device-details")
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(12)
@@ -164,47 +167,50 @@ struct StatusPanel: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(secondaryAccent)
-                .frame(width: 30, height: 30)
-                .background(AppPalette.blue.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 10) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(secondaryAccent)
+                    .frame(width: 30, height: 30)
+                    .background(AppPalette.blue.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
                 Text("Cellular Modem Monitor")
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
-                Text(headerSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(headerSubtitle)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 4)
+
+                StatusBadge(state: model.connectionState)
+
+                Button(action: model.refreshNow) {
+                    Image(systemName: "arrow.clockwise")
+                        .rotationEffect(model.isRefreshing && !reduceMotion ? .degrees(360) : .zero)
+                        .animation(
+                            model.isRefreshing && !reduceMotion
+                                ? .linear(duration: 0.8).repeatForever(autoreverses: false)
+                                : .default,
+                            value: model.isRefreshing
+                        )
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .help(L10n.text("Refresh now", language: language))
+                .accessibilityLabel(L10n.text("Refresh now", language: language))
+                .disabled(model.isRefreshing || model.isControlBusy)
             }
-            .layoutPriority(1)
 
-            Spacer()
-
-            StatusBadge(state: model.connectionState)
-
-            Button(action: model.refreshNow) {
-                Image(systemName: "arrow.clockwise")
-                    .rotationEffect(model.isRefreshing && !reduceMotion ? .degrees(360) : .zero)
-                    .animation(
-                        model.isRefreshing && !reduceMotion
-                            ? .linear(duration: 0.8).repeatForever(autoreverses: false)
-                            : .default,
-                        value: model.isRefreshing
-                    )
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .help(L10n.text("Refresh now", language: language))
-            .accessibilityLabel(L10n.text("Refresh now", language: language))
-            .disabled(model.isRefreshing || model.isControlBusy)
+            Text(headerSubtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .allowsTightening(true)
+                .padding(.leading, 40)
+                .help(headerSubtitle)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
@@ -866,7 +872,7 @@ struct StatusPanel: View {
 
     private var headerSubtitle: String {
         operatorIdentity.headerSubtitle(
-            modemName: model.activeModem?.identity.displayName,
+            modemName: model.activeModem?.identity.compactDisplayName,
             fallback: L10n.text("Local modem", language: language)
         )
     }

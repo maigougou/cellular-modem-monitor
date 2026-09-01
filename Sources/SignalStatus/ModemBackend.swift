@@ -150,6 +150,17 @@ struct ModemIdentity: Hashable, Sendable {
         self.hardwareRevision = hardwareRevision
         self.stableIdentifier = stableIdentifier
     }
+
+    /// A concise product name for the fixed-width header. The complete backend
+    /// identity remains available through `displayName` and Device details.
+    var compactDisplayName: String {
+        switch kind {
+        case .zteMC7530CA:
+            return "MC7530CA / G5 MAX"
+        case .vos5G:
+            return displayName
+        }
+    }
 }
 
 enum ModemCredentialKind: String, Hashable, Sendable {

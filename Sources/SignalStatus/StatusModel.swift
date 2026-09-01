@@ -55,7 +55,11 @@ final class StatusModel: ObservableObject {
     @Published private(set) var controlNotice: String?
     @Published private(set) var activeModem: ActiveModem? {
         didSet {
-            speedTestModel.updateActiveModem(
+            networkQualitySpeedTestModel.updateActiveModem(
+                activeModem,
+                settingsGeneration: settingsGeneration
+            )
+            ooklaSpeedTestModel.updateActiveModem(
                 activeModem,
                 settingsGeneration: settingsGeneration
             )
@@ -63,7 +67,8 @@ final class StatusModel: ObservableObject {
     }
     @Published private(set) var settingsError: String?
 
-    let speedTestModel: SpeedTestModel
+    let networkQualitySpeedTestModel: SpeedTestModel
+    let ooklaSpeedTestModel: SpeedTestModel
 
     @Published var modemSelection: ModemSelection
     @Published var host: String
@@ -133,11 +138,13 @@ final class StatusModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         credentialStore: any CredentialStoring = LocalCredentialStore.shared,
-        speedTestRunner: any SpeedTestRunning = NetworkQualitySpeedTestRunner()
+        speedTestRunner: any SpeedTestRunning = NetworkQualitySpeedTestRunner(),
+        ooklaSpeedTestRunner: any SpeedTestRunning = OoklaSpeedTestRunner()
     ) {
         self.defaults = defaults
         self.credentialStore = credentialStore
-        speedTestModel = SpeedTestModel(runner: speedTestRunner)
+        networkQualitySpeedTestModel = SpeedTestModel(runner: speedTestRunner)
+        ooklaSpeedTestModel = SpeedTestModel(runner: ooklaSpeedTestRunner)
 
         let vosClient = VOSClient()
         do {
@@ -284,7 +291,11 @@ final class StatusModel: ObservableObject {
             )
             connectionState = .online
             menuBarTitle = snapshot.detailedMenuTitle
-            speedTestModel.updateActiveModem(
+            networkQualitySpeedTestModel.updateActiveModem(
+                activeModem,
+                settingsGeneration: settingsGeneration
+            )
+            ooklaSpeedTestModel.updateActiveModem(
                 activeModem,
                 settingsGeneration: settingsGeneration
             )
@@ -612,7 +623,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.6"
+        ) as? String ?? "1.4.0"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [

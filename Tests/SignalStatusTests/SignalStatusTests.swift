@@ -1982,6 +1982,24 @@ final class SignalStatusTests: XCTestCase {
         )
     }
 
+    func testIdentityUsesCompactZTEHeaderName() {
+        let zte = ModemIdentity(
+            kind: .zteMC7530CA,
+            manufacturer: "ZTE",
+            model: "MC7530CA",
+            displayName: "ZTE MC7530CA / G5 MAX"
+        )
+        XCTAssertEqual(zte.compactDisplayName, "MC7530CA / G5 MAX")
+
+        let vos = ModemIdentity(
+            kind: .vos5G,
+            manufacturer: "Generic",
+            model: "VOS",
+            displayName: "My VOS modem"
+        )
+        XCTAssertEqual(vos.compactDisplayName, "My VOS modem")
+    }
+
     func testCOPSScanAggregatesRepeatedPLMNAndPreservesAvailability() throws {
         let networks = try ATCOPSParser.networks(from: """
         AT+COPS=?
