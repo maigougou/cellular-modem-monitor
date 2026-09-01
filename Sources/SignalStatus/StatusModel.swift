@@ -612,7 +612,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.5"
+        ) as? String ?? "1.3.6"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
