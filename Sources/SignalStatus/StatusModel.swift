@@ -579,7 +579,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.1"
+        ) as? String ?? "1.3.2"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -868,11 +868,12 @@ final class StatusModel: ObservableObject {
         }
     }
 
-    private func applyControlResult(_ result: ModemControlResult) {
+    func applyControlResult(_ result: ModemControlResult) {
         controlState = result.state
-        if let selection = result.state.operatorSelection {
-            operatorSelection = selection
-        }
+        // The state is authoritative. A nil selection means the backend has
+        // verified that no operator selection is currently available; keeping
+        // the previous non-nil value would present stale UI state.
+        operatorSelection = result.state.operatorSelection
         if let scannedNetworks = result.scannedNetworks {
             self.scannedNetworks = scannedNetworks
         }

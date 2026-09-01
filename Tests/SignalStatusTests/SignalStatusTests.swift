@@ -155,6 +155,55 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(updated.preferenceLifetime, state.preferenceLifetime)
     }
 
+    @MainActor
+    func testApplyingAuthoritativeControlStateClearsStaleOperatorSelection() {
+        let suiteName = "SignalStatusTests.control-result.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let previousDemo = ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"]
+        setenv("SIGNAL_STATUS_DEMO", "1", 1)
+        defer {
+            if let previousDemo {
+                setenv("SIGNAL_STATUS_DEMO", previousDemo, 1)
+            } else {
+                unsetenv("SIGNAL_STATUS_DEMO")
+            }
+        }
+
+        let model = StatusModel(
+            defaults: defaults,
+            credentialStore: EmptyTestCredentialStore()
+        )
+        let selected = OperatorSelection(
+            mode: .manual,
+            operatorName: "Fixture",
+            plmn: "00101",
+            accessTechnology: .lte5GC
+        )
+        let radioState = ModemControlState(
+            operatorSelection: selected,
+            architecture: .nsaOnly,
+            saBands: [77],
+            nsaBands: [66, 77],
+            lteBands: [2, 4, 66],
+            canRestoreDefaults: true,
+            preferenceLifetime: .persistent
+        )
+
+        model.applyControlResult(ModemControlResult(state: radioState))
+        XCTAssertEqual(model.operatorSelection, selected)
+
+        model.applyControlResult(ModemControlResult(
+            state: radioState.clearingOperatorSelection()
+        ))
+        XCTAssertNil(model.operatorSelection)
+        XCTAssertNil(model.controlState?.operatorSelection)
+        XCTAssertEqual(model.controlState?.architecture, .nsaOnly)
+        XCTAssertTrue(model.controlState?.canRestoreDefaults == true)
+    }
+
     func testRollbackFailureMessageSeparatesRecoveryDetail() {
         XCTAssertEqual(
             ModemControlError.rollbackFailed(
@@ -2246,6 +2295,12 @@ final class SignalStatusTests: XCTestCase {
         result.append(value)
         return result
     }
+}
+
+private final class EmptyTestCredentialStore: CredentialStoring, @unchecked Sendable {
+    func password(for account: String) throws -> String? { nil }
+    func setPassword(_ password: String, for account: String) throws {}
+    func removePassword(for account: String) throws {}
 }
 
 private struct FixedNetworkTopologyProvider: NetworkTopologyProviding {

@@ -143,6 +143,39 @@ enum DirectTests {
                 failures: &failures
             )
 
+            let presentationSuiteName = "DirectTests.control-result.\(UUID().uuidString)"
+            let presentationDefaults = UserDefaults(suiteName: presentationSuiteName)!
+            presentationDefaults.removePersistentDomain(forName: presentationSuiteName)
+            let previousDemoEnvironment = ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"]
+            setenv("SIGNAL_STATUS_DEMO", "1", 1)
+            let presentationModel = await MainActor.run {
+                StatusModel(
+                    defaults: presentationDefaults,
+                    credentialStore: DirectCredentialStore(values: [:])
+                )
+            }
+            if let previousDemoEnvironment {
+                setenv("SIGNAL_STATUS_DEMO", previousDemoEnvironment, 1)
+            } else {
+                unsetenv("SIGNAL_STATUS_DEMO")
+            }
+            let selectionSynchronization = await MainActor.run { () -> (Bool, Bool) in
+                presentationModel.applyControlResult(ModemControlResult(state: priorControlState))
+                let populated = presentationModel.operatorSelection == priorSelection
+                presentationModel.applyControlResult(ModemControlResult(state: plmnChangedState))
+                let cleared = presentationModel.operatorSelection == nil &&
+                    presentationModel.controlState?.operatorSelection == nil &&
+                    presentationModel.controlState?.architecture == .nsaOnly &&
+                    presentationModel.canRestoreControlDefaults
+                return (populated, cleared)
+            }
+            presentationDefaults.removePersistentDomain(forName: presentationSuiteName)
+            check(
+                selectionSynchronization.0 && selectionSynchronization.1,
+                "authoritative nil operator selection clears stale UI state",
+                failures: &failures
+            )
+
             check(
                 ModemControlError.rollbackFailed(
                     operation: "Band update failed.",
