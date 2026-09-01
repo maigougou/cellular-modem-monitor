@@ -54,7 +54,7 @@ final class URLSessionZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable {
 }
 
 /// HTTP/1.1 transport that can pin a request to the exact interface discovered
-/// for the modem. This prevents a simultaneous ECM and Slate path from racing
+/// for the modem. This prevents simultaneous direct and routed paths from racing
 /// through macOS service-order routing.
 final class NetworkBoundZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable {
     fileprivate static let maximumResponseBytes = 4 * 1024 * 1024

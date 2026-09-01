@@ -48,12 +48,14 @@ struct StatusPanel: View {
                         if !model.snapshot.lteSecondaryCells.isEmpty {
                             carrierAggregationCard
                         }
-                        deviceDetailsCard
-                            .id("device-details")
                         if model.supportsDeviceControls {
                             networkControlsCard
                                 .id("network-controls")
                         }
+                        deviceDetailsCard
+                            .id("device-details")
+                        SpeedTestCard(speedTest: model.speedTestModel)
+                            .id("speed-test")
                         if showSettings {
                             settingsCard
                                 .id("settings")
@@ -312,7 +314,10 @@ struct StatusPanel: View {
     }
 
     private var deviceDetailsCard: some View {
-        DisclosureGroup(isExpanded: $showDeviceDetails) {
+        CollapsibleCard(
+            isExpanded: $showDeviceDetails,
+            accessibilityLabel: L10n.text("Device details", language: language)
+        ) {
             VStack(spacing: 9) {
                 DetailRow(label: L10n.text("Device", language: language), value: model.activeModemName)
                 DetailRow(label: L10n.text("Management", language: language), value: model.activeManagementEndpoint)
@@ -331,11 +336,14 @@ struct StatusPanel: View {
             Label(L10n.text("Device details", language: language), systemImage: "info.circle")
                 .font(.subheadline.weight(.semibold))
         }
-        .cardStyle()
     }
 
     private var networkControlsCard: some View {
-        DisclosureGroup(isExpanded: $showNetworkControls) {
+        CollapsibleCard(
+            isExpanded: $showNetworkControls,
+            accessibilityLabel: L10n.text("Network & radio controls", language: language),
+            accent: AppPalette.blue
+        ) {
             VStack(alignment: .leading, spacing: 12) {
                 currentNetworkControlSummary
 
@@ -405,7 +413,6 @@ struct StatusPanel: View {
             Label(L10n.text("Network & radio controls", language: language), systemImage: "antenna.radiowaves.left.and.right.circle")
                 .font(.subheadline.weight(.semibold))
         }
-        .cardStyle(accent: AppPalette.blue)
     }
 
     private var currentNetworkControlSummary: some View {
@@ -858,18 +865,10 @@ struct StatusPanel: View {
     }
 
     private var headerSubtitle: String {
-        let operatorName = operatorIdentity.formatted
-        let modemName = model.activeModem?.identity.displayName
-        switch (operatorName, modemName) {
-        case let (.some(carrier), .some(modem)):
-            return "\(carrier) · \(modem)"
-        case let (.some(carrier), nil):
-            return carrier
-        case let (nil, .some(modem)):
-            return modem
-        case (nil, nil):
-            return L10n.text("Local modem", language: language)
-        }
+        operatorIdentity.headerSubtitle(
+            modemName: model.activeModem?.identity.displayName,
+            fallback: L10n.text("Local modem", language: language)
+        )
     }
 
     private var operatorIdentity: OperatorDisplayIdentity {
@@ -1301,7 +1300,11 @@ private struct LTECarrierAggregationCard: View {
     let mnc: String?
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
+        CollapsibleCard(
+            isExpanded: $isExpanded,
+            accessibilityLabel: "LTE CA",
+            accent: AppPalette.blue
+        ) {
             VStack(spacing: 8) {
                 if let primaryCell {
                     LTECarrierRow(carrier: primaryCell, mcc: mcc, mnc: mnc)
@@ -1322,7 +1325,6 @@ private struct LTECarrierAggregationCard: View {
                     .lineLimit(1)
             }
         }
-        .cardStyle(accent: AppPalette.blue)
     }
 
     private var combination: String {
@@ -1543,6 +1545,85 @@ private struct DetailRow: View {
     }
 }
 
+/// A disclosure card whose complete header row is the control. The native
+/// macOS `DisclosureGroup` gives most of its hit target to the small chevron;
+/// this keeps the familiar appearance while making the icon, title and empty
+/// trailing space behave as one accessible button.
+struct CollapsibleCard<Content: View, Header: View>: View {
+    @Binding private var isExpanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.appLanguage) private var language
+    @State private var isHeaderHovered = false
+
+    private let accessibilityLabel: String
+    private let accent: Color?
+    private let content: Content
+    private let header: Header
+
+    init(
+        isExpanded: Binding<Bool>,
+        accessibilityLabel: String,
+        accent: Color? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder label: () -> Header
+    ) {
+        _isExpanded = isExpanded
+        self.accessibilityLabel = accessibilityLabel
+        self.accent = accent
+        self.content = content()
+        header = label()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: toggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .rotationEffect(isExpanded ? .degrees(90) : .zero)
+                        .frame(width: 10)
+                        .accessibilityHidden(true)
+                    header
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+                .background(
+                    Color.primary.opacity(isHeaderHovered ? 0.055 : 0),
+                    in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                )
+            }
+            .buttonStyle(.plain)
+            .onHover { isHeaderHovered = $0 }
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityValue(
+                L10n.text(isExpanded ? "Expanded" : "Collapsed", language: language)
+            )
+            .accessibilityHint(
+                L10n.text(isExpanded ? "Collapse section" : "Expand section", language: language)
+            )
+
+            if isExpanded {
+                content
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle(accent: accent)
+    }
+
+    private func toggle() {
+        if reduceMotion {
+            isExpanded.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                isExpanded.toggle()
+            }
+        }
+    }
+}
+
 private struct CardStyle: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1584,7 +1665,7 @@ private struct CardStyle: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func cardStyle(prominent: Bool = false, tint: Color? = nil, accent: Color? = nil) -> some View {
         modifier(CardStyle(prominent: prominent, tint: tint, accent: accent))
     }

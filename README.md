@@ -37,6 +37,8 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - Operator, PLMN and selected network interface
 - Detailed, compact and icon-only menu-bar styles
 - English and Simplified Chinese UI with instant language switching
+- An interface-bound speed test with live download/upload rates and final
+  capacity, idle-latency and responsiveness results
 - Manual refresh, 1/5/10/15/30/60-second polling, launch at login, faster
   recovery polling and copyable diagnostics
 
@@ -106,7 +108,7 @@ The discovery layer supports these layouts:
 ```text
 Mac ← USB ECM ← modem
 Mac ← USB-to-RJ45 adapter / Ethernet ← modem
-Mac ← Wi-Fi or Ethernet ← Slate / another router ← modem
+Mac ← Wi-Fi or Ethernet ← router ← modem
 ```
 
 For every active physical IPv4 interface, the app considers the registered
@@ -122,11 +124,27 @@ the discovered source address; on a routed path it lets Network.framework
 choose the source address for that interface. VOS SSH uses the selected source
 address; it does not have an additional interface-index binding.
 
-In the routed Slate/router layout, the modem management address does **not**
+In a routed layout, the modem management address does **not**
 need to be the Mac's default gateway. A working route to that address must
 already exist through the selected interface. The app relies on that existing
 macOS route and does not inspect the full route table or create or change
 system routes.
+
+## Interface-bound speed test
+
+The **Speed test** card runs the macOS 13+ built-in `networkQuality` tool with
+`-I` set to the exact interface discovered for the active modem. The test never
+falls back to the default route when that interface or its index cannot be
+verified. Live download/upload values come from that interface's byte counters;
+the final rates, idle latency and responsiveness come from `networkQuality`'s
+structured result, which must report the same interface before the app accepts
+it.
+
+On a direct USB or Ethernet link, this binds the public test to the modem's Mac
+interface. On a routed layout such as Mac → router → modem, it proves that
+the test used the Mac-to-router interface; the router still controls its own
+WAN, VPN and multi-WAN selection. A speed test transfers a substantial amount
+of data and should be started only when that usage is acceptable.
 
 ## Install
 
@@ -395,7 +413,7 @@ strict PLMN/RAT parsing, full-state rollback after collateral changes, lost
 responses and cancellation, verified restore and physical-device mismatch rejection; credential
 policies and non-secret preferences; backend registry/coordinator selection;
 malformed responses; and
-synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed Slate paths,
+synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed-router paths,
 same-IP multi-interface isolation, interface exclusion, priorities,
 scheme/port separation, backend filtering, deadlines and deterministic
 concurrent results. These tests do not require or modify a physical modem.
@@ -411,7 +429,7 @@ authoritative readback described above were validated on physical hardware on
 - ZTE neighbor fields are not visualized until a non-empty, device-verified
   sample establishes their exact format.
 - A routed modem requires an existing reachable route. The app does not
-  configure the Mac, Slate or another router.
+  configure the Mac or router.
 - Some fields are absent when the modem, firmware or network does not report
   them. Missing values are shown as `—` rather than inferred.
 - Standard LTE CA data may identify SCell band/channel/bandwidth without every

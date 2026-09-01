@@ -46,6 +46,12 @@ final class SignalStatusTests: XCTestCase {
     func testLocalizedTextFormattingAndFallback() {
         XCTAssertEqual(L10n.text("Online", language: .simplifiedChinese), "在线")
         XCTAssertEqual(L10n.text("Online", language: .english), "Online")
+        XCTAssertEqual(L10n.text("Expanded", language: .simplifiedChinese), "已展开")
+        XCTAssertEqual(L10n.text("Collapse section", language: .simplifiedChinese), "折叠此部分")
+        XCTAssertEqual(
+            SpeedTestError.noActiveModem.localizedMessage(language: .simplifiedChinese),
+            "没有可用于测速的活动调制解调器。"
+        )
         XCTAssertEqual(L10n.text("Unmapped technical value", language: .simplifiedChinese), "Unmapped technical value")
         XCTAssertEqual(
             L10n.format("Selecting %@…", language: .simplifiedChinese, "302-220"),
@@ -384,7 +390,7 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertTrue(candidate.sources.contains(.matchingSubnet))
     }
 
-    func testDiscoveryMarksZTEBehindSlateAsRouted() throws {
+    func testDiscoveryMarksZTEBehindRouterAsRouted() throws {
         let topology = NetworkTopologySnapshot(interfaces: [discoveryInterface(
             name: "en1",
             index: 6,
@@ -1945,6 +1951,34 @@ final class SignalStatusTests: XCTestCase {
                 scannedNetworks: [bell]
             ).formatted,
             "Bell · 302-610"
+        )
+    }
+
+    func testHeaderSubtitleShowsCarrierAndModemButNeverPLMN() {
+        let named = OperatorDisplayIdentity(name: "TELUS", plmn: "302-220")
+        XCTAssertEqual(
+            named.headerSubtitle(
+                modemName: "MC7530CA / G5 MAX",
+                fallback: "Local modem"
+            ),
+            "TELUS · MC7530CA / G5 MAX"
+        )
+        XCTAssertEqual(
+            named.headerSubtitle(modemName: nil, fallback: "Local modem"),
+            "TELUS"
+        )
+
+        let numericOnly = OperatorDisplayIdentity(name: nil, plmn: "302-220")
+        XCTAssertEqual(
+            numericOnly.headerSubtitle(
+                modemName: "MC7530CA / G5 MAX",
+                fallback: "Local modem"
+            ),
+            "MC7530CA / G5 MAX"
+        )
+        XCTAssertEqual(
+            numericOnly.headerSubtitle(modemName: nil, fallback: "Local modem"),
+            "Local modem"
         )
     }
 
