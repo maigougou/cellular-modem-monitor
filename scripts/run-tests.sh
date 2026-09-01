@@ -33,6 +33,7 @@ compile() {
     "$project_dir/Sources/SignalStatus/MC7530Backend.swift" \
     "$project_dir/Sources/SignalStatus/ModemCoordinator.swift" \
     "$project_dir/Sources/SignalStatus/SpeedTest.swift" \
+    "$project_dir/Sources/SignalStatus/OoklaSpeedTest.swift" \
     "$project_dir/Sources/SignalStatus/StatusModel.swift" \
     "$project_dir/scripts/DirectTests.swift" \
     -o "$build_dir/SignalStatusTests"

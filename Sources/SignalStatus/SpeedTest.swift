@@ -61,8 +61,38 @@ struct SpeedTestResult: Equatable, Sendable {
     let uploadBitsPerSecond: Double
     let responsivenessRPM: Double?
     let idleLatencyMilliseconds: Double?
+    let jitterMilliseconds: Double?
+    let packetLossPercent: Double?
+    let serverName: String?
+    let resultURL: URL?
     let duration: TimeInterval?
     let completedAt: Date
+
+    init(
+        binding: SpeedTestBinding,
+        downloadBitsPerSecond: Double,
+        uploadBitsPerSecond: Double,
+        responsivenessRPM: Double? = nil,
+        idleLatencyMilliseconds: Double? = nil,
+        jitterMilliseconds: Double? = nil,
+        packetLossPercent: Double? = nil,
+        serverName: String? = nil,
+        resultURL: URL? = nil,
+        duration: TimeInterval? = nil,
+        completedAt: Date
+    ) {
+        self.binding = binding
+        self.downloadBitsPerSecond = downloadBitsPerSecond
+        self.uploadBitsPerSecond = uploadBitsPerSecond
+        self.responsivenessRPM = responsivenessRPM
+        self.idleLatencyMilliseconds = idleLatencyMilliseconds
+        self.jitterMilliseconds = jitterMilliseconds
+        self.packetLossPercent = packetLossPercent
+        self.serverName = serverName
+        self.resultURL = resultURL
+        self.duration = duration
+        self.completedAt = completedAt
+    }
 }
 
 enum SpeedTestState: Equatable, Sendable {
@@ -83,11 +113,15 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
     case sourceAddressChanged(String)
     case gatewayChanged(expected: String, actual: String?)
     case networkQualityUnavailable
+    case ooklaCLIUnavailable
+    case ooklaCLIIncompatible
     case launchFailed(String)
+    case commandTimedOut
     case commandFailed(status: Int32, detail: String)
     case invalidResult
     case reportedInterfaceMissing
     case reportedInterfaceMismatch(expected: String, actual: String)
+    case reportedSourceAddressMismatch(expected: String, actual: String?)
 
     var errorDescription: String? {
         localizedMessage(language: .english)
@@ -127,8 +161,14 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
             )
         case .networkQualityUnavailable:
             return L10n.text("The macOS networkQuality tool is unavailable.", language: language)
+        case .ooklaCLIUnavailable:
+            return L10n.text("The official Ookla Speedtest CLI is not installed.", language: language)
+        case .ooklaCLIIncompatible:
+            return L10n.text("The installed speedtest command is not the official Ookla CLI.", language: language)
         case let .launchFailed(detail):
             return L10n.format("The speed test could not be started: %@", language: language, detail)
+        case .commandTimedOut:
+            return L10n.text("The speed test timed out.", language: language)
         case let .commandFailed(status, detail):
             let message = L10n.format(
                 "The speed test failed (exit %d).",
@@ -147,16 +187,29 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
                 actual,
                 expected
             )
+        case let .reportedSourceAddressMismatch(expected, actual):
+            return L10n.format(
+                "The speed test reported source address %@, not the modem-bound address %@.",
+                language: language,
+                actual ?? "—",
+                expected
+            )
         }
     }
 }
 
 protocol SpeedTestRunning: Sendable {
+    var availabilityError: SpeedTestError? { get }
+
     func run(
         binding: SpeedTestBinding,
         progress: @escaping @Sendable (SpeedTestProgress) async -> Void
     ) async throws -> SpeedTestResult
 
+}
+
+extension SpeedTestRunning {
+    var availabilityError: SpeedTestError? { nil }
 }
 
 struct NetworkInterfaceTraffic: Equatable, Sendable {
@@ -339,6 +392,17 @@ private final class NetworkQualityProcessBox: @unchecked Sendable {
     }
 }
 
+enum NetworkQualityCommand {
+    static func arguments(interfaceName: String, maximumRuntime: TimeInterval) -> [String] {
+        [
+            "-I", interfaceName,
+            "-M", String(max(5, Int(maximumRuntime.rounded()))),
+            "-s",
+            "-c"
+        ]
+    }
+}
+
 actor SystemNetworkQualityProcess: NetworkQualityProcessExecuting {
     private var running: NetworkQualityProcessBox?
 
@@ -364,11 +428,10 @@ actor SystemNetworkQualityProcess: NetworkQualityProcessExecuting {
         let standardOutput = Pipe()
         let standardError = Pipe()
         process.executableURL = executable
-        process.arguments = [
-            "-I", interfaceName,
-            "-M", String(max(5, Int(maximumRuntime.rounded()))),
-            "-c"
-        ]
+        process.arguments = NetworkQualityCommand.arguments(
+            interfaceName: interfaceName,
+            maximumRuntime: maximumRuntime
+        )
         process.standardOutput = standardOutput
         process.standardError = standardError
         let box = NetworkQualityProcessBox(
@@ -593,12 +656,14 @@ final class SpeedTestModel: ObservableObject {
     @Published private(set) var boundConnectionPath: ConnectionPath?
 
     private let runner: any SpeedTestRunning
+    private let availabilityError: SpeedTestError?
     private var binding: SpeedTestBinding?
     private var runTask: Task<Void, Never>?
     private var runToken = UUID()
 
     init(runner: any SpeedTestRunning = NetworkQualitySpeedTestRunner()) {
         self.runner = runner
+        availabilityError = runner.availabilityError
     }
 
     deinit {
@@ -610,7 +675,7 @@ final class SpeedTestModel: ObservableObject {
         return false
     }
 
-    var canStart: Bool { binding != nil && !isRunning }
+    var canStart: Bool { binding != nil && availabilityError == nil && !isRunning }
 
     func updateActiveModem(_ activeModem: ActiveModem?, settingsGeneration: UInt64) {
         let next: Result<SpeedTestBinding, SpeedTestError>
@@ -634,7 +699,7 @@ final class SpeedTestModel: ObservableObject {
         boundConnectionPath = nextBinding?.endpoint.connectionPath
         switch next {
         case .success:
-            state = .ready
+            state = availabilityError.map(SpeedTestState.unavailable) ?? .ready
         case let .failure(error):
             state = .unavailable(error)
         }
@@ -642,6 +707,10 @@ final class SpeedTestModel: ObservableObject {
 
     func start() {
         guard !isRunning else { return }
+        if let availabilityError {
+            state = .unavailable(availabilityError)
+            return
+        }
         guard let binding else {
             state = .unavailable(.interfaceBindingUnavailable)
             return
@@ -688,9 +757,13 @@ final class SpeedTestModel: ObservableObject {
     func cancel() {
         guard isRunning else { return }
         cancelAndInvalidate()
-        state = binding == nil
-            ? .unavailable(.noActiveModem)
-            : .ready
+        if binding == nil {
+            state = .unavailable(.noActiveModem)
+        } else if let availabilityError {
+            state = .unavailable(availabilityError)
+        } else {
+            state = .ready
+        }
     }
 
     private func accept(

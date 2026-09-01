@@ -64,6 +64,29 @@ enum DirectTests {
                 failures: &failures
             )
 
+            let ztePresentationIdentity = ModemIdentity(
+                kind: .zteMC7530CA,
+                manufacturer: "ZTE",
+                model: "MC7530CA",
+                displayName: "ZTE MC7530CA / G5 MAX"
+            )
+            check(
+                ztePresentationIdentity.compactDisplayName == "MC7530CA / G5 MAX",
+                "ZTE compact header presentation",
+                failures: &failures
+            )
+            let vosPresentationIdentity = ModemIdentity(
+                kind: .vos5G,
+                manufacturer: "Generic",
+                model: "VOS",
+                displayName: "My VOS modem"
+            )
+            check(
+                vosPresentationIdentity.compactDisplayName == "My VOS modem",
+                "VOS header preserves its configured display name",
+                failures: &failures
+            )
+
             let presentationEndpointA = ScopedEndpoint(
                 baseURL: URL(string: "http://192.168.254.1")!,
                 interfaceName: "en8",
@@ -340,6 +363,96 @@ enum DirectTests {
                     parsedSpeed.duration == 16.25 &&
                     parsedSpeed.binding == speedBinding,
                 "networkQuality JSON preserves final throughput and verified binding",
+                failures: &failures
+            )
+
+            check(
+                NetworkQualityCommand.arguments(interfaceName: "en8", maximumRuntime: 30) == [
+                    "-I", "en8",
+                    "-M", "30",
+                    "-s",
+                    "-c"
+                ],
+                "networkQuality runs download and upload sequentially",
+                failures: &failures
+            )
+
+            check(
+                OoklaSpeedTestCommand.arguments(interfaceName: "en8") == [
+                    "--interface=en8",
+                    "--format=json",
+                    "--progress=no",
+                    "--accept-license",
+                    "--accept-gdpr"
+                ],
+                "Ookla command binds only the frozen interface and requests structured output",
+                failures: &failures
+            )
+            let ooklaJSON = Data(#"""
+            {
+              "type":"result",
+              "ping":{"jitter":5.842,"latency":28.963},
+              "download":{"bandwidth":18776068,"bytes":133558656,"elapsed":7206},
+              "upload":{"bandwidth":2268752,"bytes":12857728,"elapsed":5701},
+              "packetLoss":0,
+              "interface":{"internalIp":"192.168.254.20","name":"en8"},
+              "server":{"name":"Bell Mobility","location":"Nepean, ON"},
+              "result":{"url":"https://www.speedtest.net/result/c/fixture-result"}
+            }
+            """#.utf8)
+            let parsedOokla = try OoklaSpeedTestResultParser.parse(
+                ooklaJSON,
+                binding: speedBinding,
+                completedAt: Date(timeIntervalSince1970: 456)
+            )
+            check(
+                parsedOokla.downloadBitsPerSecond == 150_208_544 &&
+                    parsedOokla.uploadBitsPerSecond == 18_150_016 &&
+                    parsedOokla.idleLatencyMilliseconds == 28.963 &&
+                    parsedOokla.jitterMilliseconds == 5.842 &&
+                    parsedOokla.packetLossPercent == 0 &&
+                    parsedOokla.serverName == "Bell Mobility · Nepean, ON" &&
+                    parsedOokla.resultURL?.absoluteString ==
+                        "https://www.speedtest.net/result/c/fixture-result" &&
+                    parsedOokla.binding == speedBinding,
+                "Ookla JSON converts byte rates and preserves verified path metadata",
+                failures: &failures
+            )
+            do {
+                let wrongSource = Data(#"""
+                {
+                  "type":"result",
+                  "download":{"bandwidth":1},
+                  "upload":{"bandwidth":1},
+                  "interface":{"internalIp":"192.168.254.99","name":"en8"}
+                }
+                """#.utf8)
+                _ = try OoklaSpeedTestResultParser.parse(wrongSource, binding: speedBinding)
+                failures.append("Ookla result must reject a changed source address")
+            } catch let error as SpeedTestError {
+                check(
+                    error == .reportedSourceAddressMismatch(
+                        expected: "192.168.254.20",
+                        actual: "192.168.254.99"
+                    ),
+                    "Ookla result fails closed on source-address mismatch",
+                    failures: &failures
+                )
+            }
+
+            let unavailableModel = await MainActor.run {
+                SpeedTestModel(runner: DirectUnavailableSpeedTestRunner())
+            }
+            await MainActor.run {
+                unavailableModel.updateActiveModem(speedActiveModem, settingsGeneration: 7)
+            }
+            let unavailablePresentation = await MainActor.run {
+                (unavailableModel.state, unavailableModel.canStart)
+            }
+            check(
+                unavailablePresentation.0 == .unavailable(.ooklaCLIUnavailable) &&
+                    !unavailablePresentation.1,
+                "missing official Ookla CLI is visible before a test can start",
                 failures: &failures
             )
 
@@ -5307,6 +5420,17 @@ private actor DirectSpeedTestRunner: SpeedTestRunning {
     }
 
     func runCount() -> Int { runs }
+}
+
+private actor DirectUnavailableSpeedTestRunner: SpeedTestRunning {
+    nonisolated let availabilityError: SpeedTestError? = .ooklaCLIUnavailable
+
+    func run(
+        binding: SpeedTestBinding,
+        progress: @escaping @Sendable (SpeedTestProgress) async -> Void
+    ) async throws -> SpeedTestResult {
+        throw SpeedTestError.ooklaCLIUnavailable
+    }
 }
 
 private func waitForDirectSpeedTestCompletion(_ model: SpeedTestModel) async {
