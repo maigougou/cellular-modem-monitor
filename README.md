@@ -37,6 +37,8 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - Operator, PLMN and selected network interface
 - Detailed, compact and icon-only menu-bar styles
 - English and Simplified Chinese UI with instant language switching
+- An interface-bound speed test with live download/upload rates and final
+  capacity, idle-latency and responsiveness results
 - Manual refresh, 1/5/10/15/30/60-second polling, launch at login, faster
   recovery polling and copyable diagnostics
 
@@ -91,10 +93,13 @@ For the ZTE, enter the existing Web administrator password—the same password
 used by its normal management page—in Settings. The application does not ship
 with, derive or display a device-specific administrator password.
 
-Both read-only physical-device status paths were validated on 2026-08-31.
-The MC7530CA mutating control path is mapped from the tested unit's retail Web
-implementation and covered by offline request, read-back, rollback and restore
-tests; this release has not sent those control writes to the physical unit.
+Both read-only physical-device status paths were validated on 2026-08-31. On
+2026-09-01, the MC7530CA SA-only (`Only_5G`) control request and its
+`Z-Mode: 0`/empty-`Z-Tag` SID-authenticated form were exercised on the physical
+unit and confirmed by authoritative mode readback. After registration, the unit
+reported TELUS `302-220` in SA, first on `n71` and later after normal reselection
+on `n77`. The complete control path is also covered by offline request,
+read-back, rollback and restore tests.
 
 ## Connection layouts and automatic discovery
 
@@ -103,7 +108,7 @@ The discovery layer supports these layouts:
 ```text
 Mac ← USB ECM ← modem
 Mac ← USB-to-RJ45 adapter / Ethernet ← modem
-Mac ← Wi-Fi or Ethernet ← Slate / another router ← modem
+Mac ← Wi-Fi or Ethernet ← router ← modem
 ```
 
 For every active physical IPv4 interface, the app considers the registered
@@ -119,11 +124,27 @@ the discovered source address; on a routed path it lets Network.framework
 choose the source address for that interface. VOS SSH uses the selected source
 address; it does not have an additional interface-index binding.
 
-In the routed Slate/router layout, the modem management address does **not**
+In a routed layout, the modem management address does **not**
 need to be the Mac's default gateway. A working route to that address must
 already exist through the selected interface. The app relies on that existing
 macOS route and does not inspect the full route table or create or change
 system routes.
+
+## Interface-bound speed test
+
+The **Speed test** card runs the macOS 13+ built-in `networkQuality` tool with
+`-I` set to the exact interface discovered for the active modem. The test never
+falls back to the default route when that interface or its index cannot be
+verified. Live download/upload values come from that interface's byte counters;
+the final rates, idle latency and responsiveness come from `networkQuality`'s
+structured result, which must report the same interface before the app accepts
+it.
+
+On a direct USB or Ethernet link, this binds the public test to the modem's Mac
+interface. On a routed layout such as Mac → router → modem, it proves that
+the test used the Mac-to-router interface; the router still controls its own
+WAN, VPN and multi-WAN selection. A speed test transfers a substantial amount
+of data and should be started only when that usage is acceptable.
 
 ## Install
 
@@ -186,9 +207,16 @@ PCI, Cell ID, signal metrics and LTE carrier aggregation without inventing
 missing values.
 
 When the control panel is opened, the same scoped authenticated session exposes
-only the radio methods declared by the backend. Every action uses the retail Web
-request headers, checks UBus/JSON-RPC errors, waits for asynchronous modem work,
-then verifies the result with a fresh `nwinfo_get_netinfo` read. If a change or
+only the radio methods declared by the backend. Every MC7530CA radio RPC uses the
+device-verified SID-authenticated request form, `Z-Mode: 0` with an empty
+`Z-Tag`; on the tested firmware, the same valid SID with the browser-style
+`Z-Mode: 1`/method-tag form returns JSON-RPC `-32002 Access denied`. An initial
+access-denied response causes one reauthentication and one identical retry. The
+action path accepts UBus status zero even when the firmware returns the
+payload-free `result: [0]` used by the real setters; reads and polls still require
+their expected payload. The backend checks UBus/JSON-RPC errors, waits for
+asynchronous modem work, then verifies the result with a fresh
+`nwinfo_get_netinfo` read. If a change or
 verification fails, the session attempts a verified rollback when the device
 identity still matches and the API provides the required setters; any rollback
 failure is reported explicitly.
@@ -246,6 +274,13 @@ the active modem, endpoint or credential invalidates that session.
 
 ### ZTE G5 MAX / MC7530CA control path
 
+- All authenticated network-info controls—including setters, scan/status/result
+  polling and authoritative readback—use `Z-Mode: 0` and an empty `Z-Tag`. This
+  is the request form verified on the physical MC7530CA; the generic transport
+  still retains both header modes for other ZTE call paths.
+- A setter or action succeeds when UBus returns status zero, including the
+  physical unit's payload-free JSON-RPC `result: [0]`. Status/readback calls are
+  separate and reject a status-zero response that omits their required payload.
 - Scan uses `nwinfo_manual_scan`, bounded status polling and
   `nwinfo_m_netselect_contents`. Manual registration replays the exact RAT token
   returned by that scan and polls `nwinfo_m_netselect_result`; automatic
@@ -371,19 +406,22 @@ dist/Cellular-Modem-Monitor-macOS.zip
 ```
 
 Offline tests cover the VOS QMI parsers and temporary-control safeguards; ZTE
-UBus authentication/session/header behavior, radio payload parsing, exact
+UBus authentication/session/header behavior, radio read-payload parsing,
+payload-free action-result handling, exact
 control methods and parameters, asynchronous polling, read-back verification,
 strict PLMN/RAT parsing, full-state rollback after collateral changes, lost
 responses and cancellation, verified restore and physical-device mismatch rejection; credential
 policies and non-secret preferences; backend registry/coordinator selection;
 malformed responses; and
-synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed Slate paths,
+synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed-router paths,
 same-IP multi-interface isolation, interface exclusion, priorities,
 scheme/port separation, backend filtering, deadlines and deterministic
 concurrent results. These tests do not require or modify a physical modem.
 
 The read-only VOS SSH/QMI and ZTE Web UBus status paths were validated end to
-end on physical hardware on 2026-08-31.
+end on physical hardware on 2026-08-31. The MC7530CA SA-only write and
+authoritative readback described above were validated on physical hardware on
+2026-09-01; the other ZTE control families remain covered by offline tests.
 
 ## Current limitations
 
@@ -391,7 +429,7 @@ end on physical hardware on 2026-08-31.
 - ZTE neighbor fields are not visualized until a non-empty, device-verified
   sample establishes their exact format.
 - A routed modem requires an existing reachable route. The app does not
-  configure the Mac, Slate or another router.
+  configure the Mac or router.
 - Some fields are absent when the modem, firmware or network does not report
   them. Missing values are shown as `—` rather than inferred.
 - Standard LTE CA data may identify SCell band/channel/bandwidth without every

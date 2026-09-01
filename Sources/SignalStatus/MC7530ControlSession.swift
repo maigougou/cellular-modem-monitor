@@ -367,7 +367,7 @@ actor MC7530ControlSession: ModemControlSession {
     private func readRawState(
         allowInvalidatedSession: Bool = false
     ) async throws -> MC7530RawControlState {
-        let payload = try await call(
+        let payload = try await read(
             "nwinfo_get_netinfo",
             allowInvalidatedSession: allowInvalidatedSession
         )
@@ -377,7 +377,7 @@ actor MC7530ControlSession: ModemControlSession {
     private func scanNetworks() async throws -> [CellularNetwork] {
         try await write("nwinfo_manual_scan")
         let completed: Bool? = try await poll(attempts: timing.scanAttempts) {
-            let payload = try await self.call("nwinfo_m_netselect_status", mode: .write)
+            let payload = try await self.read("nwinfo_m_netselect_status")
             guard let status = payload["m_netselect_status"]?.stringValue?
                 .trimmingCharacters(in: .whitespacesAndNewlines), !status.isEmpty
             else { throw ZTEUBusError.invalidResponse }
@@ -390,7 +390,7 @@ actor MC7530ControlSession: ModemControlSession {
         }
         guard completed == true else { throw ModemControlError.timedOut("Network scan") }
 
-        let payload = try await call("nwinfo_m_netselect_contents", mode: .write)
+        let payload = try await read("nwinfo_m_netselect_contents")
         guard let contents = payload["m_netselect_contents"]?.stringValue else {
             throw ZTEUBusError.invalidResponse
         }
@@ -880,7 +880,7 @@ actor MC7530ControlSession: ModemControlSession {
             allowInvalidatedSession: allowInvalidatedSession
         )
         let completed: Bool? = try await poll(attempts: timing.registrationAttempts) {
-            let payload = try await self.call(
+            let payload = try await self.read(
                 "nwinfo_m_netselect_result",
                 allowInvalidatedSession: allowInvalidatedSession
             )
@@ -1127,18 +1127,37 @@ actor MC7530ControlSession: ModemControlSession {
             try Task.checkCancellation()
             operationMutationAttempted = true
         }
-        _ = try await call(
+        try await action(
             method,
             parameters: parameters,
-            mode: .write,
             allowInvalidatedSession: allowInvalidatedSession
         )
     }
 
-    private func call(
+    private func action(
         _ method: String,
         parameters: [String: ZTEJSONValue] = [:],
-        mode: ZTEUBusCallMode = .read,
+        allowInvalidatedSession: Bool = false
+    ) async throws {
+        guard allowInvalidatedSession || !invalidated else {
+            throw ModemControlError.deviceChanged
+        }
+        try Task.checkCancellation()
+        try await session.action(
+            object: "zte_nwinfo_api",
+            method: method,
+            parameters: parameters,
+            // The verified MC7530CA SID-authenticated API accepts control RPCs
+            // with this form. The browser-style Z-Mode 1/method-tag form returns
+            // JSON-RPC -32002 for the same valid SID on the tested firmware.
+            mode: .read,
+            zTag: ""
+        )
+    }
+
+    private func read(
+        _ method: String,
+        parameters: [String: ZTEJSONValue] = [:],
         allowInvalidatedSession: Bool = false
     ) async throws -> ZTEJSONValue {
         guard allowInvalidatedSession || !invalidated else {
@@ -1149,8 +1168,8 @@ actor MC7530ControlSession: ModemControlSession {
             object: "zte_nwinfo_api",
             method: method,
             parameters: parameters,
-            mode: mode,
-            zTag: method
+            mode: .read,
+            zTag: ""
         )
     }
 

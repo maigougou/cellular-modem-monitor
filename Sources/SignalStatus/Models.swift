@@ -223,6 +223,21 @@ struct OperatorDisplayIdentity: Equatable, Sendable {
         }
     }
 
+    /// Builds the compact app-header subtitle without exposing numeric PLMN
+    /// identifiers. PLMN remains available in detailed network information.
+    func headerSubtitle(modemName: String?, fallback: String) -> String {
+        switch (name, modemName) {
+        case let (.some(carrier), .some(modem)):
+            return "\(carrier) · \(modem)"
+        case let (.some(carrier), nil):
+            return carrier
+        case let (nil, .some(modem)):
+            return modem
+        case (nil, nil):
+            return fallback
+        }
+    }
+
     static func resolve(
         snapshotName: String?,
         snapshotPLMN: String?,

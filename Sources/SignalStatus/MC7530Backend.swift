@@ -233,7 +233,7 @@ actor MC7530Backend: ModemControlBackend {
             route: ZTEHTTPRoute(
                 interfaceName: endpoint.interfaceName,
                 interfaceIndex: endpoint.interfaceIndex,
-                // A routed target such as ZTE-behind-Slate may share an
+                // A routed target such as ZTE behind another router may share an
                 // interface with multiple IPv4 addresses. Pin the interface,
                 // but let Network.framework choose the route's source address.
                 sourceAddress: endpoint.connectionPath == .routed

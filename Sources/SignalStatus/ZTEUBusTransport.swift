@@ -54,7 +54,7 @@ final class URLSessionZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable {
 }
 
 /// HTTP/1.1 transport that can pin a request to the exact interface discovered
-/// for the modem. This prevents a simultaneous ECM and Slate path from racing
+/// for the modem. This prevents simultaneous direct and routed paths from racing
 /// through macOS service-order routing.
 final class NetworkBoundZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable {
     fileprivate static let maximumResponseBytes = 4 * 1024 * 1024
@@ -462,8 +462,10 @@ struct ZTEUBusCallResult: Equatable, Sendable {
     var object: [String: ZTEJSONValue]? { payload?.objectValue }
 }
 
-/// Mirrors the retail Web UI's per-request `Z-Mode` header. Read/poll calls
-/// use `0`; authenticated actions initiated by the UI use `1`.
+/// Wire values for ZTE's per-request `Z-Mode` header. The historical case
+/// names describe the common retail-Web usage, not authorization or mutation
+/// semantics: the verified MC7530CA SID-authenticated control path deliberately
+/// uses wire value `0` for both reads and actions.
 enum ZTEUBusCallMode: String, Equatable, Sendable {
     case read = "0"
     case write = "1"
