@@ -2,6 +2,27 @@ import AppKit
 import Foundation
 import ServiceManagement
 
+enum ControlPresentationInvalidation: Equatable, Sendable {
+    case none
+    case operatorContext
+    case all
+
+    static func transition(
+        previousModemID: String?,
+        nextModemID: String,
+        previousEndpoint: ScopedEndpoint?,
+        nextEndpoint: ScopedEndpoint,
+        previousPLMN: String?,
+        nextPLMN: String?
+    ) -> ControlPresentationInvalidation {
+        guard previousModemID == nextModemID,
+              previousEndpoint == nextEndpoint
+        else { return .all }
+        guard previousPLMN == nextPLMN else { return .operatorContext }
+        return .none
+    }
+}
+
 @MainActor
 final class StatusModel: ObservableObject {
     @Published private(set) var snapshot = DeviceSnapshot.empty
@@ -306,15 +327,10 @@ final class StatusModel: ObservableObject {
     var isControlBusy: Bool { controlOperation != nil }
     var canRestoreControlDefaults: Bool { controlState?.canRestoreDefaults == true }
     var supportsDeviceControls: Bool {
-        guard let capabilities = activeModem?.capabilities else { return false }
-        let controls: ModemCapability = [
-            .operatorSelection,
-            .networkScan,
-            .radioAccessPreference,
-            .nrBandLock,
-            .lteBandLock
-        ]
-        return !capabilities.intersection(controls).isEmpty
+        activeModem?.capabilities.supportsDeviceControlSurface == true
+    }
+    var supportsControlSession: Bool {
+        activeModem?.capabilities.supportsControlSession == true
     }
 
     func supportsControl(_ capability: ModemCapability) -> Bool {
@@ -428,7 +444,7 @@ final class StatusModel: ObservableObject {
         command: ModemControlCommand?
     ) {
         guard !demoMode,
-              supportsDeviceControls,
+              supportsControlSession,
               controlOperation == nil,
               queuedControlToken == nil,
               let activeModem
@@ -563,7 +579,7 @@ final class StatusModel: ObservableObject {
     func showAbout() {
         let marketingVersion = Bundle.main.object(
             forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.3.0"
+        ) as? String ?? "1.3.1"
         let credits = NSMutableAttributedString(
             string: "\(L10n.text("Author", language: language)): Maigougou\n\n",
             attributes: [
@@ -665,19 +681,30 @@ final class StatusModel: ObservableObject {
             guard settingsGeneration == generation else { return }
             let latest = result.snapshot
             let previousActiveModemID = activeModem?.id
+            let previousActiveEndpoint = activeModem?.endpoint
             let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
-            if snapshot.plmn != latest.plmn {
+            let controlInvalidation = ControlPresentationInvalidation.transition(
+                previousModemID: previousActiveModemID,
+                nextModemID: result.activeModem.id,
+                previousEndpoint: previousActiveEndpoint,
+                nextEndpoint: result.activeModem.endpoint,
+                previousPLMN: snapshot.plmn,
+                nextPLMN: latest.plmn
+            )
+            snapshot = latest
+            activeModem = result.activeModem
+            switch controlInvalidation {
+            case .none:
+                break
+            case .operatorContext:
                 // A powered SIM replacement can leave the USB device and SSH
                 // identity unchanged while registration moves to a different
                 // PLMN (or temporarily disappears). Do not keep presenting a
                 // selection or scan result captured for the previous card.
                 // Serving PLMN is not a SIM identity: a normal manual operator
                 // change must not discard the physical modem's restore tuple.
-                clearControlState()
-            }
-            snapshot = latest
-            activeModem = result.activeModem
-            if previousActiveModemID != result.activeModem.id {
+                clearOperatorContext()
+            case .all:
                 clearControlState()
             }
             persistLastSuccessful(result)
@@ -731,7 +758,7 @@ final class StatusModel: ObservableObject {
                 refreshNow()
             }
         }
-        guard !demoMode, supportsDeviceControls else { return }
+        guard !demoMode, supportsControlSession else { return }
         // Validate the click-time context before doing anything observable.
         // A refresh or Settings save may have completed while the Task was
         // merely waiting to be scheduled.
@@ -932,6 +959,14 @@ final class StatusModel: ObservableObject {
         operatorSelection = nil
         scannedNetworks = []
         controlState = nil
+        controlError = nil
+        controlNotice = nil
+    }
+
+    private func clearOperatorContext() {
+        operatorSelection = nil
+        scannedNetworks = []
+        controlState = controlState?.clearingOperatorSelection()
         controlError = nil
         controlNotice = nil
     }

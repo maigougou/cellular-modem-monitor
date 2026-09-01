@@ -59,6 +59,126 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(NRArchitectureMode.lteOnly.localizedLabel(language: .simplifiedChinese), "仅 LTE")
     }
 
+    func testNeighborMeasurementsExposeDeviceControlSurface() {
+        XCTAssertTrue(ModemCapability.neighborMeasurements.supportsDeviceControlSurface)
+        XCTAssertFalse(ModemCapability.neighborMeasurements.supportsControlSession)
+        XCTAssertTrue(ModemCapability.networkScan.supportsControlSession)
+        XCTAssertFalse(ModemCapability.statusRead.supportsDeviceControlSurface)
+    }
+
+    func testControlPresentationInvalidationDistinguishesPLMNFromModemChanges() {
+        let endpointA = ScopedEndpoint(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            interfaceName: "en8",
+            interfaceIndex: 8,
+            sourceAddress: "192.168.254.2"
+        )
+        let endpointB = ScopedEndpoint(
+            baseURL: URL(string: "http://192.168.254.1")!,
+            interfaceName: "en9",
+            interfaceIndex: 9,
+            sourceAddress: "192.168.254.3",
+            connectionPath: .routed,
+            gateway: "192.168.8.1"
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-a",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointA,
+                previousPLMN: "00101",
+                nextPLMN: "00102"
+            ),
+            .operatorContext
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-b",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointA,
+                previousPLMN: "00101",
+                nextPLMN: "00101"
+            ),
+            .all
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-a",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointA,
+                previousPLMN: "00101",
+                nextPLMN: "00101"
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            ControlPresentationInvalidation.transition(
+                previousModemID: "modem-a",
+                nextModemID: "modem-a",
+                previousEndpoint: endpointA,
+                nextEndpoint: endpointB,
+                previousPLMN: "00101",
+                nextPLMN: "00101"
+            ),
+            .all
+        )
+    }
+
+    func testPLMNChangeClearsOnlyOperatorFromVerifiedControlState() {
+        let selection = OperatorSelection(
+            mode: .manual,
+            operatorName: "Fixture",
+            plmn: "00101",
+            accessTechnology: .lte5GC
+        )
+        let state = ModemControlState(
+            operatorSelection: selection,
+            architecture: .nsaOnly,
+            saBands: [77],
+            nsaBands: [66, 77],
+            lteBands: [2, 4, 66],
+            canRestoreDefaults: true,
+            preferenceLifetime: .persistent
+        )
+
+        let updated = state.clearingOperatorSelection()
+
+        XCTAssertNil(updated.operatorSelection)
+        XCTAssertEqual(updated.architecture, state.architecture)
+        XCTAssertEqual(updated.saBands, state.saBands)
+        XCTAssertEqual(updated.nsaBands, state.nsaBands)
+        XCTAssertEqual(updated.lteBands, state.lteBands)
+        XCTAssertEqual(updated.canRestoreDefaults, state.canRestoreDefaults)
+        XCTAssertEqual(updated.preferenceLifetime, state.preferenceLifetime)
+    }
+
+    func testRollbackFailureMessageSeparatesRecoveryDetail() {
+        XCTAssertEqual(
+            ModemControlError.rollbackFailed(
+                operation: "Band update failed.",
+                rollback: "Reset was rejected"
+            ).errorDescription,
+            "Band update failed. Automatic rollback also failed: Reset was rejected. The modem control state is unknown."
+        )
+        XCTAssertEqual(
+            ModemControlError.rollbackFailed(
+                operation: "Band update failed.",
+                rollback: "Reset timed out!"
+            ).errorDescription,
+            "Band update failed. Automatic rollback also failed: Reset timed out! The modem control state is unknown."
+        )
+        XCTAssertEqual(
+            ModemControlError.rollbackFailed(
+                operation: "Band update failed.",
+                rollback: ""
+            ).errorDescription,
+            "Band update failed. Automatic rollback also failed: No rollback detail was reported. The modem control state is unknown."
+        )
+    }
+
     func testLanguageDisplayNamesAndLocales() {
         XCTAssertEqual(AppLanguage.english.displayName, "English")
         XCTAssertEqual(AppLanguage.simplifiedChinese.displayName, "简体中文")

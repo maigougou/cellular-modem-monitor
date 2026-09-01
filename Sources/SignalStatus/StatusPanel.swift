@@ -94,7 +94,9 @@ struct StatusPanel: View {
                         pendingControl = nil
                         return
                     }
-                    model.loadNetworkControls()
+                    if model.supportsControlSession {
+                        model.loadNetworkControls()
+                    }
                     DispatchQueue.main.async {
                         withAnimation(.easeOut(duration: 0.2)) {
                             proxy.scrollTo("network-controls", anchor: .bottom)
@@ -106,7 +108,10 @@ struct StatusPanel: View {
                     // without changing the USB device. Refresh the expanded
                     // read-only control summary once the new registration is
                     // available; do not probe while the modem has no PLMN.
-                    guard showNetworkControls, plmn != nil else { return }
+                    guard showNetworkControls,
+                          plmn != nil,
+                          model.supportsControlSession
+                    else { return }
                     model.loadNetworkControls()
                 }
                 .onChange(of: model.supportsDeviceControls) { isSupported in
@@ -114,12 +119,12 @@ struct StatusPanel: View {
                     showNetworkControls = false
                     pendingControl = nil
                 }
-                .onChange(of: model.activeModem?.id) { _ in
-                    // Confirmations and scan rows belong to the modem that
-                    // produced them. Never carry an A-device confirmation into
-                    // a newly selected B device, even if both support controls.
+                .onChange(of: model.activeModem) { _ in
+                    // Confirmations, restore state and scan rows belong to the
+                    // exact modem + endpoint binding that produced them. Never
+                    // carry them to another device or connection path.
                     pendingControl = nil
-                    guard showNetworkControls, model.supportsDeviceControls else { return }
+                    guard showNetworkControls, model.supportsControlSession else { return }
                     model.loadNetworkControls()
                 }
             }

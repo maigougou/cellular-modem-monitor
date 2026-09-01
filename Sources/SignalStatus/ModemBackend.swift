@@ -37,19 +37,36 @@ struct ModemCapability: OptionSet, Hashable, Sendable {
     static let radioStatus = statusRead
     static let deviceInformation = identityRead
 
-    static let vosControls: ModemCapability = [
+    /// Capabilities backed by an authenticated `ModemControlSession`.
+    /// Neighbor measurements are deliberately excluded because they are
+    /// refreshed through the ordinary read-only status path.
+    static let controlSessionFeatures: ModemCapability = [
         .operatorSelection,
         .networkScan,
         .radioAccessPreference,
         .nrBandLock,
-        .lteBandLock,
-        .neighborMeasurements
+        .lteBandLock
     ]
 
     /// All capabilities used by the shared device-control surface. The legacy
-    /// `vosControls` spelling remains source-compatible, but no UI or
-    /// coordinator decision may infer a backend kind from this set.
-    static let deviceControls = vosControls
+    /// VOS alias below remains source-compatible, but no UI or coordinator
+    /// decision may infer a backend kind from this set.
+    static let deviceControls = controlSessionFeatures.union(.neighborMeasurements)
+
+    /// Legacy spelling retained for the original VOS backend.
+    static let vosControls = deviceControls
+
+    /// Whether at least one section of the shared device-control surface can
+    /// be shown. Neighbor measurements belong to that surface even though
+    /// they are read-only, so callers must use the complete alias above.
+    var supportsDeviceControlSurface: Bool {
+        !intersection(.deviceControls).isEmpty
+    }
+
+    /// Whether the backend needs to open an authenticated control session.
+    var supportsControlSession: Bool {
+        !intersection(.controlSessionFeatures).isEmpty
+    }
 }
 
 /// Describes how macOS reaches the management endpoint. It is intentionally

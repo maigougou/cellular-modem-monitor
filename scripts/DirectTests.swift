@@ -47,6 +47,130 @@ enum DirectTests {
             check(NRArchitectureMode.lteOnly.localizedLabel(language: .simplifiedChinese) == "仅 LTE",
                   "localized LTE-only label", failures: &failures)
 
+            check(
+                ModemCapability.neighborMeasurements.supportsDeviceControlSurface,
+                "neighbor measurements expose the shared device-control surface",
+                failures: &failures
+            )
+            check(
+                !ModemCapability.neighborMeasurements.supportsControlSession &&
+                    ModemCapability.networkScan.supportsControlSession,
+                "read-only neighbor capability does not open a control session",
+                failures: &failures
+            )
+            check(
+                !ModemCapability.statusRead.supportsDeviceControlSurface,
+                "status-only capability does not expose device controls",
+                failures: &failures
+            )
+
+            let presentationEndpointA = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en8",
+                interfaceIndex: 8,
+                sourceAddress: "192.168.254.2"
+            )
+            let presentationEndpointB = ScopedEndpoint(
+                baseURL: URL(string: "http://192.168.254.1")!,
+                interfaceName: "en9",
+                interfaceIndex: 9,
+                sourceAddress: "192.168.254.3",
+                connectionPath: .routed,
+                gateway: "192.168.8.1"
+            )
+            check(
+                ControlPresentationInvalidation.transition(
+                    previousModemID: "modem-a",
+                    nextModemID: "modem-a",
+                    previousEndpoint: presentationEndpointA,
+                    nextEndpoint: presentationEndpointA,
+                    previousPLMN: "00101",
+                    nextPLMN: "00102"
+                ) == .operatorContext &&
+                    ControlPresentationInvalidation.transition(
+                        previousModemID: "modem-a",
+                        nextModemID: "modem-b",
+                        previousEndpoint: presentationEndpointA,
+                        nextEndpoint: presentationEndpointA,
+                        previousPLMN: "00101",
+                        nextPLMN: "00101"
+                    ) == .all &&
+                    ControlPresentationInvalidation.transition(
+                        previousModemID: "modem-a",
+                        nextModemID: "modem-a",
+                        previousEndpoint: presentationEndpointA,
+                        nextEndpoint: presentationEndpointA,
+                        previousPLMN: "00101",
+                        nextPLMN: "00101"
+                    ) == .none &&
+                    ControlPresentationInvalidation.transition(
+                        previousModemID: "modem-a",
+                        nextModemID: "modem-a",
+                        previousEndpoint: presentationEndpointA,
+                        nextEndpoint: presentationEndpointB,
+                        previousPLMN: "00101",
+                        nextPLMN: "00101"
+                    ) == .all,
+                "control presentation invalidation distinguishes PLMN and modem changes",
+                failures: &failures
+            )
+
+            let priorSelection = OperatorSelection(
+                mode: .manual,
+                operatorName: "Fixture",
+                plmn: "00101",
+                accessTechnology: .lte5GC
+            )
+            let priorControlState = ModemControlState(
+                operatorSelection: priorSelection,
+                architecture: .nsaOnly,
+                saBands: [77],
+                nsaBands: [66, 77],
+                lteBands: [2, 4, 66],
+                canRestoreDefaults: true,
+                preferenceLifetime: .persistent
+            )
+            let plmnChangedState = priorControlState.clearingOperatorSelection()
+            check(
+                plmnChangedState.operatorSelection == nil &&
+                    plmnChangedState.architecture == priorControlState.architecture &&
+                    plmnChangedState.saBands == priorControlState.saBands &&
+                    plmnChangedState.nsaBands == priorControlState.nsaBands &&
+                    plmnChangedState.lteBands == priorControlState.lteBands &&
+                    plmnChangedState.canRestoreDefaults == priorControlState.canRestoreDefaults &&
+                    plmnChangedState.preferenceLifetime == priorControlState.preferenceLifetime,
+                "PLMN change preserves verified radio and restore state",
+                failures: &failures
+            )
+
+            check(
+                ModemControlError.rollbackFailed(
+                    operation: "Band update failed.",
+                    rollback: "Reset was rejected"
+                ).errorDescription ==
+                    "Band update failed. Automatic rollback also failed: Reset was rejected. The modem control state is unknown.",
+                "rollback failure message separates recovery detail",
+                failures: &failures
+            )
+            check(
+                ModemControlError.rollbackFailed(
+                    operation: "Band update failed.",
+                    rollback: "Reset timed out!"
+                ).errorDescription ==
+                    "Band update failed. Automatic rollback also failed: Reset timed out! The modem control state is unknown.",
+                "rollback failure message preserves existing punctuation",
+                failures: &failures
+            )
+            check(
+                ModemControlError.rollbackFailed(
+                    operation: "Band update failed.",
+                    rollback: ""
+                ).errorDescription ==
+                    "Band update failed. Automatic rollback also failed: No rollback detail was reported. The modem control state is unknown.",
+                "rollback failure message handles missing recovery detail",
+                failures: &failures
+            )
+
             let operationGuard = ControlOperationDeviceGuard(expectedFingerprint: "device-a")
             try operationGuard.validate(currentFingerprint: "device-a")
             check(operationGuard.isValid, "control operation accepts its bound device", failures: &failures)

@@ -12,6 +12,15 @@ struct ModemControlState: Equatable, Sendable {
     var lteBands: Set<Int>
     var canRestoreDefaults: Bool
     var preferenceLifetime: ModemPreferenceLifetime
+
+    /// A serving-PLMN transition can be a normal operator change, not a modem
+    /// or SIM replacement. Drop only the operator-specific value while keeping
+    /// the verified radio tuple and restore capability for the same modem.
+    func clearingOperatorSelection() -> ModemControlState {
+        var updated = self
+        updated.operatorSelection = nil
+        return updated
+    }
 }
 
 enum ModemPreferenceLifetime: Equatable, Sendable {
@@ -79,7 +88,16 @@ enum ModemControlError: LocalizedError, Equatable, Sendable {
             let values = bands.map(String.init).joined(separator: ", ")
             return "These \(radio) bands are not enabled by the modem defaults: \(values)."
         case let .rollbackFailed(operation, rollback):
-            return "\(operation) Automatic rollback also failed: \(rollback) The modem control state is unknown."
+            let detail = rollback.trimmingCharacters(in: .whitespacesAndNewlines)
+            let terminatedDetail: String
+            if detail.isEmpty {
+                terminatedDetail = "No rollback detail was reported."
+            } else if let last = detail.last, ".!?".contains(last) {
+                terminatedDetail = detail
+            } else {
+                terminatedDetail = detail + "."
+            }
+            return "\(operation) Automatic rollback also failed: \(terminatedDetail) The modem control state is unknown."
         case let .timedOut(operation):
             return "\(operation) did not complete before the verification timeout."
         case .deviceChanged:
