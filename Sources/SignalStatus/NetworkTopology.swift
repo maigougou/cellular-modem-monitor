@@ -83,6 +83,31 @@ struct NetworkInterfaceSnapshot: Hashable, Sendable {
     let isPrimary: Bool
     let addresses: [IPv4InterfaceAddress]
     let router: IPv4HostAddress?
+    let allAddresses: [String]
+
+    init(
+        name: String,
+        index: UInt32,
+        serviceID: String?,
+        kind: NetworkInterfaceKind,
+        isUp: Bool,
+        isRunning: Bool,
+        isPrimary: Bool,
+        addresses: [IPv4InterfaceAddress],
+        router: IPv4HostAddress?,
+        allAddresses: [String]? = nil
+    ) {
+        self.name = name
+        self.index = index
+        self.serviceID = serviceID
+        self.kind = kind
+        self.isUp = isUp
+        self.isRunning = isRunning
+        self.isPrimary = isPrimary
+        self.addresses = addresses
+        self.router = router
+        self.allAddresses = allAddresses ?? addresses.map(\.address.description)
+    }
 
     var isEligibleForModemDiscovery: Bool {
         isUp && isRunning && kind == .physical && !addresses.isEmpty
@@ -91,6 +116,18 @@ struct NetworkInterfaceSnapshot: Hashable, Sendable {
 
 struct NetworkTopologySnapshot: Equatable, Sendable {
     let interfaces: [NetworkInterfaceSnapshot]
+    let primaryIPv4InterfaceName: String?
+    let primaryIPv6InterfaceName: String?
+
+    init(
+        interfaces: [NetworkInterfaceSnapshot],
+        primaryIPv4InterfaceName: String? = nil,
+        primaryIPv6InterfaceName: String? = nil
+    ) {
+        self.interfaces = interfaces
+        self.primaryIPv4InterfaceName = primaryIPv4InterfaceName
+        self.primaryIPv6InterfaceName = primaryIPv6InterfaceName
+    }
 
     static let empty = NetworkTopologySnapshot(interfaces: [])
 
@@ -109,7 +146,8 @@ protocol NetworkTopologyProviding: Sendable {
 struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
     func snapshot() -> NetworkTopologySnapshot {
         let serviceState = Self.copyIPv4ServiceState()
-        let primaryInterface = Self.copyPrimaryInterfaceName()
+        let primaryIPv4Interface = Self.copyPrimaryInterfaceName(entity: kSCEntNetIPv4)
+        let primaryIPv6Interface = Self.copyPrimaryInterfaceName(entity: kSCEntNetIPv6)
         var pointer: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&pointer) == 0, let first = pointer else {
             return .empty
@@ -122,6 +160,7 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
             var isUp: Bool
             var isRunning: Bool
             var addresses: Set<IPv4InterfaceAddress>
+            var allAddresses: Set<String>
         }
 
         var collected: [String: MutableInterface] = [:]
@@ -139,7 +178,8 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
                 kind: kind,
                 isUp: false,
                 isRunning: false,
-                addresses: []
+                addresses: [],
+                allAddresses: []
             )
             value.kind = kind
             value.isUp = value.isUp || isUp
@@ -155,6 +195,10 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
                     address: address,
                     prefixLength: prefixLength
                 ))
+            }
+            if let socketAddress = item.pointee.ifa_addr,
+               let address = Self.ipAddressString(from: socketAddress) {
+                value.allAddresses.insert(address)
             }
             collected[name] = value
         }
@@ -174,19 +218,24 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
                 kind: value.kind,
                 isUp: value.isUp,
                 isRunning: value.isRunning,
-                isPrimary: name == primaryInterface,
+                isPrimary: name == primaryIPv4Interface || name == primaryIPv6Interface,
                 addresses: value.addresses.sorted {
                     if $0.address != $1.address { return $0.address < $1.address }
                     return $0.prefixLength < $1.prefixLength
                 },
-                router: selectedService?.router
+                router: selectedService?.router,
+                allAddresses: value.allAddresses.sorted()
             )
         }.sorted {
             if $0.index != $1.index { return $0.index < $1.index }
             return $0.name < $1.name
         }
 
-        return NetworkTopologySnapshot(interfaces: snapshots)
+        return NetworkTopologySnapshot(
+            interfaces: snapshots,
+            primaryIPv4InterfaceName: primaryIPv4Interface,
+            primaryIPv6InterfaceName: primaryIPv6Interface
+        )
     }
 
     private struct IPv4ServiceState {
@@ -224,7 +273,7 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
         return result
     }
 
-    private static func copyPrimaryInterfaceName() -> String? {
+    private static func copyPrimaryInterfaceName(entity: CFString) -> String? {
         guard let store = SCDynamicStoreCreate(
             nil,
             "CellularModemMonitor.Topology.Primary" as CFString,
@@ -234,7 +283,7 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
         let key = SCDynamicStoreKeyCreateNetworkGlobalEntity(
             nil,
             kSCDynamicStoreDomainState,
-            kSCEntNetIPv4
+            entity
         )
         guard let dictionary = SCDynamicStoreCopyValue(store, key) as? [String: Any]
         else { return nil }
@@ -282,6 +331,30 @@ struct SystemNetworkTopologyProvider: NetworkTopologyProviding {
         ) != nil else { return nil }
         let bytes = text.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
         return IPv4HostAddress(string: String(decoding: bytes, as: UTF8.self))
+    }
+
+    private static func ipAddressString(
+        from socketAddress: UnsafePointer<sockaddr>
+    ) -> String? {
+        switch Int32(socketAddress.pointee.sa_family) {
+        case AF_INET:
+            return ipv4Address(from: socketAddress)?.description
+        case AF_INET6:
+            var text = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            var address = UnsafeRawPointer(socketAddress)
+                .assumingMemoryBound(to: sockaddr_in6.self)
+                .pointee.sin6_addr
+            guard inet_ntop(
+                AF_INET6,
+                &address,
+                &text,
+                socklen_t(text.count)
+            ) != nil else { return nil }
+            let bytes = text.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+            return String(decoding: bytes, as: UTF8.self)
+        default:
+            return nil
+        }
     }
 
     private static func prefixLength(from mask: IPv4HostAddress) -> UInt8? {

@@ -378,15 +378,19 @@ enum DirectTests {
             )
 
             check(
-                OoklaSpeedTestCommand.arguments(interfaceName: "en8") == [
-                    "--interface=en8",
+                OoklaSpeedTestCommand.arguments() == [
                     "--format=json",
                     "--progress=no",
                     "--accept-license",
                     "--accept-gdpr"
                 ],
-                "Ookla command binds only the frozen interface and requests structured output",
+                "Ookla command avoids broken Darwin explicit binding and requests structured output",
                 failures: &failures
+            )
+            let ooklaRouteProof = OoklaRouteProof(
+                interfaceName: "en8",
+                interfaceIndex: 18,
+                sourceAddresses: ["192.168.254.20"]
             )
             let ooklaJSON = Data(#"""
             {
@@ -403,6 +407,7 @@ enum DirectTests {
             let parsedOokla = try OoklaSpeedTestResultParser.parse(
                 ooklaJSON,
                 binding: speedBinding,
+                routeProof: ooklaRouteProof,
                 completedAt: Date(timeIntervalSince1970: 456)
             )
             check(
@@ -427,7 +432,11 @@ enum DirectTests {
                   "interface":{"internalIp":"192.168.254.99","name":"en8"}
                 }
                 """#.utf8)
-                _ = try OoklaSpeedTestResultParser.parse(wrongSource, binding: speedBinding)
+                _ = try OoklaSpeedTestResultParser.parse(
+                    wrongSource,
+                    binding: speedBinding,
+                    routeProof: ooklaRouteProof
+                )
                 failures.append("Ookla result must reject a changed source address")
             } catch let error as SpeedTestError {
                 check(
@@ -439,6 +448,96 @@ enum DirectTests {
                     failures: &failures
                 )
             }
+
+            let ipv6Address = "2001:56b:4f50:8a68:586f:1b8a:9b25:b27f"
+            let dualStackProof = OoklaRouteProof(
+                interfaceName: "en8",
+                interfaceIndex: 18,
+                sourceAddresses: ["192.168.254.20", ipv6Address]
+            )
+            let ipv6OoklaJSON = Data(#"""
+            {
+              "type":"result",
+              "download":{"bandwidth":23459706},
+              "upload":{"bandwidth":2769426},
+              "interface":{"internalIp":"2001:56b:4f50:8a68:586f:1b8a:9b25:b27f","name":"en8"}
+            }
+            """#.utf8)
+            let parsedIPv6Ookla = try OoklaSpeedTestResultParser.parse(
+                ipv6OoklaJSON,
+                binding: speedBinding,
+                routeProof: dualStackProof
+            )
+            check(
+                parsedIPv6Ookla.downloadBitsPerSecond == 187_677_648 &&
+                    parsedIPv6Ookla.uploadBitsPerSecond == 22_155_408,
+                "Ookla accepts a frozen IPv6 source assigned to the discovered interface",
+                failures: &failures
+            )
+
+            let primaryTopology = NetworkTopologySnapshot(
+                interfaces: [NetworkInterfaceSnapshot(
+                    name: "en8",
+                    index: 18,
+                    serviceID: "fixture",
+                    kind: .physical,
+                    isUp: true,
+                    isRunning: true,
+                    isPrimary: true,
+                    addresses: [IPv4InterfaceAddress(
+                        address: IPv4HostAddress(string: "192.168.254.20")!,
+                        prefixLength: 24
+                    )],
+                    router: IPv4HostAddress(string: "192.168.254.1"),
+                    allAddresses: ["192.168.254.20", ipv6Address]
+                )],
+                primaryIPv4InterfaceName: "en8",
+                primaryIPv6InterfaceName: "en8"
+            )
+            let routeValidator = SystemOoklaRouteValidator(
+                topologyProvider: DirectFixedNetworkTopologyProvider(snapshot: primaryTopology)
+            )
+            let capturedProof = try routeValidator.capture(binding: speedBinding)
+            check(
+                capturedProof.interfaceName == "en8" &&
+                    capturedProof.interfaceIndex == 18 &&
+                    capturedProof.sourceAddresses == ["192.168.254.20", ipv6Address],
+                "Ookla freezes the dynamically discovered default interface and all of its IP addresses",
+                failures: &failures
+            )
+
+            let splitDefaultValidator = SystemOoklaRouteValidator(
+                topologyProvider: DirectFixedNetworkTopologyProvider(snapshot: NetworkTopologySnapshot(
+                    interfaces: primaryTopology.interfaces,
+                    primaryIPv4InterfaceName: "en0",
+                    primaryIPv6InterfaceName: "en8"
+                ))
+            )
+            do {
+                _ = try splitDefaultValidator.capture(binding: speedBinding)
+                failures.append("Ookla must not run unbound when default route families disagree")
+            } catch let error as SpeedTestError {
+                check(
+                    error == .defaultRouteMismatch(expected: "en8", actual: ["en0", "en8"]),
+                    "Ookla fails closed before traffic when another interface owns a default route",
+                    failures: &failures
+                )
+            }
+
+            let conciseFailure = OoklaSpeedTestFailureSummary.summarize(
+                standardOutput: Data(#"""
+                {"type":"log","message":"bind(9, ...)","level":"error"}
+                {"type":"log","message":"Error: [0] Cannot open socket","level":"error"}
+                {"type":"log","message":"Error: [0] Cannot open socket","level":"error"}
+                {"type":"log","message":"Server Selection - Failed to find a working test server. (NoServers)","level":"error"}
+                """#.utf8),
+                standardError: Data()
+            )
+            check(
+                conciseFailure == "Error: [0] Cannot open socket · Server Selection - Failed to find a working test server. (NoServers)",
+                "Ookla JSON logs are deduplicated and summarized instead of dumped into the UI",
+                failures: &failures
+            )
 
             let unavailableModel = await MainActor.run {
                 SpeedTestModel(runner: DirectUnavailableSpeedTestRunner())

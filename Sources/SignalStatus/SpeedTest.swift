@@ -112,6 +112,8 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
     case interfaceIndexChanged(expected: UInt32, actual: UInt32)
     case sourceAddressChanged(String)
     case gatewayChanged(expected: String, actual: String?)
+    case defaultRouteUnavailable
+    case defaultRouteMismatch(expected: String, actual: [String])
     case networkQualityUnavailable
     case ooklaCLIUnavailable
     case ooklaCLIIncompatible
@@ -158,6 +160,18 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
                 language: language,
                 expected,
                 actual ?? "—"
+            )
+        case .defaultRouteUnavailable:
+            return L10n.text(
+                "No default Internet route is available for the Ookla test.",
+                language: language
+            )
+        case let .defaultRouteMismatch(expected, actual):
+            return L10n.format(
+                "Ookla would use the default route through %@, not the modem interface %@.",
+                language: language,
+                actual.isEmpty ? "—" : actual.joined(separator: ", "),
+                expected
             )
         case .networkQualityUnavailable:
             return L10n.text("The macOS networkQuality tool is unavailable.", language: language)
