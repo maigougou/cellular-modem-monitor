@@ -54,8 +54,7 @@ struct StatusPanel: View {
                                 .id("network-controls")
                         }
                         SpeedTestCard(
-                            networkQuality: model.networkQualitySpeedTestModel,
-                            ookla: model.ooklaSpeedTestModel
+                            speedTest: model.speedTestModel
                         )
                             .id("speed-test")
                         deviceDetailsCard

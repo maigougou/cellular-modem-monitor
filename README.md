@@ -37,9 +37,8 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - Operator, PLMN and selected network interface
 - Detailed, compact and icon-only menu-bar styles
 - English and Simplified Chinese UI with instant language switching
-- Two interface-bound speed tests shown together for comparison: macOS
-  `networkQuality` above and the official Ookla Speedtest CLI below, each with
-  live download/upload rates and its own final metrics
+- An interface-bound official Ookla Speedtest CLI test with live
+  download/upload rates and final latency, jitter, packet-loss and server data
 - Manual refresh, 1/5/10/15/30/60-second polling, launch at login, faster
   recovery polling and copyable diagnostics
 
@@ -131,12 +130,9 @@ already exist through the selected interface. The app relies on that existing
 macOS route and does not inspect the full route table or create or change
 system routes.
 
-## Interface-bound speed tests
+## Interface-bound speed test
 
-The **Speed test** card shows two independent test sections for direct
-comparison. The upper section runs the macOS 13+ built-in `networkQuality`
-with `-s`, so download and upload are measured sequentially;
-the lower section runs the separately installed official
+The **Speed test** card runs the separately installed official
 [Ookla Speedtest CLI](https://www.speedtest.net/apps/cli). On macOS, Ookla's
 documented Homebrew installation is:
 
@@ -149,10 +145,9 @@ brew install speedtest --force
 The app searches the standard Apple Silicon and Intel Homebrew paths as well as
 `PATH`; it does not bundle or download Ookla's binary. Before sending test
 traffic it verifies that the command identifies itself as **Speedtest by
-Ookla**. Running the Ookla section passes its documented acceptance flags and
+Ookla**. Running the test passes its documented acceptance flags and
 is subject to Ookla's linked EULA and privacy terms.
 
-`networkQuality` receives the exact interface discovered for the active modem.
 Ookla CLI 1.2.0 on some Darwin versions cannot open sockets when either
 `--interface` or `--ip` is supplied, even though an unbound test succeeds. The
 app therefore takes a fail-closed route proof before launching Ookla: every
@@ -163,24 +158,21 @@ Ookla JSON must report that interface and one of its frozen addresses. A split
 default route, interface change or address mismatch rejects or cancels the test
 instead of allowing an ambiguous path.
 
-The two buttons are interlocked so the tests cannot compete for bandwidth.
 Live download/upload values come from the verified interface's byte counters.
-The final `networkQuality` result must report that same interface. Ookla's
-machine-readable `bandwidth` values are bytes per second and are converted to
-bits per second for the shared display.
+Ookla's machine-readable `bandwidth` values are bytes per second and are
+converted to bits per second for display.
 
 The official Ookla CLI already performs its latency, download and upload phases
 in sequence and exposes no separate sequential-mode switch (`-s` means server
-ID in Ookla's CLI). During either test, the live tiles read whole-interface byte
+ID in Ookla's CLI). During the test, the live tiles read whole-interface byte
 counters, so TCP acknowledgements or unrelated interface traffic can show a
-small rate in the opposite direction; final values always come from the named
-test tool.
+small rate in the opposite direction; final values always come from Ookla.
 
 On a direct USB or Ethernet link, this binds the public test to the modem's Mac
 interface. On a routed layout such as Mac → router → modem, this proves that
-each test used the Mac-to-router interface; the router still controls its own
-WAN, VPN and multi-WAN selection. Running both tests transfers a substantial
-amount of data and should be done only when that usage is acceptable.
+the test used the Mac-to-router interface; the router still controls its own
+WAN, VPN and multi-WAN selection. A test can transfer a substantial amount of
+data and should be run only when that usage is acceptable.
 
 ## Install
 

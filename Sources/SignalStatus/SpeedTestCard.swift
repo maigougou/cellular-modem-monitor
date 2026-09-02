@@ -1,8 +1,7 @@
 import SwiftUI
 
 struct SpeedTestCard: View {
-    @ObservedObject var networkQuality: SpeedTestModel
-    @ObservedObject var ookla: SpeedTestModel
+    @ObservedObject var speedTest: SpeedTestModel
     @Environment(\.appLanguage) private var language
     @State private var isExpanded = false
 
@@ -25,17 +24,7 @@ struct SpeedTestCard: View {
                 }
 
                 SpeedTestEngineSection(
-                    kind: .networkQuality,
-                    speedTest: networkQuality,
-                    anotherTestIsRunning: ookla.isRunning
-                )
-
-                Divider().opacity(0.55)
-
-                SpeedTestEngineSection(
-                    kind: .ookla,
-                    speedTest: ookla,
-                    anotherTestIsRunning: networkQuality.isRunning
+                    speedTest: speedTest
                 )
 
                 Text(routeVerificationNote)
@@ -45,7 +34,7 @@ struct SpeedTestCard: View {
 
                 Label(
                     L10n.text(
-                        "Running both tests can use a substantial amount of cellular data.",
+                        "Speed tests can use a substantial amount of cellular data.",
                         language: language
                     ),
                     systemImage: "exclamationmark.circle"
@@ -64,59 +53,34 @@ struct SpeedTestCard: View {
     }
 
     private var boundInterfaceName: String? {
-        networkQuality.boundInterfaceName ?? ookla.boundInterfaceName
+        speedTest.boundInterfaceName
     }
 
     private var routeVerificationNote: String {
-        if networkQuality.boundConnectionPath == .routed || ookla.boundConnectionPath == .routed {
+        if speedTest.boundConnectionPath == .routed {
             return L10n.text(
-                "Each test is pinned to the shown Mac interface and its final result must identify that same interface. Live rates may include other traffic on it. Beyond the router, WAN, VPN and multi-WAN selection remain controlled by the router.",
+                "Traffic is pinned to the shown Mac interface and the final result must report that same interface. Live rates may include other traffic on it. Beyond the router, WAN, VPN and multi-WAN selection remain controlled by the router.",
                 language: language
             )
         }
         return L10n.text(
-            "Each test is pinned to the shown modem interface and its final result must identify that same interface. Live rates use interface counters and may include other traffic; final rates come from the named test tool.",
+            "Traffic is pinned to the shown modem interface and the final result must report that same interface. Live rates use interface counters and may include other traffic; final rates come from Ookla Speedtest CLI.",
             language: language
         )
     }
 }
 
-private enum SpeedTestEngineKind {
-    case networkQuality
-    case ookla
-
-    var title: String {
-        switch self {
-        case .networkQuality: return "macOS networkQuality"
-        case .ookla: return "Ookla Speedtest CLI"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .networkQuality: return "apple.logo"
-        case .ookla: return "speedometer"
-        }
-    }
-
-    var startLabel: String {
-        switch self {
-        case .networkQuality: return "Run macOS test"
-        case .ookla: return "Run Ookla test"
-        }
-    }
-}
-
 private struct SpeedTestEngineSection: View {
-    let kind: SpeedTestEngineKind
     @ObservedObject var speedTest: SpeedTestModel
-    let anotherTestIsRunning: Bool
     @Environment(\.appLanguage) private var language
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label(L10n.text(kind.title, language: language), systemImage: kind.icon)
-                .font(.caption.weight(.semibold))
+            Label(
+                L10n.text("Ookla Speedtest CLI", language: language),
+                systemImage: "speedometer"
+            )
+            .font(.caption.weight(.semibold))
 
             HStack(spacing: 8) {
                 SpeedTestRateTile(
@@ -133,23 +97,21 @@ private struct SpeedTestEngineSection: View {
 
             stateDetails
 
-            if kind == .ookla {
-                HStack(spacing: 4) {
-                    Text(L10n.text(
-                        "Uses the separately installed official Ookla CLI.",
-                        language: language
-                    ))
-                    Link(
-                        L10n.text("Ookla terms", language: language),
-                        destination: URL(string: "https://www.speedtest.net/about/eula")!
-                    )
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text(L10n.text(
+                    "Uses the separately installed official Ookla CLI.",
+                    language: language
+                ))
+                Link(
+                    L10n.text("Ookla terms", language: language),
+                    destination: URL(string: "https://www.speedtest.net/about/eula")!
+                )
             }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
 
             HStack {
-                if kind == .ookla, showsInstallLink {
+                if showsInstallLink {
                     Link(
                         L10n.text("Install official CLI", language: language),
                         destination: URL(string: "https://www.speedtest.net/apps/cli")!
@@ -166,13 +128,13 @@ private struct SpeedTestEngineSection: View {
                 } else if !showsInstallLink {
                     Button(action: speedTest.start) {
                         Label(
-                            L10n.text(isCompleted ? "Test again" : kind.startLabel, language: language),
+                            L10n.text(isCompleted ? "Test again" : "Run Ookla test", language: language),
                             systemImage: "gauge.with.dots.needle.67percent"
                         )
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(!speedTest.canStart || anotherTestIsRunning)
+                    .disabled(!speedTest.canStart)
                 }
             }
         }
@@ -205,12 +167,6 @@ private struct SpeedTestEngineSection: View {
                     SpeedTestDetailRow(
                         label: L10n.text("Jitter", language: language),
                         value: String(format: "%.1f ms", jitter)
-                    )
-                }
-                if let responsiveness = result.responsivenessRPM {
-                    SpeedTestDetailRow(
-                        label: L10n.text("Responsiveness", language: language),
-                        value: String(format: "%.0f RPM", responsiveness)
                     )
                 }
                 if let packetLoss = result.packetLossPercent {
@@ -247,7 +203,6 @@ private struct SpeedTestEngineSection: View {
     }
 
     private var showsInstallLink: Bool {
-        guard kind == .ookla else { return false }
         switch speedTest.state {
         case .unavailable(.ooklaCLIUnavailable), .failed(.ooklaCLIUnavailable),
              .unavailable(.ooklaCLIIncompatible), .failed(.ooklaCLIIncompatible):
