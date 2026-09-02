@@ -6,6 +6,8 @@ build_dir="$project_dir/.build/direct-release"
 module_cache="$project_dir/.build/module-cache"
 archive="$project_dir/dist/Cellular-Modem-Monitor-macOS.zip"
 binary="$build_dir/CellularModemMonitor"
+sparkle_dir=${SPARKLE_DIST_DIR:-$("$project_dir/scripts/ensure-sparkle.sh")}
+sparkle_framework="$sparkle_dir/Sparkle.framework"
 
 mkdir -p "$build_dir" "$module_cache" "$project_dir/dist"
 
@@ -25,6 +27,10 @@ compile() {
     -sdk "$1" \
     -target "${arch}-apple-macosx13.0" \
     -module-cache-path "$module_cache" \
+    -F "$sparkle_dir" \
+    -framework Sparkle \
+    -Xlinker -rpath \
+    -Xlinker @executable_path/../Frameworks \
     "$project_dir"/Sources/SignalStatus/*.swift \
     -o "$binary"
 }
@@ -57,10 +63,11 @@ trap 'rm -rf "$staging_dir"' EXIT HUP INT TERM
 staging_app="$staging_dir/Cellular Modem Monitor.app"
 staging_archive="$staging_dir/Cellular-Modem-Monitor-macOS.zip"
 
-mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Resources"
+mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Resources" "$staging_app/Contents/Frameworks"
 cp "$binary" "$staging_app/Contents/MacOS/CellularModemMonitor"
 cp "$project_dir/Resources/Info.plist" "$staging_app/Contents/Info.plist"
 cp "$project_dir/Resources/ModemSignalSSHAskPass.sh" "$staging_app/Contents/Resources/ModemSignalSSHAskPass.sh"
+/usr/bin/ditto "$sparkle_framework" "$staging_app/Contents/Frameworks/Sparkle.framework"
 icon_path=$(SIGNAL_STATUS_ICON_WORK_DIR="$staging_dir/icon" "$project_dir/scripts/generate-icon.sh")
 cp "$icon_path" "$staging_app/Contents/Resources/AppIcon.icns"
 chmod 755 "$staging_app/Contents/MacOS/CellularModemMonitor" "$staging_app/Contents/Resources/ModemSignalSSHAskPass.sh"
@@ -74,7 +81,7 @@ else
   codesign --force --options runtime --timestamp --sign "$signing_identity" "$staging_app" >/dev/null
 fi
 codesign --verify --deep --strict "$staging_app"
-(cd "$staging_dir" && COPYFILE_DISABLE=1 /usr/bin/zip -qry -X "$staging_archive" "Cellular Modem Monitor.app")
+(cd "$staging_dir" && COPYFILE_DISABLE=1 /usr/bin/zip -qry -y -X "$staging_archive" "Cellular Modem Monitor.app")
 
 # Keep the signed application inside the ZIP. Copying an expanded .app onto
 # some external volumes can create a hidden resource fork on the .icns file.

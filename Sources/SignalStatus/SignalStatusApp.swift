@@ -3,11 +3,13 @@ import SwiftUI
 @main
 struct CellularModemMonitorApp: App {
     @StateObject private var model = StatusModel()
+    @StateObject private var softwareUpdater = SoftwareUpdater()
 
     var body: some Scene {
         MenuBarExtra {
             StatusPanel()
                 .environmentObject(model)
+                .environmentObject(softwareUpdater)
                 .environment(\.appLanguage, model.language)
                 .environment(\.locale, model.language.locale)
         } label: {
