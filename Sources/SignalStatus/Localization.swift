@@ -136,6 +136,8 @@ enum L10n {
         "The bound interface changed identity (expected index %d, found %d).": "绑定接口的身份已改变（预期索引 %d，实际为 %d）。",
         "The bound source address %@ is no longer assigned to the modem interface.": "绑定的源地址 %@ 已不再属于该调制解调器接口。",
         "The bound gateway changed (expected %@, found %@).": "绑定的网关已改变（预期为 %@，实际为 %@）。",
+        "No default Internet route is available for the Ookla test.": "Ookla 测速没有可用的默认互联网路由。",
+        "Ookla would use the default route through %@, not the modem interface %@.": "Ookla 将通过默认路由 %@，而不是调制解调器接口 %@。",
         "The macOS networkQuality tool is unavailable.": "macOS networkQuality 工具不可用。",
         "The official Ookla Speedtest CLI is not installed.": "尚未安装官方 Ookla Speedtest CLI。",
         "The installed speedtest command is not the official Ookla CLI.": "已安装的 speedtest 命令不是官方 Ookla CLI。",

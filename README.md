@@ -152,15 +152,22 @@ traffic it verifies that the command identifies itself as **Speedtest by
 Ookla**. Running the Ookla section passes its documented acceptance flags and
 is subject to Ookla's linked EULA and privacy terms.
 
-Both tools receive the exact interface discovered for the active modem. The
-tests never fall back to the default route when that interface or its index
-cannot be verified, and the two buttons are interlocked so the tests cannot
-compete for bandwidth. Live download/upload values come from that interface's
-byte counters. The final `networkQuality` result must report the same interface;
-the final Ookla JSON must report both that interface and the frozen internal IP
-before the app accepts either result. Ookla's machine-readable `bandwidth`
-values are bytes per second and are converted to bits per second for the shared
-display.
+`networkQuality` receives the exact interface discovered for the active modem.
+Ookla CLI 1.2.0 on some Darwin versions cannot open sockets when either
+`--interface` or `--ip` is supplied, even though an unbound test succeeds. The
+app therefore takes a fail-closed route proof before launching Ookla: every
+active IPv4/IPv6 default route must point to the dynamically discovered modem
+interface, its interface index and assigned IPv4/IPv6 addresses are frozen,
+and the same route proof is rechecked throughout and after the run. The final
+Ookla JSON must report that interface and one of its frozen addresses. A split
+default route, interface change or address mismatch rejects or cancels the test
+instead of allowing an ambiguous path.
+
+The two buttons are interlocked so the tests cannot compete for bandwidth.
+Live download/upload values come from the verified interface's byte counters.
+The final `networkQuality` result must report that same interface. Ookla's
+machine-readable `bandwidth` values are bytes per second and are converted to
+bits per second for the shared display.
 
 The official Ookla CLI already performs its latency, download and upload phases
 in sequence and exposes no separate sequential-mode switch (`-s` means server

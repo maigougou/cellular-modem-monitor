@@ -32,9 +32,8 @@ enum OoklaSpeedTestExecutable {
 }
 
 enum OoklaSpeedTestCommand {
-    static func arguments(interfaceName: String) -> [String] {
+    static func arguments() -> [String] {
         [
-            "--interface=\(interfaceName)",
             "--format=json",
             "--progress=no",
             "--accept-license",
@@ -52,7 +51,7 @@ struct OoklaSpeedTestProcessOutput: Equatable, Sendable {
 protocol OoklaSpeedTestProcessExecuting: Sendable {
     var availabilityError: SpeedTestError? { get }
 
-    func execute(interfaceName: String) async throws -> OoklaSpeedTestProcessOutput
+    func execute() async throws -> OoklaSpeedTestProcessOutput
 }
 
 private final class OoklaSpeedTestProcessBox: @unchecked Sendable {
@@ -79,7 +78,7 @@ actor SystemOoklaSpeedTestProcess: OoklaSpeedTestProcessExecuting {
         availabilityError = executableURL == nil ? .ooklaCLIUnavailable : nil
     }
 
-    func execute(interfaceName: String) async throws -> OoklaSpeedTestProcessOutput {
+    func execute() async throws -> OoklaSpeedTestProcessOutput {
         guard let executableURL else { throw SpeedTestError.ooklaCLIUnavailable }
         try verifyOfficialExecutable(executableURL)
 
@@ -93,7 +92,7 @@ actor SystemOoklaSpeedTestProcess: OoklaSpeedTestProcessExecuting {
         let standardOutput = Pipe()
         let standardError = Pipe()
         process.executableURL = executableURL
-        process.arguments = OoklaSpeedTestCommand.arguments(interfaceName: interfaceName)
+        process.arguments = OoklaSpeedTestCommand.arguments()
         process.standardOutput = standardOutput
         process.standardError = standardError
         let box = OoklaSpeedTestProcessBox(
@@ -184,10 +183,106 @@ actor SystemOoklaSpeedTestProcess: OoklaSpeedTestProcessExecuting {
     }
 }
 
+struct OoklaRouteProof: Equatable, Sendable {
+    let interfaceName: String
+    let interfaceIndex: UInt32
+    let sourceAddresses: Set<String>
+}
+
+protocol OoklaRouteValidating: Sendable {
+    func capture(binding: SpeedTestBinding) throws -> OoklaRouteProof
+    func validate(proof: OoklaRouteProof) throws
+}
+
+struct SystemOoklaRouteValidator: OoklaRouteValidating {
+    private let topologyProvider: any NetworkTopologyProviding
+
+    init(
+        topologyProvider: any NetworkTopologyProviding = SystemNetworkTopologyProvider()
+    ) {
+        self.topologyProvider = topologyProvider
+    }
+
+    func capture(binding: SpeedTestBinding) throws -> OoklaRouteProof {
+        let topology = topologyProvider.snapshot()
+        let interface = try validatedInterface(
+            named: binding.interfaceName,
+            index: binding.interfaceIndex,
+            topology: topology
+        )
+        try validateDefaultRoutes(
+            expectedInterface: binding.interfaceName,
+            topology: topology
+        )
+        let addresses = Set(interface.allAddresses)
+        guard !addresses.isEmpty else {
+            throw SpeedTestError.interfaceUnavailable(binding.interfaceName)
+        }
+        return OoklaRouteProof(
+            interfaceName: binding.interfaceName,
+            interfaceIndex: binding.interfaceIndex,
+            sourceAddresses: addresses
+        )
+    }
+
+    func validate(proof: OoklaRouteProof) throws {
+        let topology = topologyProvider.snapshot()
+        _ = try validatedInterface(
+            named: proof.interfaceName,
+            index: proof.interfaceIndex,
+            topology: topology
+        )
+        try validateDefaultRoutes(
+            expectedInterface: proof.interfaceName,
+            topology: topology
+        )
+    }
+
+    private func validatedInterface(
+        named name: String,
+        index: UInt32,
+        topology: NetworkTopologySnapshot
+    ) throws -> NetworkInterfaceSnapshot {
+        guard let interface = topology.interfaces.first(where: { $0.name == name }) else {
+            throw SpeedTestError.interfaceUnavailable(name)
+        }
+        guard interface.index == index else {
+            throw SpeedTestError.interfaceIndexChanged(
+                expected: index,
+                actual: interface.index
+            )
+        }
+        guard interface.kind == .physical, interface.isUp, interface.isRunning else {
+            throw SpeedTestError.interfaceInactive(name)
+        }
+        return interface
+    }
+
+    private func validateDefaultRoutes(
+        expectedInterface: String,
+        topology: NetworkTopologySnapshot
+    ) throws {
+        let primaryInterfaces = Set([
+            topology.primaryIPv4InterfaceName,
+            topology.primaryIPv6InterfaceName
+        ].compactMap { $0 })
+        guard !primaryInterfaces.isEmpty else {
+            throw SpeedTestError.defaultRouteUnavailable
+        }
+        guard primaryInterfaces == [expectedInterface] else {
+            throw SpeedTestError.defaultRouteMismatch(
+                expected: expectedInterface,
+                actual: primaryInterfaces.sorted()
+            )
+        }
+    }
+}
+
 enum OoklaSpeedTestResultParser {
     static func parse(
         _ data: Data,
         binding: SpeedTestBinding,
+        routeProof: OoklaRouteProof,
         completedAt: Date = Date()
     ) throws -> SpeedTestResult {
         guard let object = try? JSONSerialization.jsonObject(with: data),
@@ -205,15 +300,14 @@ enum OoklaSpeedTestResultParser {
                 actual: reportedInterface
             )
         }
-        if let expectedAddress = binding.endpoint.sourceAddress,
-           !expectedAddress.isEmpty {
-            let actualAddress = string(interface["internalIp"])
-            guard actualAddress == expectedAddress else {
-                throw SpeedTestError.reportedSourceAddressMismatch(
-                    expected: expectedAddress,
-                    actual: actualAddress
-                )
-            }
+        let actualAddress = string(interface["internalIp"])
+        guard let actualAddress,
+              routeProof.sourceAddresses.contains(actualAddress)
+        else {
+            throw SpeedTestError.reportedSourceAddressMismatch(
+                expected: routeProof.sourceAddresses.sorted().joined(separator: ", "),
+                actual: actualAddress
+            )
         }
 
         guard let download = dictionary["download"] as? [String: Any],
@@ -259,6 +353,37 @@ enum OoklaSpeedTestResultParser {
     }
 }
 
+enum OoklaSpeedTestFailureSummary {
+    static func summarize(standardOutput: Data, standardError: Data) -> String {
+        var combined = standardOutput
+        if !combined.isEmpty, !standardError.isEmpty { combined.append(0x0a) }
+        combined.append(standardError)
+        let text = String(decoding: combined, as: UTF8.self)
+        var messages: [String] = []
+        var seen = Set<String>()
+
+        for line in text.split(whereSeparator: \.isNewline) {
+            let raw = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty else { continue }
+            let message: String
+            if let data = raw.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data),
+               let dictionary = object as? [String: Any],
+               let decoded = dictionary["message"] as? String {
+                message = decoded
+            } else {
+                message = raw
+            }
+            guard !message.hasPrefix("bind("), seen.insert(message).inserted else {
+                continue
+            }
+            messages.append(message)
+        }
+
+        return String(messages.suffix(3).joined(separator: " · ").prefix(300))
+    }
+}
+
 actor OoklaSpeedTestRunner: SpeedTestRunning {
     private enum RunEvent: Sendable {
         case processFinished(OoklaSpeedTestProcessOutput)
@@ -270,17 +395,20 @@ actor OoklaSpeedTestRunner: SpeedTestRunning {
 
     private let process: any OoklaSpeedTestProcessExecuting
     private let trafficReader: any NetworkInterfaceTrafficReading
+    private let routeValidator: any OoklaRouteValidating
     private let maximumRuntime: TimeInterval
     private let sampleIntervalNanoseconds: UInt64
 
     init(
         process: any OoklaSpeedTestProcessExecuting = SystemOoklaSpeedTestProcess(),
         trafficReader: any NetworkInterfaceTrafficReading = SystemNetworkInterfaceTrafficReader(),
+        routeValidator: any OoklaRouteValidating = SystemOoklaRouteValidator(),
         maximumRuntime: TimeInterval = 90,
         sampleIntervalNanoseconds: UInt64 = 350_000_000
     ) {
         self.process = process
         self.trafficReader = trafficReader
+        self.routeValidator = routeValidator
         self.maximumRuntime = maximumRuntime
         self.sampleIntervalNanoseconds = sampleIntervalNanoseconds
         availabilityError = process.availabilityError
@@ -291,15 +419,17 @@ actor OoklaSpeedTestRunner: SpeedTestRunning {
         progress: @escaping @Sendable (SpeedTestProgress) async -> Void
     ) async throws -> SpeedTestResult {
         if let availabilityError { throw availabilityError }
+        let routeProof = try routeValidator.capture(binding: binding)
         let initial = try trafficReader.read(binding: binding)
         let process = self.process
         let trafficReader = self.trafficReader
+        let routeValidator = self.routeValidator
         let maximumRuntime = self.maximumRuntime
         let sampleIntervalNanoseconds = self.sampleIntervalNanoseconds
 
         let output = try await withThrowingTaskGroup(of: RunEvent.self) { group in
             group.addTask {
-                .processFinished(try await process.execute(interfaceName: binding.interfaceName))
+                .processFinished(try await process.execute())
             }
             group.addTask {
                 var prior = initial
@@ -307,6 +437,7 @@ actor OoklaSpeedTestRunner: SpeedTestRunning {
                 var smoothedUpload = 0.0
                 while !Task.isCancelled {
                     try await Task.sleep(nanoseconds: sampleIntervalNanoseconds)
+                    try routeValidator.validate(proof: routeProof)
                     let next = try trafficReader.read(binding: binding)
                     let interval = Self.seconds(prior.sampledAt.duration(to: next.sampledAt))
                     let received = next.receivedBytes >= prior.receivedBytes
@@ -350,19 +481,23 @@ actor OoklaSpeedTestRunner: SpeedTestRunning {
             }
         }
 
+        try routeValidator.validate(proof: routeProof)
         _ = try trafficReader.read(binding: binding)
         try Task.checkCancellation()
         guard output.terminationStatus == 0 else {
-            let detail = String(decoding: output.standardError, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let detail = OoklaSpeedTestFailureSummary.summarize(
+                standardOutput: output.standardOutput,
+                standardError: output.standardError
+            )
             throw SpeedTestError.commandFailed(
                 status: output.terminationStatus,
-                detail: String(detail.prefix(500))
+                detail: detail
             )
         }
         return try OoklaSpeedTestResultParser.parse(
             output.standardOutput,
-            binding: binding
+            binding: binding,
+            routeProof: routeProof
         )
     }
 
