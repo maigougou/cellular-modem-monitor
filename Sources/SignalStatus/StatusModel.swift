@@ -55,11 +55,7 @@ final class StatusModel: ObservableObject {
     @Published private(set) var controlNotice: String?
     @Published private(set) var activeModem: ActiveModem? {
         didSet {
-            networkQualitySpeedTestModel.updateActiveModem(
-                activeModem,
-                settingsGeneration: settingsGeneration
-            )
-            ooklaSpeedTestModel.updateActiveModem(
+            speedTestModel.updateActiveModem(
                 activeModem,
                 settingsGeneration: settingsGeneration
             )
@@ -67,8 +63,7 @@ final class StatusModel: ObservableObject {
     }
     @Published private(set) var settingsError: String?
 
-    let networkQualitySpeedTestModel: SpeedTestModel
-    let ooklaSpeedTestModel: SpeedTestModel
+    let speedTestModel: SpeedTestModel
 
     @Published var modemSelection: ModemSelection
     @Published var host: String
@@ -138,13 +133,11 @@ final class StatusModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         credentialStore: any CredentialStoring = LocalCredentialStore.shared,
-        speedTestRunner: any SpeedTestRunning = NetworkQualitySpeedTestRunner(),
-        ooklaSpeedTestRunner: any SpeedTestRunning = OoklaSpeedTestRunner()
+        speedTestRunner: any SpeedTestRunning = OoklaSpeedTestRunner()
     ) {
         self.defaults = defaults
         self.credentialStore = credentialStore
-        networkQualitySpeedTestModel = SpeedTestModel(runner: speedTestRunner)
-        ooklaSpeedTestModel = SpeedTestModel(runner: ooklaSpeedTestRunner)
+        speedTestModel = SpeedTestModel(runner: speedTestRunner)
 
         let vosClient = VOSClient()
         do {
@@ -291,11 +284,7 @@ final class StatusModel: ObservableObject {
             )
             connectionState = .online
             menuBarTitle = snapshot.detailedMenuTitle
-            networkQualitySpeedTestModel.updateActiveModem(
-                activeModem,
-                settingsGeneration: settingsGeneration
-            )
-            ooklaSpeedTestModel.updateActiveModem(
+            speedTestModel.updateActiveModem(
                 activeModem,
                 settingsGeneration: settingsGeneration
             )

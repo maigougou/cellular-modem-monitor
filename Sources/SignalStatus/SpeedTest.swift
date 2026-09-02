@@ -59,38 +59,32 @@ struct SpeedTestResult: Equatable, Sendable {
     let binding: SpeedTestBinding
     let downloadBitsPerSecond: Double
     let uploadBitsPerSecond: Double
-    let responsivenessRPM: Double?
     let idleLatencyMilliseconds: Double?
     let jitterMilliseconds: Double?
     let packetLossPercent: Double?
     let serverName: String?
     let resultURL: URL?
-    let duration: TimeInterval?
     let completedAt: Date
 
     init(
         binding: SpeedTestBinding,
         downloadBitsPerSecond: Double,
         uploadBitsPerSecond: Double,
-        responsivenessRPM: Double? = nil,
         idleLatencyMilliseconds: Double? = nil,
         jitterMilliseconds: Double? = nil,
         packetLossPercent: Double? = nil,
         serverName: String? = nil,
         resultURL: URL? = nil,
-        duration: TimeInterval? = nil,
         completedAt: Date
     ) {
         self.binding = binding
         self.downloadBitsPerSecond = downloadBitsPerSecond
         self.uploadBitsPerSecond = uploadBitsPerSecond
-        self.responsivenessRPM = responsivenessRPM
         self.idleLatencyMilliseconds = idleLatencyMilliseconds
         self.jitterMilliseconds = jitterMilliseconds
         self.packetLossPercent = packetLossPercent
         self.serverName = serverName
         self.resultURL = resultURL
-        self.duration = duration
         self.completedAt = completedAt
     }
 }
@@ -114,7 +108,6 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
     case gatewayChanged(expected: String, actual: String?)
     case defaultRouteUnavailable
     case defaultRouteMismatch(expected: String, actual: [String])
-    case networkQualityUnavailable
     case ooklaCLIUnavailable
     case ooklaCLIIncompatible
     case launchFailed(String)
@@ -173,8 +166,6 @@ enum SpeedTestError: LocalizedError, Equatable, Sendable {
                 actual.isEmpty ? "—" : actual.joined(separator: ", "),
                 expected
             )
-        case .networkQualityUnavailable:
-            return L10n.text("The macOS networkQuality tool is unavailable.", language: language)
         case .ooklaCLIUnavailable:
             return L10n.text("The official Ookla Speedtest CLI is not installed.", language: language)
         case .ooklaCLIIncompatible:
@@ -380,289 +371,6 @@ struct SystemNetworkInterfaceTrafficReader: NetworkInterfaceTrafficReading {
     }
 }
 
-struct NetworkQualityProcessOutput: Equatable, Sendable {
-    let standardOutput: Data
-    let standardError: Data
-    let terminationStatus: Int32
-}
-
-protocol NetworkQualityProcessExecuting: Sendable {
-    func execute(
-        interfaceName: String,
-        maximumRuntime: TimeInterval
-    ) async throws -> NetworkQualityProcessOutput
-
-}
-
-private final class NetworkQualityProcessBox: @unchecked Sendable {
-    let process: Process
-    let standardOutput: Pipe
-    let standardError: Pipe
-
-    init(process: Process, standardOutput: Pipe, standardError: Pipe) {
-        self.process = process
-        self.standardOutput = standardOutput
-        self.standardError = standardError
-    }
-}
-
-enum NetworkQualityCommand {
-    static func arguments(interfaceName: String, maximumRuntime: TimeInterval) -> [String] {
-        [
-            "-I", interfaceName,
-            "-M", String(max(5, Int(maximumRuntime.rounded()))),
-            "-s",
-            "-c"
-        ]
-    }
-}
-
-actor SystemNetworkQualityProcess: NetworkQualityProcessExecuting {
-    private var running: NetworkQualityProcessBox?
-
-    func execute(
-        interfaceName: String,
-        maximumRuntime: TimeInterval
-    ) async throws -> NetworkQualityProcessOutput {
-        // A replacement modem can start a new test while the exact old child
-        // is still draining its pipes after cancellation. Wait for that child
-        // to retire. Never cancel whichever process happens to be current:
-        // such an unscoped cancel could kill a still newer modem's test.
-        while running != nil {
-            try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        try Task.checkCancellation()
-        let executable = URL(fileURLWithPath: "/usr/bin/networkQuality")
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw SpeedTestError.networkQualityUnavailable
-        }
-
-        let process = Process()
-        let standardOutput = Pipe()
-        let standardError = Pipe()
-        process.executableURL = executable
-        process.arguments = NetworkQualityCommand.arguments(
-            interfaceName: interfaceName,
-            maximumRuntime: maximumRuntime
-        )
-        process.standardOutput = standardOutput
-        process.standardError = standardError
-        let box = NetworkQualityProcessBox(
-            process: process,
-            standardOutput: standardOutput,
-            standardError: standardError
-        )
-
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            do {
-                try process.run()
-            } catch {
-                throw SpeedTestError.launchFailed(error.localizedDescription)
-            }
-            running = box
-            defer {
-                if running === box { running = nil }
-            }
-
-            let outputTask = Task.detached(priority: .utility) {
-                box.standardOutput.fileHandleForReading.readDataToEndOfFile()
-            }
-            let errorTask = Task.detached(priority: .utility) {
-                box.standardError.fileHandleForReading.readDataToEndOfFile()
-            }
-            let statusTask = Task.detached(priority: .utility) { () -> Int32 in
-                box.process.waitUntilExit()
-                return box.process.terminationStatus
-            }
-
-            let status = await statusTask.value
-            let output = await outputTask.value
-            let error = await errorTask.value
-            try Task.checkCancellation()
-            return NetworkQualityProcessOutput(
-                standardOutput: output,
-                standardError: error,
-                terminationStatus: status
-            )
-        } onCancel: {
-            // Bind cancellation to this exact child. A delayed cancellation
-            // from a replaced modem must never terminate a newer test that
-            // happens to reuse the same process actor.
-            Task { await self.cancel(target: box) }
-        }
-    }
-
-    private func cancel(target: NetworkQualityProcessBox) async {
-        guard running === target else { return }
-        if target.process.isRunning {
-            target.process.terminate()
-        }
-        for _ in 0..<100 {
-            if running !== target { return }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        if running === target, target.process.isRunning {
-            Darwin.kill(target.process.processIdentifier, SIGKILL)
-        }
-        for _ in 0..<100 {
-            if running !== target { return }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-    }
-}
-
-enum NetworkQualityResultParser {
-    static func parse(
-        _ data: Data,
-        binding: SpeedTestBinding,
-        completedAt: Date = Date()
-    ) throws -> SpeedTestResult {
-        guard let object = try? JSONSerialization.jsonObject(with: data),
-              let dictionary = object as? [String: Any]
-        else { throw SpeedTestError.invalidResult }
-
-        guard let reportedInterface = string(dictionary["interface_name"]),
-              !reportedInterface.isEmpty
-        else { throw SpeedTestError.reportedInterfaceMissing }
-        guard reportedInterface == binding.interfaceName else {
-            throw SpeedTestError.reportedInterfaceMismatch(
-                expected: binding.interfaceName,
-                actual: reportedInterface
-            )
-        }
-        guard let download = number(dictionary["dl_throughput"]),
-              let upload = number(dictionary["ul_throughput"]),
-              download >= 0,
-              upload >= 0
-        else { throw SpeedTestError.invalidResult }
-
-        return SpeedTestResult(
-            binding: binding,
-            downloadBitsPerSecond: download,
-            uploadBitsPerSecond: upload,
-            responsivenessRPM: number(dictionary["responsiveness"]),
-            idleLatencyMilliseconds: number(dictionary["base_rtt"]),
-            duration: number(dictionary["duration"]),
-            completedAt: completedAt
-        )
-    }
-
-    private static func number(_ value: Any?) -> Double? {
-        if let number = value as? NSNumber { return number.doubleValue }
-        if let string = value as? String { return Double(string) }
-        return nil
-    }
-
-    private static func string(_ value: Any?) -> String? {
-        if let string = value as? String { return string }
-        return nil
-    }
-}
-
-actor NetworkQualitySpeedTestRunner: SpeedTestRunning {
-    private enum RunEvent: Sendable {
-        case processFinished(NetworkQualityProcessOutput)
-        case monitorStopped
-    }
-
-    private let process: any NetworkQualityProcessExecuting
-    private let trafficReader: any NetworkInterfaceTrafficReading
-    private let maximumRuntime: TimeInterval
-    private let sampleIntervalNanoseconds: UInt64
-
-    init(
-        process: any NetworkQualityProcessExecuting = SystemNetworkQualityProcess(),
-        trafficReader: any NetworkInterfaceTrafficReading = SystemNetworkInterfaceTrafficReader(),
-        maximumRuntime: TimeInterval = 30,
-        sampleIntervalNanoseconds: UInt64 = 350_000_000
-    ) {
-        self.process = process
-        self.trafficReader = trafficReader
-        self.maximumRuntime = maximumRuntime
-        self.sampleIntervalNanoseconds = sampleIntervalNanoseconds
-    }
-
-    func run(
-        binding: SpeedTestBinding,
-        progress: @escaping @Sendable (SpeedTestProgress) async -> Void
-    ) async throws -> SpeedTestResult {
-        let initial = try trafficReader.read(binding: binding)
-        let process = self.process
-        let trafficReader = self.trafficReader
-        let maximumRuntime = self.maximumRuntime
-        let sampleIntervalNanoseconds = self.sampleIntervalNanoseconds
-        let output = try await withThrowingTaskGroup(of: RunEvent.self) { group in
-            group.addTask {
-                .processFinished(try await process.execute(
-                    interfaceName: binding.interfaceName,
-                    maximumRuntime: maximumRuntime
-                ))
-            }
-            group.addTask {
-                var prior = initial
-                var smoothedDownload = 0.0
-                var smoothedUpload = 0.0
-                while !Task.isCancelled {
-                    try await Task.sleep(nanoseconds: sampleIntervalNanoseconds)
-                    let next = try trafficReader.read(binding: binding)
-                    let interval = Self.seconds(prior.sampledAt.duration(to: next.sampledAt))
-                    let received = next.receivedBytes >= prior.receivedBytes
-                        ? next.receivedBytes - prior.receivedBytes
-                        : 0
-                    let sent = next.sentBytes >= prior.sentBytes
-                        ? next.sentBytes - prior.sentBytes
-                        : 0
-                    let currentDownload = Double(received) * 8 / max(0.001, interval)
-                    let currentUpload = Double(sent) * 8 / max(0.001, interval)
-                    smoothedDownload = smoothedDownload == 0
-                        ? currentDownload
-                        : smoothedDownload * 0.62 + currentDownload * 0.38
-                    smoothedUpload = smoothedUpload == 0
-                        ? currentUpload
-                        : smoothedUpload * 0.62 + currentUpload * 0.38
-                    await progress(SpeedTestProgress(
-                        downloadBitsPerSecond: smoothedDownload,
-                        uploadBitsPerSecond: smoothedUpload,
-                        elapsed: Self.seconds(initial.sampledAt.duration(to: next.sampledAt))
-                    ))
-                    prior = next
-                }
-                return .monitorStopped
-            }
-
-            defer { group.cancelAll() }
-            guard let first = try await group.next() else {
-                throw SpeedTestError.invalidResult
-            }
-            switch first {
-            case let .processFinished(output): return output
-            case .monitorStopped: throw CancellationError()
-            }
-        }
-        _ = try trafficReader.read(binding: binding)
-        try Task.checkCancellation()
-        guard output.terminationStatus == 0 else {
-            let detail = String(decoding: output.standardError, as: UTF8.self)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw SpeedTestError.commandFailed(
-                status: output.terminationStatus,
-                detail: String(detail.prefix(500))
-            )
-        }
-        return try NetworkQualityResultParser.parse(
-            output.standardOutput,
-            binding: binding
-        )
-    }
-
-    private static func seconds(_ duration: Duration) -> Double {
-        let components = duration.components
-        return Double(components.seconds) + Double(components.attoseconds) / 1e18
-    }
-}
-
 @MainActor
 final class SpeedTestModel: ObservableObject {
     @Published private(set) var state: SpeedTestState = .unavailable(.noActiveModem)
@@ -675,7 +383,7 @@ final class SpeedTestModel: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var runToken = UUID()
 
-    init(runner: any SpeedTestRunning = NetworkQualitySpeedTestRunner()) {
+    init(runner: any SpeedTestRunning) {
         self.runner = runner
         availabilityError = runner.availabilityError
     }

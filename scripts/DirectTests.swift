@@ -340,43 +340,6 @@ enum DirectTests {
                 )
             }
 
-            let speedJSON = Data(#"""
-            {
-                "interface_name":"en8",
-                "dl_throughput":812345678.0,
-                "ul_throughput":"123456789",
-                "responsiveness":481,
-                "base_rtt":31.5,
-                "duration":16.25
-            }
-            """#.utf8)
-            let parsedSpeed = try NetworkQualityResultParser.parse(
-                speedJSON,
-                binding: speedBinding,
-                completedAt: Date(timeIntervalSince1970: 123)
-            )
-            check(
-                parsedSpeed.downloadBitsPerSecond == 812_345_678 &&
-                    parsedSpeed.uploadBitsPerSecond == 123_456_789 &&
-                    parsedSpeed.responsivenessRPM == 481 &&
-                    parsedSpeed.idleLatencyMilliseconds == 31.5 &&
-                    parsedSpeed.duration == 16.25 &&
-                    parsedSpeed.binding == speedBinding,
-                "networkQuality JSON preserves final throughput and verified binding",
-                failures: &failures
-            )
-
-            check(
-                NetworkQualityCommand.arguments(interfaceName: "en8", maximumRuntime: 30) == [
-                    "-I", "en8",
-                    "-M", "30",
-                    "-s",
-                    "-c"
-                ],
-                "networkQuality runs download and upload sequentially",
-                failures: &failures
-            )
-
             check(
                 OoklaSpeedTestCommand.arguments() == [
                     "--format=json",
@@ -445,6 +408,28 @@ enum DirectTests {
                         actual: "192.168.254.99"
                     ),
                     "Ookla result fails closed on source-address mismatch",
+                    failures: &failures
+                )
+            }
+            do {
+                let wrongInterface = Data(#"""
+                {
+                  "type":"result",
+                  "download":{"bandwidth":1},
+                  "upload":{"bandwidth":1},
+                  "interface":{"internalIp":"192.168.254.20","name":"en0"}
+                }
+                """#.utf8)
+                _ = try OoklaSpeedTestResultParser.parse(
+                    wrongInterface,
+                    binding: speedBinding,
+                    routeProof: ooklaRouteProof
+                )
+                failures.append("Ookla result must reject another interface")
+            } catch let error as SpeedTestError {
+                check(
+                    error == .reportedInterfaceMismatch(expected: "en8", actual: "en0"),
+                    "Ookla result fails closed on final interface mismatch",
                     failures: &failures
                 )
             }
@@ -586,19 +571,6 @@ enum DirectTests {
                 "IFLIST2 parser skips short NEWADDR records before the target interface",
                 failures: &failures
             )
-            do {
-                _ = try NetworkQualityResultParser.parse(
-                    Data(#"{"interface_name":"en0","dl_throughput":1,"ul_throughput":1}"#.utf8),
-                    binding: speedBinding
-                )
-                failures.append("speed test must reject a result from another interface")
-            } catch let error as SpeedTestError {
-                check(
-                    error == .reportedInterfaceMismatch(expected: "en8", actual: "en0"),
-                    "speed test fails closed on final interface mismatch",
-                    failures: &failures
-                )
-            }
 
             let routedBinding = try SpeedTestBinding(
                 activeModem: ActiveModem(
@@ -645,40 +617,6 @@ enum DirectTests {
                         actual: "192.168.8.254"
                     ),
                     "speed test fails closed when the routed next hop changes",
-                    failures: &failures
-                )
-            }
-
-            let counterStart = ContinuousClock.now
-            let failingTraffic = DirectSpeedTestTrafficReader(results: [
-                .success(NetworkInterfaceTraffic(
-                    receivedBytes: 100,
-                    sentBytes: 50,
-                    sampledAt: counterStart
-                )),
-                .failure(.interfaceInactive("en8"))
-            ])
-            let suspendedProcess = DirectNetworkQualityProcess(
-                output: NetworkQualityProcessOutput(
-                    standardOutput: speedJSON,
-                    standardError: Data(),
-                    terminationStatus: 0
-                ),
-                suspend: true
-            )
-            let failClosedRunner = NetworkQualitySpeedTestRunner(
-                process: suspendedProcess,
-                trafficReader: failingTraffic,
-                maximumRuntime: 30,
-                sampleIntervalNanoseconds: 1_000_000
-            )
-            do {
-                _ = try await failClosedRunner.run(binding: speedBinding) { _ in }
-                failures.append("speed test must stop when its bound interface changes")
-            } catch let error as SpeedTestError {
-                check(
-                    error == .interfaceInactive("en8"),
-                    "sampler topology failure aborts the in-flight speed test",
                     failures: &failures
                 )
             }
@@ -5418,45 +5356,6 @@ private actor DirectVOSStatusReader: VOSStatusReading {
     func callCount() -> Int { fingerprintCalls }
 }
 
-private final class DirectSpeedTestTrafficReader: NetworkInterfaceTrafficReading, @unchecked Sendable {
-    private let lock = NSLock()
-    private var results: [Result<NetworkInterfaceTraffic, SpeedTestError>]
-
-    init(results: [Result<NetworkInterfaceTraffic, SpeedTestError>]) {
-        self.results = results
-    }
-
-    func read(binding: SpeedTestBinding) throws -> NetworkInterfaceTraffic {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !results.isEmpty else {
-            throw SpeedTestError.interfaceUnavailable(binding.interfaceName)
-        }
-        return try results.removeFirst().get()
-    }
-}
-
-private actor DirectNetworkQualityProcess: NetworkQualityProcessExecuting {
-    private let output: NetworkQualityProcessOutput
-    private let suspend: Bool
-
-    init(output: NetworkQualityProcessOutput, suspend: Bool) {
-        self.output = output
-        self.suspend = suspend
-    }
-
-    func execute(
-        interfaceName: String,
-        maximumRuntime: TimeInterval
-    ) async throws -> NetworkQualityProcessOutput {
-        if suspend {
-            try await Task.sleep(nanoseconds: 10_000_000_000)
-        }
-        return output
-    }
-
-}
-
 private actor DirectSpeedTestRunner: SpeedTestRunning {
     private let suspend: Bool
     private var runs = 0
@@ -5488,9 +5387,7 @@ private actor DirectSpeedTestRunner: SpeedTestRunning {
             binding: binding,
             downloadBitsPerSecond: 100_000_000,
             uploadBitsPerSecond: 20_000_000,
-            responsivenessRPM: 300,
             idleLatencyMilliseconds: 25,
-            duration: 10,
             completedAt: Date(timeIntervalSince1970: 123)
         )
     }
