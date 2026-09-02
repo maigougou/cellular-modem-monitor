@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.4.1</string>
+    <string>1.5.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>1500</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
@@ -35,6 +35,20 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>SUFeedURL</key>
+    <string>https://github.com/maigougou/cellular-modem-monitor/releases/latest/download/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>HBiamvt8LLrJTJKbrglWrwDuELMb1zsAAOxAndkles8=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SURequireSignedFeed</key>
+    <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>

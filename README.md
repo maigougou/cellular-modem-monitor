@@ -193,7 +193,7 @@ Mac.
 3. Connect a supported modem directly, through an Ethernet adapter, or through
    a router that already provides a route to the management address.
 4. Start the app and allow **Local Network** access if macOS asks.
-5. Open **Settings…**, choose **Automatic**, **VOS 5G**, or
+5. Expand the **Settings** card below **Device details**, choose **Automatic**, **VOS 5G**, or
    **ZTE G5 MAX / MC7530CA**, then enter the matching credential.
 
 The application in the release ZIP is ad-hoc signed and is not notarized with
@@ -202,6 +202,19 @@ and choose **Open** after reviewing the source.
 
 If Local Network access was denied, enable it in **System Settings → Privacy &
 Security → Local Network**, then reopen the app.
+
+### Updates
+
+Version 1.5.0 is the first update-aware release, so it must be installed
+manually. Starting with 1.5.0, the app checks the signed update feed once per
+day and presents an available update for the user to install. A manual
+**Check for Updates…** button is available in the main **Settings** card.
+
+Updates use Sparkle 2.9.6. Both the release archive and update feed are signed
+with this project's Ed25519 key and verified before extraction. The app remains
+ad-hoc signed because this project does not have an Apple Developer ID; the
+Sparkle signature protects update authenticity but does not replace Apple
+notarization. No system profile is sent with update checks.
 
 ## First run and everyday use
 
@@ -425,6 +438,10 @@ Install Apple Command Line Tools, then run:
 make test    # tests only
 make build   # tests, builds and packages the app
 ```
+
+The first app build downloads the pinned Sparkle 2.9.6 distribution and
+verifies its SHA-256 digest before linking or packaging it. See
+[`RELEASING.md`](RELEASING.md) for the signed appcast release procedure.
 
 For a public build that should retain a stable application identity across
 upgrades, provide an Apple Developer ID Application signing identity and require

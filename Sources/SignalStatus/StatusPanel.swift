@@ -8,6 +8,7 @@ private enum AppPalette {
 
 struct StatusPanel: View {
     @EnvironmentObject private var model: StatusModel
+    @EnvironmentObject private var softwareUpdater: SoftwareUpdater
     @Environment(\.appLanguage) private var language
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -57,13 +58,10 @@ struct StatusPanel: View {
                             ookla: model.ooklaSpeedTestModel
                         )
                             .id("speed-test")
-                        if showSettings {
-                            settingsCard
-                                .id("settings")
-                                .transition(.opacity.combined(with: .move(edge: .bottom)))
-                        }
                         deviceDetailsCard
                             .id("device-details")
+                        settingsCard
+                            .id("settings")
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .padding(12)
@@ -667,133 +665,154 @@ struct StatusPanel: View {
     }
 
     private var settingsCard: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            Text(L10n.text("Connection", language: language))
-                .font(.subheadline.weight(.semibold))
+        CollapsibleCard(
+            isExpanded: $showSettings,
+            accessibilityLabel: L10n.text("Settings", language: language)
+        ) {
+            VStack(alignment: .leading, spacing: 11) {
+                Text(L10n.text("Connection", language: language))
+                    .font(.subheadline.weight(.semibold))
 
-            LabeledContent(L10n.text("Modem", language: language)) {
-                Picker("", selection: $model.modemSelection) {
-                    Text(L10n.text("Automatic", language: language)).tag(ModemSelection.automatic)
-                    Text("VOS 5G").tag(ModemSelection.vos5G)
-                    Text("ZTE MC7530CA / G5 MAX").tag(ModemSelection.zteMC7530CA)
-                }
-                .labelsHidden()
-                .frame(width: 190)
-            }
-
-            if model.modemSelection != .zteMC7530CA {
-                modemSettingsHeading("VOS 5G")
-                LabeledContent(L10n.text("Address", language: language)) {
-                    TextField("192.168.225.1", text: $model.host)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 190)
-                }
-                LabeledContent(L10n.text("SSH user", language: language)) {
-                    TextField("root", text: $model.username)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 190)
-                }
-                LabeledContent(L10n.text("SSH password", language: language)) {
-                    SecureField("oelinux123", text: $model.password)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 190)
-                }
-            }
-
-            if model.modemSelection != .vos5G {
-                modemSettingsHeading("ZTE MC7530CA / G5 MAX")
-                LabeledContent(L10n.text("Address", language: language)) {
-                    TextField("192.168.254.1", text: $model.zteHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 190)
-                }
-                LabeledContent(L10n.text("Web admin password", language: language)) {
-                    SecureField(L10n.text("Required for status", language: language), text: $model.ztePassword)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 190)
-                }
-            }
-
-            Text(L10n.text("Passwords are stored unencrypted in a private local file readable only by your macOS account. They are never stored in diagnostics or management URLs.", language: language))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-
-            LabeledContent(L10n.text("Refresh", language: language)) {
-                Picker("", selection: $model.refreshInterval) {
-                    Text(L10n.text("1 second", language: language)).tag(1.0)
-                    Text(L10n.text("5 seconds", language: language)).tag(5.0)
-                    Text(L10n.text("10 seconds", language: language)).tag(10.0)
-                    Text(L10n.text("15 seconds", language: language)).tag(15.0)
-                    Text(L10n.text("30 seconds", language: language)).tag(30.0)
-                    Text(L10n.text("1 minute", language: language)).tag(60.0)
-                }
-                .labelsHidden()
-                .frame(width: 190)
-            }
-            LabeledContent(L10n.text("Menu bar", language: language)) {
-                Picker("", selection: $model.menuBarStyle) {
-                    ForEach(MenuBarStyle.allCases) { style in
-                        Text(L10n.text(style.label, language: language)).tag(style)
+                LabeledContent(L10n.text("Modem", language: language)) {
+                    Picker("", selection: $model.modemSelection) {
+                        Text(L10n.text("Automatic", language: language)).tag(ModemSelection.automatic)
+                        Text("VOS 5G").tag(ModemSelection.vos5G)
+                        Text("ZTE MC7530CA / G5 MAX").tag(ModemSelection.zteMC7530CA)
                     }
+                    .labelsHidden()
+                    .frame(width: 190)
                 }
-                .labelsHidden()
-                .frame(width: 190)
-            }
 
-            LabeledContent(L10n.text("Language", language: language)) {
-                Picker("", selection: $model.language) {
-                    ForEach(AppLanguage.allCases) { choice in
-                        Text(choice.displayName).tag(choice)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 190)
-            }
-
-            Toggle(L10n.text("Open at Login", language: language), isOn: Binding(
-                get: { launchAtLogin },
-                set: { newValue in
-                    do {
-                        try model.setLaunchAtLogin(newValue)
-                        launchAtLogin = model.launchAtLogin
-                        launchError = nil
-                    } catch {
-                        launchAtLogin = model.launchAtLogin
-                        launchError = error.localizedDescription
-                    }
-                }
-            ))
-
-            if let launchError {
-                Text(launchError)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
-
-            if let settingsError = model.settingsError {
-                Text(settingsError)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-
-            HStack {
                 if model.modemSelection != .zteMC7530CA {
-                    Text(L10n.text("Factory VOS SSH: root / oelinux123", language: language))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button(L10n.text("Save", language: language)) {
-                    if model.saveSettings() {
-                        showSettings = false
+                    modemSettingsHeading("VOS 5G")
+                    LabeledContent(L10n.text("Address", language: language)) {
+                        TextField("192.168.225.1", text: $model.host)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 190)
+                    }
+                    LabeledContent(L10n.text("SSH user", language: language)) {
+                        TextField("root", text: $model.username)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 190)
+                    }
+                    LabeledContent(L10n.text("SSH password", language: language)) {
+                        SecureField("oelinux123", text: $model.password)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 190)
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.isControlBusy)
+
+                if model.modemSelection != .vos5G {
+                    modemSettingsHeading("ZTE MC7530CA / G5 MAX")
+                    LabeledContent(L10n.text("Address", language: language)) {
+                        TextField("192.168.254.1", text: $model.zteHost)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 190)
+                    }
+                    LabeledContent(L10n.text("Web admin password", language: language)) {
+                        SecureField(L10n.text("Required for status", language: language), text: $model.ztePassword)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 190)
+                    }
+                }
+
+                Text(L10n.text("Passwords are stored unencrypted in a private local file readable only by your macOS account. They are never stored in diagnostics or management URLs.", language: language))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                LabeledContent(L10n.text("Refresh", language: language)) {
+                    Picker("", selection: $model.refreshInterval) {
+                        Text(L10n.text("1 second", language: language)).tag(1.0)
+                        Text(L10n.text("5 seconds", language: language)).tag(5.0)
+                        Text(L10n.text("10 seconds", language: language)).tag(10.0)
+                        Text(L10n.text("15 seconds", language: language)).tag(15.0)
+                        Text(L10n.text("30 seconds", language: language)).tag(30.0)
+                        Text(L10n.text("1 minute", language: language)).tag(60.0)
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                }
+                LabeledContent(L10n.text("Menu bar", language: language)) {
+                    Picker("", selection: $model.menuBarStyle) {
+                        ForEach(MenuBarStyle.allCases) { style in
+                            Text(L10n.text(style.label, language: language)).tag(style)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                }
+
+                LabeledContent(L10n.text("Language", language: language)) {
+                    Picker("", selection: $model.language) {
+                        ForEach(AppLanguage.allCases) { choice in
+                            Text(choice.displayName).tag(choice)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                }
+
+                Toggle(L10n.text("Open at Login", language: language), isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { newValue in
+                        do {
+                            try model.setLaunchAtLogin(newValue)
+                            launchAtLogin = model.launchAtLogin
+                            launchError = nil
+                        } catch {
+                            launchAtLogin = model.launchAtLogin
+                            launchError = error.localizedDescription
+                        }
+                    }
+                ))
+
+                if let launchError {
+                    Text(launchError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
+
+                if let settingsError = model.settingsError {
+                    Text(settingsError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                }
+
+                HStack {
+                    if model.modemSelection != .zteMC7530CA {
+                        Text(L10n.text("Factory VOS SSH: root / oelinux123", language: language))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(L10n.text("Save", language: language)) {
+                        if model.saveSettings() {
+                            showSettings = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isControlBusy)
+                }
+
+                modemSettingsHeading(L10n.text("Software Update", language: language))
+                LabeledContent(L10n.text("Current version", language: language)) {
+                    Text(softwareUpdater.currentVersion)
+                        .monospacedDigit()
+                }
+                HStack {
+                    Spacer()
+                    Button(L10n.text("Check for Updates…", language: language)) {
+                        softwareUpdater.checkForUpdates()
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
+            .padding(.top, 10)
+        } label: {
+            Label(L10n.text("Settings", language: language), systemImage: "gearshape")
+                .font(.subheadline.weight(.semibold))
         }
-        .cardStyle()
     }
 
     private func modemSettingsHeading(_ title: String) -> some View {
@@ -829,9 +848,6 @@ struct StatusPanel: View {
             Spacer()
 
             Menu {
-                Button(L10n.text(showSettings ? "Hide Settings" : "Settings…", language: language)) {
-                    showSettings.toggle()
-                }
                 Button(L10n.text("Open Device Web UI", language: language), action: model.openWebUI)
                 Button(L10n.text("About Cellular Modem Monitor", language: language), action: model.showAbout)
                 Divider()
