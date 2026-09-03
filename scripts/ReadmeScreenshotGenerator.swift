@@ -19,6 +19,15 @@ enum ReadmeScreenshotGenerator {
 
         let model = StatusModel(defaults: defaults)
         model.language = .english
+        if showsControls, let controlState = model.controlState {
+            // Keep the long-form screenshot focused on the controls themselves.
+            // Network scan results have their own dynamic height and made the
+            // README preview needlessly tall without demonstrating another
+            // control capability.
+            model.applyControlResult(
+                ModemControlResult(state: controlState, scannedNetworks: [])
+            )
+        }
         let updater = SoftwareUpdater()
         let content = StatusPanel(
             initiallyShowNetworkControls: showsControls,

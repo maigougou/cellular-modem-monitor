@@ -11,10 +11,9 @@ opened **Network & radio controls** panel provides verified controls through
 either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 
 <p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
-  <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="340" alt="Cellular Modem Monitor showing a 5G NSA n78 and LTE B2 connection">
+  <img src="assets/cellular-modem-monitor-sa-n78.png" width="360" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
   <br>
-  <sub>Current SA overview and NSA radio-controls layouts; demo values use synthetic Cell IDs.</sub>
+  <sub>Live SA status at a glance; demo values use synthetic Cell IDs.</sub>
 </p>
 
 ## Features
@@ -50,6 +49,17 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - A backend-specific restore operation with final read-back verification
 - Physical-device identity verification before every write
 - Read-only LTE neighbor measurements when the active backend reports them
+
+<details>
+<summary><strong>Network and radio controls preview</strong></summary>
+
+<p align="center">
+  <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="360" alt="Cellular Modem Monitor showing verified network, radio-mode and band controls">
+  <br>
+  <sub>Readback-driven controls in dark mode; demo values use synthetic Cell IDs.</sub>
+</p>
+
+</details>
 
 Controls are routed through the currently active backend rather than directly
 to a particular transport. VOS preferences last until power loss. MC7530CA
