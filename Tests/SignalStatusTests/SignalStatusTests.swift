@@ -161,6 +161,8 @@ final class SignalStatusTests: XCTestCase {
             saBands: [77],
             nsaBands: [66, 77],
             lteBands: [2, 4, 66],
+            availableNRBands: [5, 66, 77],
+            availableLTEBands: [2, 4, 5, 66],
             canRestoreDefaults: true,
             preferenceLifetime: .persistent
         )
@@ -172,8 +174,40 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(updated.saBands, state.saBands)
         XCTAssertEqual(updated.nsaBands, state.nsaBands)
         XCTAssertEqual(updated.lteBands, state.lteBands)
+        XCTAssertEqual(updated.availableNRBands, state.availableNRBands)
+        XCTAssertEqual(updated.availableLTEBands, state.availableLTEBands)
         XCTAssertEqual(updated.canRestoreDefaults, state.canRestoreDefaults)
         XCTAssertEqual(updated.preferenceLifetime, state.preferenceLifetime)
+    }
+
+    func testBandSelectionDraftSurvivesPollingAndCommitsOnMatchingReadback() {
+        var state = ModemControlState(
+            operatorSelection: nil,
+            architecture: .nsaOnly,
+            saBands: [77],
+            nsaBands: [66, 77],
+            lteBands: [2, 4, 66],
+            availableNRBands: [5, 66, 77],
+            availableLTEBands: [2, 4, 5, 66],
+            canRestoreDefaults: true,
+            preferenceLifetime: .persistent
+        )
+        var draft = ModemBandSelectionDraft()
+        draft.synchronize(with: state)
+        draft.toggleNR(66)
+        draft.toggleLTE(4)
+
+        draft.synchronize(with: state)
+        XCTAssertEqual(draft.nrBands, [77])
+        XCTAssertEqual(draft.lteBands, [2, 66])
+        XCTAssertTrue(draft.isNRDirty)
+        XCTAssertTrue(draft.isLTEDirty)
+
+        state.nsaBands = [77]
+        state.lteBands = [2, 66]
+        draft.synchronize(with: state)
+        XCTAssertFalse(draft.isNRDirty)
+        XCTAssertFalse(draft.isLTEDirty)
     }
 
     @MainActor

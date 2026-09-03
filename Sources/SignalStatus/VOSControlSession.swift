@@ -619,12 +619,28 @@ actor VOSControlSession: ModemControlSession {
         selection: OperatorSelection?,
         preferences: NRSystemSelectionPreferences
     ) -> ModemControlState {
-        ModemControlState(
+        let baseline = originalPreferences ?? preferences
+        let availableNRBands: Set<Int>
+        switch preferences.architectureMode {
+        case .automatic:
+            availableNRBands = Set(baseline.saBands.enabledBands)
+                .intersection(baseline.nsaBands.enabledBands)
+        case .saOnly:
+            availableNRBands = Set(baseline.saBands.enabledBands)
+        case .nsaOnly:
+            availableNRBands = Set(baseline.nsaBands.enabledBands)
+        case .lteOnly, .unavailable:
+            availableNRBands = Set(baseline.saBands.enabledBands)
+                .union(baseline.nsaBands.enabledBands)
+        }
+        return ModemControlState(
             operatorSelection: selection,
             architecture: preferences.architectureMode,
             saBands: Set(preferences.saBands.enabledBands),
             nsaBands: Set(preferences.nsaBands.enabledBands),
             lteBands: Set(preferences.lteBands?.enabledBands ?? []),
+            availableNRBands: availableNRBands,
+            availableLTEBands: Set(baseline.lteBands?.enabledBands ?? []),
             canRestoreDefaults: originalPreferences != nil,
             preferenceLifetime: .untilPowerLoss
         )

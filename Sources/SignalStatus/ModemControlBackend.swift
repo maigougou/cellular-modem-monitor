@@ -10,8 +10,26 @@ struct ModemControlState: Equatable, Sendable {
     var saBands: Set<Int>
     var nsaBands: Set<Int>
     var lteBands: Set<Int>
+    /// Bands the bound modem can restore/enable. These come from the verified
+    /// vendor defaults (MC7530CA) or the automatic masks captured when the
+    /// control session opened (VOS), rather than from a generic band table.
+    var availableNRBands: Set<Int>? = nil
+    var availableLTEBands: Set<Int>? = nil
     var canRestoreDefaults: Bool
     var preferenceLifetime: ModemPreferenceLifetime
+
+    /// The NR picker applies one common allow-list to the active NR mode. In
+    /// automatic SA/NSA mode, only bands enabled for both paths are checked;
+    /// submitting that list therefore cannot introduce a band absent from one
+    /// of the modem's captured masks.
+    var selectedNRBands: Set<Int> {
+        switch architecture {
+        case .automatic: return saBands.intersection(nsaBands)
+        case .saOnly: return saBands
+        case .nsaOnly: return nsaBands
+        case .lteOnly, .unavailable: return []
+        }
+    }
 
     /// A serving-PLMN transition can be a normal operator change, not a modem
     /// or SIM replacement. Drop only the operator-specific value while keeping
@@ -20,6 +38,59 @@ struct ModemControlState: Equatable, Sendable {
         var updated = self
         updated.operatorSelection = nil
         return updated
+    }
+}
+
+/// Keeps a user's in-progress band choices independent from one-second status
+/// polling. Authoritative readback updates a clean draft, while a dirty draft
+/// is preserved until the write succeeds (the readback then matches it) or a
+/// different physical modem/control endpoint is selected.
+struct ModemBandSelectionDraft: Equatable, Sendable {
+    private(set) var nrBands: Set<Int> = []
+    private(set) var lteBands: Set<Int> = []
+    private(set) var isNRDirty = false
+    private(set) var isLTEDirty = false
+
+    mutating func synchronize(with state: ModemControlState?, force: Bool = false) {
+        guard let state else {
+            if force { reset() }
+            return
+        }
+
+        let reportedNR = state.selectedNRBands
+        if force || !isNRDirty || nrBands == reportedNR {
+            nrBands = reportedNR
+            isNRDirty = false
+        }
+        if force || !isLTEDirty || lteBands == state.lteBands {
+            lteBands = state.lteBands
+            isLTEDirty = false
+        }
+    }
+
+    mutating func toggleNR(_ band: Int) {
+        Self.toggle(band, in: &nrBands)
+        isNRDirty = true
+    }
+
+    mutating func toggleLTE(_ band: Int) {
+        Self.toggle(band, in: &lteBands)
+        isLTEDirty = true
+    }
+
+    mutating func reset() {
+        nrBands = []
+        lteBands = []
+        isNRDirty = false
+        isLTEDirty = false
+    }
+
+    private static func toggle(_ band: Int, in bands: inout Set<Int>) {
+        if bands.contains(band) {
+            bands.remove(band)
+        } else {
+            bands.insert(band)
+        }
     }
 }
 

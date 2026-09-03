@@ -18,8 +18,7 @@ struct StatusPanel: View {
     @State private var pendingControl: ControlConfirmation?
     @State private var launchAtLogin = false
     @State private var launchError: String?
-    @State private var nrBandLockText = ""
-    @State private var lteBandLockText = ""
+    @State private var bandSelection = ModemBandSelectionDraft()
     @State private var measuredContentHeight: CGFloat = 320
     @State private var measuredChromeHeight: CGFloat = 96
     private let panelHeightLimit: CGFloat?
@@ -121,13 +120,17 @@ struct StatusPanel: View {
                     showNetworkControls = false
                     pendingControl = nil
                 }
-                .onChange(of: model.activeModem) { _ in
+                .onChange(of: activeControlContext) { _ in
                     // Confirmations, restore state and scan rows belong to the
                     // exact modem + endpoint binding that produced them. Never
                     // carry them to another device or connection path.
                     pendingControl = nil
+                    bandSelection.synchronize(with: model.controlState, force: true)
                     guard showNetworkControls, model.supportsControlSession else { return }
                     model.loadNetworkControls()
+                }
+                .onChange(of: model.controlState) { state in
+                    bandSelection.synchronize(with: state)
                 }
             }
             panelSeparator
@@ -142,7 +145,10 @@ struct StatusPanel: View {
                     .opacity(colorScheme == .dark ? 0.18 : 0.10)
             }
         }
-        .onAppear { launchAtLogin = model.launchAtLogin }
+        .onAppear {
+            launchAtLogin = model.launchAtLogin
+            bandSelection.synchronize(with: model.controlState, force: true)
+        }
         .onPreferenceChange(ContentHeightPreferenceKey.self) { height in
             guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
             measuredContentHeight = ceil(height)
@@ -518,7 +524,11 @@ struct StatusPanel: View {
     }
 
     private var controlsDisabled: Bool {
-        model.isRefreshing || model.isControlBusy || pendingControl != nil
+        // A normal status poll must not disable the control tree: doing so
+        // causes a focused control to resign focus and visibly flashes the
+        // entire card at short polling intervals. The model serializes a
+        // control command behind an in-flight read on its own.
+        model.isControlBusy || pendingControl != nil
     }
 
     private var bandLockControls: some View {
@@ -530,34 +540,93 @@ struct StatusPanel: View {
                 .foregroundStyle(.secondary)
 
             if model.supportsControl(.nrBandLock) {
-                HStack(spacing: 7) {
-                    TextField("NR: 77,78", text: $nrBandLockText)
-                        .textFieldStyle(.roundedBorder)
+                BandSelectionPicker(
+                    title: L10n.text("NR bands", language: language),
+                    prefix: "n",
+                    bands: nrBandOptions,
+                    selectedBands: bandSelection.nrBands,
+                    isDisabled: controlsDisabled ||
+                        !model.canRestoreControlDefaults ||
+                        model.controlState?.architecture == .lteOnly
+                ) { band in
+                    bandSelection.toggleNR(band)
+                }
+                HStack {
+                    if bandSelection.nrBands.isEmpty {
+                        Label(
+                            L10n.text("Select at least one band.", language: language),
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    }
+                    Spacer()
                     Button {
-                        pendingControl = .nrBandLock(Self.parseBands(nrBandLockText, prefix: "n") ?? [])
+                        pendingControl = .nrBandLock(bandSelection.nrBands)
                     } label: {
-                        Text(L10n.text("Lock NR", language: language))
-                            .frame(width: 62)
+                        Text(L10n.text("Apply NR lock", language: language))
                     }
                     .buttonStyle(.bordered)
-                    .disabled(model.controlState?.architecture == .lteOnly)
+                    .disabled(
+                        controlsDisabled ||
+                            !model.canRestoreControlDefaults ||
+                            model.controlState?.architecture == .lteOnly ||
+                            bandSelection.nrBands.isEmpty ||
+                            bandSelection.nrBands == model.controlState?.selectedNRBands
+                    )
                 }
             }
             if model.supportsControl(.lteBandLock) {
-                HStack(spacing: 7) {
-                    TextField("LTE: 2,4,25,66", text: $lteBandLockText)
-                        .textFieldStyle(.roundedBorder)
+                BandSelectionPicker(
+                    title: L10n.text("LTE bands", language: language),
+                    prefix: "B",
+                    bands: lteBandOptions,
+                    selectedBands: bandSelection.lteBands,
+                    isDisabled: controlsDisabled || !model.canRestoreControlDefaults
+                ) { band in
+                    bandSelection.toggleLTE(band)
+                }
+                HStack {
+                    if bandSelection.lteBands.isEmpty {
+                        Label(
+                            L10n.text("Select at least one band.", language: language),
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    }
+                    Spacer()
                     Button {
-                        pendingControl = .lteBandLock(Self.parseBands(lteBandLockText, prefix: "b") ?? [])
+                        pendingControl = .lteBandLock(bandSelection.lteBands)
                     } label: {
-                        Text(L10n.text("Lock LTE", language: language))
-                            .frame(width: 62)
+                        Text(L10n.text("Apply LTE lock", language: language))
                     }
                     .buttonStyle(.bordered)
+                    .disabled(
+                        controlsDisabled ||
+                            !model.canRestoreControlDefaults ||
+                            bandSelection.lteBands.isEmpty ||
+                            bandSelection.lteBands == model.controlState?.lteBands
+                    )
                 }
             }
         }
-        .disabled(controlsDisabled || !model.canRestoreControlDefaults)
+    }
+
+    private var nrBandOptions: [Int] {
+        let available = model.controlState?.availableNRBands ?? []
+        return available.union(bandSelection.nrBands).sorted()
+    }
+
+    private var lteBandOptions: [Int] {
+        let available = model.controlState?.availableLTEBands ?? []
+        return available.union(bandSelection.lteBands).sorted()
+    }
+
+    private var activeControlContext: ControlContextKey? {
+        model.activeModem.map {
+            ControlContextKey(modemID: $0.id, endpoint: $0.endpoint)
+        }
     }
 
     private var hasOperatorControls: Bool {
@@ -589,11 +658,11 @@ struct StatusPanel: View {
     private var bandLockPersistenceDescription: String {
         switch model.controlState?.preferenceLifetime ?? .unknown {
         case .untilPowerLoss:
-            return L10n.text("Enter comma-separated band numbers. Locks last until the modem loses power; Restore automatic defaults restores the captured masks.", language: language)
+            return L10n.text("Uncheck bands to restrict the modem. Locks last until the modem loses power; Restore automatic defaults restores the captured masks.", language: language)
         case .persistent:
-            return L10n.text("Enter comma-separated band numbers. Locks persist across restarts until changed or restored; Restore automatic defaults restores the modem's vendor defaults.", language: language)
+            return L10n.text("Uncheck bands to restrict the modem. Locks persist across restarts until changed or restored; Restore automatic defaults restores the modem's vendor defaults.", language: language)
         case .unknown:
-            return L10n.text("Enter comma-separated band numbers. Locks are read back after each change; the modem did not report whether they persist across restarts.", language: language)
+            return L10n.text("Uncheck bands to restrict the modem. Locks are read back after each change; the modem did not report whether they persist across restarts.", language: language)
         }
     }
 
@@ -618,19 +687,6 @@ struct StatusPanel: View {
                 }
             }
         }
-    }
-
-    private static func parseBands(_ input: String, prefix: Character) -> Set<Int>? {
-        let tokens = input.lowercased().split { $0 == "," || $0 == "+" || $0.isWhitespace }
-        guard !tokens.isEmpty else { return nil }
-        var bands = Set<Int>()
-        for rawToken in tokens {
-            var token = String(rawToken)
-            if token.first == prefix { token.removeFirst() }
-            guard let band = Int(token), band > 0 else { return nil }
-            bands.insert(band)
-        }
-        return bands
     }
 
     private func controlMessage(_ text: String, color: Color, icon: String) -> some View {
@@ -659,6 +715,7 @@ struct StatusPanel: View {
         case let .lteBandLock(bands):
             model.lockLTEBands(bands)
         case .restoreDefaults:
+            bandSelection.synchronize(with: model.controlState, force: true)
             model.restoreAutomaticDefaults()
         }
     }
@@ -961,6 +1018,82 @@ private struct InlineControlConfirmation: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .strokeBorder(.orange.opacity(0.22), lineWidth: 0.5)
         }
+    }
+}
+
+private struct ControlContextKey: Equatable {
+    let modemID: String
+    let endpoint: ScopedEndpoint
+}
+
+private struct BandSelectionPicker: View {
+    @Environment(\.appLanguage) private var language
+
+    let title: String
+    let prefix: String
+    let bands: [Int]
+    let selectedBands: Set<Int>
+    let isDisabled: Bool
+    let toggle: (Int) -> Void
+
+    private let columns = [
+        GridItem(.adaptive(minimum: 52, maximum: 72), spacing: 6, alignment: .leading)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            if bands.isEmpty {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(L10n.text("Reading bands…", language: language))
+            } else {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
+                    ForEach(bands, id: \.self) { band in
+                        bandButton(band)
+                    }
+                }
+            }
+        }
+    }
+
+    private func bandButton(_ band: Int) -> some View {
+        let isSelected = selectedBands.contains(band)
+        return Button {
+            toggle(band)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("\(prefix)\(band)")
+                    .font(.caption.monospacedDigit().weight(.medium))
+            }
+            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+            .background(
+                isSelected ? Color.accentColor.opacity(0.13) : Color.primary.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(
+                        isSelected ? Color.accentColor.opacity(0.34) : Color.primary.opacity(0.08),
+                        lineWidth: 0.5
+                    )
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .accessibilityLabel("\(title) \(band)")
+        .accessibilityValue(
+            L10n.text(isSelected ? "Selected" : "Not selected", language: language)
+        )
     }
 }
 

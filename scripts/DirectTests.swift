@@ -169,6 +169,8 @@ enum DirectTests {
                 saBands: [77],
                 nsaBands: [66, 77],
                 lteBands: [2, 4, 66],
+                availableNRBands: [5, 66, 77],
+                availableLTEBands: [2, 4, 5, 66],
                 canRestoreDefaults: true,
                 preferenceLifetime: .persistent
             )
@@ -179,9 +181,58 @@ enum DirectTests {
                     plmnChangedState.saBands == priorControlState.saBands &&
                     plmnChangedState.nsaBands == priorControlState.nsaBands &&
                     plmnChangedState.lteBands == priorControlState.lteBands &&
+                    plmnChangedState.availableNRBands == priorControlState.availableNRBands &&
+                    plmnChangedState.availableLTEBands == priorControlState.availableLTEBands &&
                     plmnChangedState.canRestoreDefaults == priorControlState.canRestoreDefaults &&
                     plmnChangedState.preferenceLifetime == priorControlState.preferenceLifetime,
                 "PLMN change preserves verified radio and restore state",
+                failures: &failures
+            )
+
+            var bandDraft = ModemBandSelectionDraft()
+            bandDraft.synchronize(with: priorControlState)
+            check(
+                bandDraft.nrBands == Set([66, 77]) &&
+                    bandDraft.lteBands == Set([2, 4, 66]) &&
+                    !bandDraft.isNRDirty && !bandDraft.isLTEDirty,
+                "band picker initializes from authoritative enabled bands",
+                failures: &failures
+            )
+            bandDraft.toggleNR(66)
+            bandDraft.toggleLTE(4)
+            bandDraft.synchronize(with: priorControlState)
+            check(
+                bandDraft.nrBands == Set([77]) &&
+                    bandDraft.lteBands == Set([2, 66]) &&
+                    bandDraft.isNRDirty && bandDraft.isLTEDirty,
+                "one-second authoritative refresh preserves unsubmitted band choices",
+                failures: &failures
+            )
+            var verifiedDraftState = priorControlState
+            verifiedDraftState.nsaBands = [77]
+            verifiedDraftState.lteBands = [2, 66]
+            bandDraft.synchronize(with: verifiedDraftState)
+            check(
+                bandDraft.nrBands == Set([77]) &&
+                    bandDraft.lteBands == Set([2, 66]) &&
+                    !bandDraft.isNRDirty && !bandDraft.isLTEDirty,
+                "matching write readback commits the band picker draft",
+                failures: &failures
+            )
+            let asymmetricAutomaticState = ModemControlState(
+                operatorSelection: nil,
+                architecture: .automatic,
+                saBands: [5, 77],
+                nsaBands: [66, 77],
+                lteBands: [2, 4],
+                availableNRBands: [77],
+                availableLTEBands: [2, 4],
+                canRestoreDefaults: true,
+                preferenceLifetime: .untilPowerLoss
+            )
+            check(
+                asymmetricAutomaticState.selectedNRBands == Set([77]),
+                "automatic NR picker checks only bands valid on both SA and NSA paths",
                 failures: &failures
             )
 
@@ -2737,6 +2788,9 @@ enum DirectTests {
                   "MC7530 netinfo maps all band sets", failures: &failures)
             check(state.canRestoreDefaults && state.preferenceLifetime == .persistent,
                   "MC7530 neutral state reports persistent/restorable controls", failures: &failures)
+            check(state.availableNRBands == MC7530ControlSession.defaultNRBands &&
+                    state.availableLTEBands == MC7530ControlSession.defaultLTEBands,
+                  "MC7530 picker exposes verified vendor band defaults", failures: &failures)
             let records = await http.records()
             let controlCalls = records.filter { $0.object == "zte_nwinfo_api" }
             check(controlCalls.allSatisfy {
