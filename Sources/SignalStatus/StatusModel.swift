@@ -324,6 +324,8 @@ final class StatusModel: ObservableObject {
                     saBands: [77, 78],
                     nsaBands: [77, 78],
                     lteBands: [2, 4, 25, 66],
+                    availableNRBands: [2, 5, 7, 12, 25, 29, 30, 38, 41, 66, 71, 77, 78],
+                    availableLTEBands: [2, 4, 5, 7, 12, 13, 17, 25, 26, 29, 30, 38, 41, 42, 43, 48, 66, 71],
                     canRestoreDefaults: true,
                     preferenceLifetime: .untilPowerLoss
                 )

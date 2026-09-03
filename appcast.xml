@@ -6,6 +6,16 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>Cellular Modem Monitor</title>
         <item>
+            <title>1.5.3</title>
+            <pubDate>Wed, 02 Sep 2026 22:07:13 -0400</pubDate>
+            <link>https://github.com/maigougou/cellular-modem-monitor</link>
+            <sparkle:version>1503</sparkle:version>
+            <sparkle:shortVersionString>1.5.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/maigougou/cellular-modem-monitor/releases/download/v1.5.3/Cellular-Modem-Monitor-macOS.zip" length="3065547" type="application/octet-stream" sparkle:edSignature="/tWnK9RkS364IW89Yju9TBxZaUfbfyAVRt74VxvIKgqkG5Ys0ssoFp62qLqL6OOoHvVaQMla7XK2fXkpRjjZCQ=="/>
+        </item>
+        <item>
             <title>1.5.2</title>
             <pubDate>Wed, 02 Sep 2026 21:14:42 -0400</pubDate>
             <link>https://github.com/maigougou/cellular-modem-monitor</link>
@@ -38,6 +48,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: ZNK66TATYf+gGBuSOfXlmBmjvwvDew+eIsdZd+AFxX9/0Np/eTX5Lrnk4/emgFxsMtNasFxXwUq4yqfbIJMuDg==
-length: 2813
+edSignature: ZG5K5QoaD5mr16TD4G7EOSofuTM6ke8Fcwa94zSmJkcST8KGy99gG+hsw1HvvGirm9Azfksfi37fIpFtnxPxDA==
+length: 3602
 -->

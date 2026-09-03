@@ -71,6 +71,8 @@ private struct MC7530RawControlState: Equatable, Sendable {
             saBands: saBands,
             nsaBands: nsaBands,
             lteBands: lteBands,
+            availableNRBands: MC7530ControlSession.defaultNRBands,
+            availableLTEBands: MC7530ControlSession.defaultLTEBands,
             canRestoreDefaults: true,
             preferenceLifetime: .persistent
         )
