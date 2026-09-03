@@ -9,10 +9,9 @@
 可通过 VOS SSH/QMI 后端或 ZTE 认证 Web UBus 后端执行带验证的控制。
 
 <p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor 显示 5G SA n78 连接">
-  <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="340" alt="Cellular Modem Monitor 显示 5G NSA n78 与 LTE B2 连接">
+  <img src="assets/cellular-modem-monitor-sa-n78.png" width="360" alt="Cellular Modem Monitor 显示 5G SA n78 连接">
   <br>
-  <sub>当前 SA 概览与 NSA 无线控制界面；图中使用虚构 Cell ID。</sub>
+  <sub>SA 实时状态一览；图中使用虚构 Cell ID。</sub>
 </p>
 
 ## 功能
@@ -43,6 +42,17 @@
 - 后端专属的恢复操作及最终读回验证
 - 每次写入前验证物理设备身份
 - 在当前后端明确支持时读取 LTE 邻区测量
+
+<details>
+<summary><strong>网络与无线控制界面预览</strong></summary>
+
+<p align="center">
+  <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="360" alt="Cellular Modem Monitor 显示带验证的选网、无线模式与频段控制">
+  <br>
+  <sub>深色模式下由设备读回驱动的控制界面；图中使用虚构 Cell ID。</sub>
+</p>
+
+</details>
 
 控制始终交给当前活动后端，不会由界面直接调用某种传输。VOS 偏好持续到断电；
 MC7530CA 偏好会持久保存，直到再次修改或恢复。界面只显示当前后端声明的能力。
