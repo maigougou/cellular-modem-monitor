@@ -30,54 +30,53 @@ enum IconGenerator {
         NSColor.clear.setFill()
         NSRect(origin: .zero, size: size).fill()
 
-        let iconRect = NSRect(x: 48, y: 48, width: 928, height: 928)
-        let iconPath = NSBezierPath(roundedRect: iconRect, xRadius: 214, yRadius: 214)
-        let appBlue = NSColor(calibratedRed: 10 / 255, green: 132 / 255, blue: 1, alpha: 1)
-        let appCyan = NSColor(calibratedRed: 100 / 255, green: 210 / 255, blue: 1, alpha: 1)
+        let iconRect = NSRect(x: 58, y: 58, width: 908, height: 908)
+        let iconPath = NSBezierPath(roundedRect: iconRect, xRadius: 218, yRadius: 218)
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor(calibratedRed: 0.02, green: 0.07, blue: 0.16, alpha: 0.42)
-        shadow.shadowBlurRadius = 42
-        shadow.shadowOffset = NSSize(width: 0, height: -20)
+        shadow.shadowColor = NSColor(calibratedRed: 0.02, green: 0.08, blue: 0.20, alpha: 0.34)
+        shadow.shadowBlurRadius = 38
+        shadow.shadowOffset = NSSize(width: 0, height: -18)
+        NSGraphicsContext.current?.saveGraphicsState()
         shadow.set()
         NSGradient(colors: [
-            NSColor(calibratedRed: 0.03, green: 0.12, blue: 0.25, alpha: 1),
-            appBlue,
-            NSColor(calibratedRed: 0.20, green: 0.58, blue: 0.96, alpha: 1)
-        ])?.draw(in: iconPath, angle: -48)
+            NSColor(calibratedRed: 0.08, green: 0.34, blue: 0.88, alpha: 1),
+            NSColor(calibratedRed: 0.03, green: 0.56, blue: 0.98, alpha: 1),
+            NSColor(calibratedRed: 0.23, green: 0.76, blue: 1.00, alpha: 1)
+        ])?.draw(in: iconPath, angle: 58)
+        NSGraphicsContext.current?.restoreGraphicsState()
 
-        let label = NSMutableAttributedString(
-            string: "5G",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 330, weight: .heavy),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.97),
-                .kern: -20
-            ]
-        )
-        label.append(NSAttributedString(
-            string: "+",
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 250, weight: .bold),
-                .foregroundColor: appCyan,
-                .kern: -10
-            ]
-        ))
-        let labelSize = label.size()
-        label.draw(at: NSPoint(
-            x: (size.width - labelSize.width) / 2,
-            y: 395
-        ))
+        // A single high-contrast radio mark survives Finder's 16 pt size and
+        // mirrors the menu-bar/panel symbol without relying on tiny lettering.
+        NSGraphicsContext.current?.saveGraphicsState()
+        iconPath.addClip()
+        let topHighlight = NSBezierPath(roundedRect: iconRect, xRadius: 218, yRadius: 218)
+        NSGradient(colors: [
+            NSColor.white.withAlphaComponent(0.20),
+            NSColor.white.withAlphaComponent(0.00)
+        ])?.draw(in: topHighlight, angle: -90)
+        NSGraphicsContext.current?.restoreGraphicsState()
 
-        let barWidths: [CGFloat] = [120, 120, 120, 120]
-        let barHeights: [CGFloat] = [64, 104, 144, 184]
-        let barGap: CGFloat = 26
-        let totalBarWidth = barWidths.reduce(0, +) + barGap * CGFloat(barWidths.count - 1)
-        var barX = (size.width - totalBarWidth) / 2
-        NSColor.white.withAlphaComponent(0.92).setFill()
-        for index in barWidths.indices {
-            let rect = NSRect(x: barX, y: 190, width: barWidths[index], height: barHeights[index])
-            NSBezierPath(roundedRect: rect, xRadius: 24, yRadius: 24).fill()
-            barX += barWidths[index] + barGap
-        }
+        NSColor.white.withAlphaComponent(0.17).setStroke()
+        let rim = NSBezierPath(roundedRect: iconRect.insetBy(dx: 7, dy: 7), xRadius: 211, yRadius: 211)
+        rim.lineWidth = 14
+        rim.stroke()
+
+        let radioCenter = NSPoint(x: 512, y: 526)
+        drawRadioArc(center: radioCenter, radius: 258, side: .left, alpha: 0.72)
+        drawRadioArc(center: radioCenter, radius: 258, side: .right, alpha: 0.72)
+        drawRadioArc(center: radioCenter, radius: 158, side: .left, alpha: 0.96)
+        drawRadioArc(center: radioCenter, radius: 158, side: .right, alpha: 0.96)
+
+        NSColor.white.setStroke()
+        let mast = NSBezierPath()
+        mast.lineWidth = 54
+        mast.lineCapStyle = .round
+        mast.move(to: NSPoint(x: 512, y: 238))
+        mast.line(to: NSPoint(x: 512, y: 461))
+        mast.stroke()
+
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 451, y: 465, width: 122, height: 122)).fill()
 
         NSGraphicsContext.restoreGraphicsState()
         guard let png = bitmap.representation(using: .png, properties: [:]) else {
@@ -85,6 +84,40 @@ enum IconGenerator {
         }
         try png.write(to: URL(fileURLWithPath: CommandLine.arguments[1]), options: .atomic)
         try makeICNS(from: bitmap).write(to: URL(fileURLWithPath: CommandLine.arguments[2]), options: .atomic)
+    }
+
+    private enum RadioSide {
+        case left
+        case right
+    }
+
+    private static func drawRadioArc(
+        center: NSPoint,
+        radius: CGFloat,
+        side: RadioSide,
+        alpha: CGFloat
+    ) {
+        let path = NSBezierPath()
+        path.lineWidth = 54
+        path.lineCapStyle = .round
+        switch side {
+        case .left:
+            path.appendArc(
+                withCenter: center,
+                radius: radius,
+                startAngle: 132,
+                endAngle: 228
+            )
+        case .right:
+            path.appendArc(
+                withCenter: center,
+                radius: radius,
+                startAngle: -48,
+                endAngle: 48
+            )
+        }
+        NSColor.white.withAlphaComponent(alpha).setStroke()
+        path.stroke()
     }
 
     private static func makeICNS(from source: NSBitmapImageRep) throws -> Data {
