@@ -3373,10 +3373,10 @@ enum DirectTests {
                     result.state.nsaBands == MC7530ControlSession.defaultNRBands,
                   "MC7530 restore verifies automatic mode and retail default bands", failures: &failures)
             let restored = await http.currentState()
-            check(restored.gwBandLock == MC7530ControlSession.defaultGWBandMask &&
+            check(restored.gwBandLock == "0x000000000" &&
                     restored.nrdcBands == restricted.nrdcBands &&
                     restored.lteCellLock.isEmpty && restored.nrCellLock.isEmpty,
-                  "MC7530 restore verifies GW default, NRDC invariant, and cleared cell locks",
+                  "MC7530 restore preserves the reset-authoritative GW value, NRDC invariant, and cleared cell locks",
                   failures: &failures)
             let records = await http.records()
             let reset = records.first { $0.ubusMethod == "nwinfo_reset_band_cell_setting" }
@@ -3384,6 +3384,17 @@ enum DirectTests {
                     reset?.header("Z-Tag") == "",
                   "MC7530 restore sends the exact reset with the verified header form",
                   failures: &failures)
+            let restoreWrites = records.compactMap(\.ubusMethod).filter {
+                [
+                    "nwinfo_reset_band_cell_setting", "nwinfo_set_lte_ext_band",
+                    "nwinfo_set_nrbandlock", "nwinfo_set_netselect"
+                ].contains($0)
+            }
+            check(restoreWrites == [
+                "nwinfo_reset_band_cell_setting", "nwinfo_set_lte_ext_band",
+                "nwinfo_set_nrbandlock", "nwinfo_set_nrbandlock", "nwinfo_set_netselect"
+            ], "MC7530 restore explicitly rebuilds LTE, SA, and NSA after the partial retail reset",
+               failures: &failures)
             let mode = records.last { $0.ubusMethod == "nwinfo_set_netselect" }
             check(mode?.parameters == ["net_select": "WL_AND_NSA"],
                   "MC7530 restore finishes with exact WL_AND_NSA token", failures: &failures)
@@ -4926,9 +4937,10 @@ private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
             return try Self.successResponse()
         case "nwinfo_reset_band_cell_setting":
             state.lteBands = MC7530ControlSession.defaultLTEBands
-            state.saBands = MC7530ControlSession.defaultNRBands
-            state.nsaBands = MC7530ControlSession.defaultNRBands
-            state.gwBandLock = "0x006800000"
+            // Verified MC7530CAV2.6 behavior: the global reset clears cell
+            // locks and restores LTE/GW state, but leaves SA/NSA band locks
+            // untouched. Production must rebuild both NR lists explicitly.
+            state.gwBandLock = "0x000000000"
             state.lteCellLock = ""
             state.nrCellLock = ""
             if lostResetResponsesAfterApplications > 0 {
