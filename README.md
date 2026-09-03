@@ -354,11 +354,14 @@ the active modem, endpoint or credential invalidates that session.
   commands verify that every persistent field outside the requested change stayed
   unchanged; collateral firmware changes are treated as failures.
   **Restore automatic defaults** calls the dedicated
-  `nwinfo_reset_band_cell_setting`, then verifies the exact LTE/SA/NSA vendor
-  lists, the MC7530CA legacy GW mask, cleared LTE/NR cell locks and the exact
-  verified default NRDC list before explicitly restoring and verifying
-  `WL_AND_NSA` automatic mode. Before the first reset write, every recoverable
-  pre-operation value is parsed and validated. After any ambiguous write,
+  `nwinfo_reset_band_cell_setting` to clear LTE/NR cell locks and let the retail
+  firmware restore its authoritative legacy GW state. The verified
+  MC7530CAV2.6 reset leaves existing SA/NSA locks untouched, so the backend then
+  explicitly writes the exact LTE, SA and NSA vendor lists before restoring and
+  verifying `WL_AND_NSA` automatic mode. Final readback also verifies the reset
+  GW value, cleared cell locks and exact default NRDC list. Before the first
+  reset write, every recoverable pre-operation value is parsed and validated.
+  After any ambiguous write,
   verification failure, cancellation or collateral change, an uncancelled
   recovery task runs the reset and then rebuilds and verifies the previous
   GW/LTE/SA/NSA/cell/operator state with the exact retail setters. Independent

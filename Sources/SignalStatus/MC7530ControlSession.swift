@@ -257,10 +257,6 @@ actor MC7530ControlSession: ModemControlSession {
         96, 97, 98, 99, 102, 104, 105, 106, 257, 258, 259, 260, 261
     ]
     static let automaticNetSelect = "WL_AND_NSA"
-    /// Exact factory legacy 2G/3G mask reported by the verified Canadian
-    /// MC7530CAV2.6 target alongside the LTE/NR default lists above.
-    static let defaultGWBandMask = "0x006800000"
-
     private static let acceptedRegistrationRATs: Set<String> = [
         "0", "2", "7", "9", "11", "12", "13", "14"
     ]
@@ -745,17 +741,24 @@ actor MC7530ControlSession: ModemControlSession {
         do {
             try await write("nwinfo_reset_band_cell_setting")
             let locksReset = try await pollRaw(attempts: timing.resetAttempts) { raw in
-                raw.lteBands == Self.defaultLTEBands &&
-                    raw.saBands == Self.defaultNRBands &&
-                    raw.nsaBands == Self.defaultNRBands &&
-                    raw.nrdcBands == Self.defaultNRDCBands &&
-                    raw.gwBandLock.lowercased() == Self.defaultGWBandMask.lowercased() &&
+                raw.nrdcBands == Self.defaultNRDCBands &&
                     raw.lteCellLock.isEmpty && raw.nrCellLock.isEmpty
             }
-            guard locksReset != nil else {
+            guard let locksReset else {
                 throw ModemControlError.timedOut("Restoring MC7530CA band and cell defaults")
             }
+            let resetGWBandMask = try Self.rollbackPlan(for: locksReset).gwBandMask
 
+            // Retail MC7530CAV2.6 does not rebuild the SA/NSA allowlists when
+            // nwinfo_reset_band_cell_setting is called. It clears the cell
+            // locks, restores LTE, and changes the legacy GW mask to its own
+            // unlocked value, while leaving an NR lock such as `77` intact.
+            // Treat the reset's GW value as authoritative, but explicitly
+            // restore every writable LTE/NR vendor list before switching back
+            // to automatic SA/NSA mode.
+            try await setLTEBands(Self.defaultLTEBands)
+            try await setNRBands(Self.defaultNRBands, type: "0")
+            try await setNRBands(Self.defaultNRBands, type: "1")
             try await setNetSelect(Self.automaticNetSelect)
             let final = try await pollRaw(attempts: timing.verificationAttempts) { raw in
                 raw.netSelect == Self.automaticNetSelect && raw.netSelectMode == "auto_select" &&
@@ -763,7 +766,7 @@ actor MC7530ControlSession: ModemControlSession {
                     raw.saBands == Self.defaultNRBands &&
                     raw.nsaBands == Self.defaultNRBands &&
                     raw.nrdcBands == Self.defaultNRDCBands &&
-                    raw.gwBandLock.lowercased() == Self.defaultGWBandMask.lowercased() &&
+                    raw.gwBandLock.lowercased() == resetGWBandMask.lowercased() &&
                     raw.lteCellLock.isEmpty && raw.nrCellLock.isEmpty
             }
             guard let final else {
