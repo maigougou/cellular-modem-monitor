@@ -14,7 +14,7 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
   <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="340" alt="Cellular Modem Monitor showing a 5G NSA n78 and LTE B2 connection">
   <br>
-  <sub>VOS 5G SA n78 and NSA n78+B2 examples; demo values use synthetic Cell IDs.</sub>
+  <sub>Current SA overview and NSA radio-controls layouts; demo values use synthetic Cell IDs.</sub>
 </p>
 
 ## Features

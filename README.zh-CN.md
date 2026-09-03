@@ -12,7 +12,7 @@
   <img src="assets/cellular-modem-monitor-sa-n78.png" width="340" alt="Cellular Modem Monitor 显示 5G SA n78 连接">
   <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="340" alt="Cellular Modem Monitor 显示 5G NSA n78 与 LTE B2 连接">
   <br>
-  <sub>VOS 5G SA n78 与 NSA n78+B2 示例；图中使用虚构 Cell ID。</sub>
+  <sub>当前 SA 概览与 NSA 无线控制界面；图中使用虚构 Cell ID。</sub>
 </p>
 
 ## 功能
