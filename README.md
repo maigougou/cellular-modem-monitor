@@ -11,9 +11,9 @@ opened **Network & radio controls** panel provides verified controls through
 either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 
 <p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n78.png" width="360" alt="Cellular Modem Monitor showing a 5G SA n78 connection">
+  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor showing a 5G SA n77 connection with NR carrier aggregation">
   <br>
-  <sub>Live SA status at a glance; demo values use synthetic Cell IDs.</sub>
+  <sub>Live SA n77 status with active NR component carriers.</sub>
 </p>
 
 ## Features

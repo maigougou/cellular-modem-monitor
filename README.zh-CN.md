@@ -9,9 +9,9 @@
 可通过 VOS SSH/QMI 后端或 ZTE 认证 Web UBus 后端执行带验证的控制。
 
 <p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n78.png" width="360" alt="Cellular Modem Monitor 显示 5G SA n78 连接">
+  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor 显示 5G SA n77 连接与 NR 载波聚合">
   <br>
-  <sub>SA 实时状态一览；图中使用虚构 Cell ID。</sub>
+  <sub>SA n77 实时状态与活动 NR 组成载波。</sub>
 </p>
 
 ## 功能
