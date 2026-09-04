@@ -147,7 +147,11 @@ enum MC7530Parser {
             }
         }
 
-        let ca = parseLTECarriers(cleanString(object["lteca"]), primarySignal: lteSignal)
+        let ca = parseLTECarriers(
+            cleanString(object["lteca"]),
+            secondarySignalRaw: cleanString(object["ltecasig"]),
+            primarySignal: lteSignal
+        )
         var primary = ca.primary
         if primary == nil,
            let band = lteBand,
@@ -159,7 +163,7 @@ enum MC7530Parser {
                 earfcn: channel,
                 bandwidthMHz: nil,
                 physicalCellID: pci,
-                state: nil,
+                state: .active,
                 globalCellID: boundedPositiveUInt64(
                     object["cell_id"],
                     maximum: maximumLTECellID
@@ -258,13 +262,19 @@ enum MC7530Parser {
 
     private static func parseLTECarriers(
         _ raw: String?,
+        secondarySignalRaw: String?,
         primarySignal: RadioSignal
     ) -> (primary: LTECarrier?, secondary: [LTECarrier]) {
         guard let raw else { return (nil, []) }
         var primary: LTECarrier?
         var secondary: [LTECarrier] = []
+        let signalEntries = secondarySignalRaw?
+            .split(separator: ";", omittingEmptySubsequences: true)
+            .map(String.init) ?? []
 
-        for entry in raw.split(separator: ";", omittingEmptySubsequences: true) {
+        for (entryIndex, entry) in raw
+            .split(separator: ";", omittingEmptySubsequences: true)
+            .enumerated() {
             let fields = entry.split(separator: ",", omittingEmptySubsequences: false)
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             guard fields.count >= 5,
@@ -285,27 +295,60 @@ enum MC7530Parser {
                     earfcn: earfcn,
                     bandwidthMHz: bandwidth,
                     physicalCellID: pci,
-                    state: nil,
+                    state: .active,
                     signal: primarySignal
                 )
             } else if role != 0 {
+                let signal = parseLTESecondarySignal(
+                    entryIndex > 0 && signalEntries.indices.contains(entryIndex - 1)
+                        ? signalEntries[entryIndex - 1]
+                        : nil
+                )
                 secondary.append(LTECarrier(
                     role: .secondary(index: nil),
                     band: band,
                     earfcn: earfcn,
                     bandwidthMHz: bandwidth,
                     physicalCellID: pci,
-                    state: nil,
-                    signal: .empty
+                    state: signal.state,
+                    signal: signal.metrics
                 ))
             }
         }
         return (primary, secondary)
     }
 
-    /// MC7530CA reports active NR component carriers as semicolon-separated
+    /// `ltecasig` contains one record per LTE SCell, in the same order as the
+    /// non-primary `lteca` records: `rsrp,rsrq,snr,rssi,ulConfigured,state;`.
+    /// The retail Web UI defines state 2 as active and state 1 as non-active.
+    private static func parseLTESecondarySignal(
+        _ raw: String?
+    ) -> (state: RadioCarrierState, metrics: RadioSignal) {
+        guard let raw else { return (.unknown, .empty) }
+        let fields = raw.split(separator: ",", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard fields.count >= 6 else { return (.unknown, .empty) }
+
+        let state: RadioCarrierState = switch Int(fields[5]) {
+        case 2: .active
+        case 1: .configured
+        default: .unknown
+        }
+        return (
+            state,
+            RadioSignal(
+                rsrpDBm: roundedIntegerText(fields[0], range: -160 ... -40),
+                rsrqDB: doubleText(fields[1], range: -40 ... 0),
+                rssiDBm: roundedIntegerText(fields[3], range: -140 ... -20),
+                snrDB: doubleText(fields[2], range: -30 ... 50)
+            )
+        )
+    }
+
+    /// MC7530CA reports NR component carriers as semicolon-separated
     /// records. A verified unit reports SCells in this layout:
-    /// `vendor,pci,vendor,band,nrarfcn,bandwidth,vendor,rsrp,rsrq,snr,rssi;`.
+    /// `vendor,pci,state,band,nrarfcn,bandwidth,vendor,rsrp,rsrq,snr,rssi;`.
+    /// The retail Web UI defines state 2 as active and state 1 as non-active.
     /// Only the stable identity fields are mandatory; unavailable signal
     /// columns are ignored independently so one bad metric cannot hide a CC.
     private static func parseNRSecondaryCarriers(_ raw: String?) -> [NRCarrier] {
@@ -324,6 +367,11 @@ enum MC7530Parser {
                   nrBandwidthsMHz.contains(bandwidth)
             else { continue }
             let pci = uint16Text(fields[1], range: nrPCIRange)
+            let state: RadioCarrierState = switch Int(fields[2]) {
+            case 2: .active
+            case 1: .configured
+            default: .unknown
+            }
             guard seen.insert("\(band)-\(nrarfcn)-\(pci.map(String.init) ?? "-")").inserted else {
                 continue
             }
@@ -334,7 +382,7 @@ enum MC7530Parser {
                 nrarfcn: nrarfcn,
                 bandwidthMHz: bandwidth,
                 physicalCellID: pci,
-                state: .active,
+                state: state,
                 signal: RadioSignal(
                     rsrpDBm: integerText(field(fields, at: 7), range: -160 ... -40),
                     rsrqDB: doubleText(field(fields, at: 8), range: -43 ... 0),
@@ -407,6 +455,17 @@ enum MC7530Parser {
         guard rounded == number,
               let result = Int(exactly: rounded),
               range.contains(result)
+        else { return nil }
+        return result
+    }
+
+    private static func roundedIntegerText(_ value: String?, range: ClosedRange<Int>) -> Int? {
+        guard let value,
+              let number = Double(value),
+              number.isFinite,
+              number >= Double(range.lowerBound),
+              number <= Double(range.upperBound),
+              let result = Int(exactly: number.rounded())
         else { return nil }
         return result
     }

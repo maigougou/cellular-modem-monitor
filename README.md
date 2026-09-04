@@ -255,9 +255,12 @@ identity before exposing any write operation.
 Normal polling calls the read-only `zte_nwinfo_api.nwinfo_get_netinfo` method.
 The parser maps reported operator/PLMN, LTE and NR bands, channels, bandwidth,
 PCI, Cell ID, signal metrics and LTE/NR carrier aggregation without inventing
-missing values. MC7530CA's `nrca` SCell records are kept as separate component
-carriers, so for example `n77 50 MHz + n77 30 MHz` is not collapsed into one
-carrier or mislabeled as a single 80 MHz channel.
+missing values. MC7530CA's `nrca` NR SCell records and `lteca`/`ltecasig` LTE
+SCell records are kept as separate component carriers, so for example
+`n77 50 MHz + n77 30 MHz` is not collapsed into one carrier or mislabeled as a
+single 80 MHz channel. The reported per-carrier state is also preserved for
+both radios: state `2` is shown as **Active**, while state `1` remains visible as
+**Inactive** and is excluded from the active-carrier summary.
 
 When the control panel is opened, the same scoped authenticated session exposes
 only the radio methods declared by the backend. Every MC7530CA radio RPC uses the

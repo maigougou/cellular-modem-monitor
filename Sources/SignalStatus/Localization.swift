@@ -194,7 +194,7 @@ enum L10n {
         "LTE only": "仅 LTE",
         "Unavailable": "不可用",
         "Active": "活动",
-        "Configured": "已配置",
+        "Inactive": "未激活",
         "Deconfigured": "已取消配置",
         "Detailed": "详细",
         "Compact": "紧凑",
