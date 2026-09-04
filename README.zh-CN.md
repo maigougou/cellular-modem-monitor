@@ -25,7 +25,7 @@
 - 仅在当前后端明确报告时显示 SA/NSA 模式
 - 显示设备实际提供的 RSRP、RSRQ、RSSI 与 SNR
 - 显示更直观的下行频率和信道带宽，原始 ARFCN 保留在诊断信息中
-- 在设备数据足以安全关联时显示 NR/LTE 服务 Cell ID 及详细 LTE PCell/SCell
+- 在设备数据足以安全关联时显示 NR/LTE 服务 Cell ID 及详细 NR/LTE PCell/SCell
 - Cell ID 可点击：LTE 会打开已填好数值的 CellMapper ID 计算器；NR 会复制完整
   NCI，并打开对应 MCC-MNC 的 NR 地图，可用于 **Cell Search**
 - 显示运营商、PLMN 和所选网络接口
@@ -205,8 +205,9 @@ PLMN、也未产生可观察注册变化的换卡。
 任何写入操作。
 
 常规轮询调用只读方法 `zte_nwinfo_api.nwinfo_get_netinfo`。解析器映射设备实际
-报告的运营商/PLMN、LTE/NR 频段、信道、带宽、PCI、Cell ID、信号指标和 LTE
-载波聚合，不会编造缺失值。
+报告的运营商/PLMN、LTE/NR 频段、信道、带宽、PCI、Cell ID、信号指标和 LTE/NR
+载波聚合，不会编造缺失值。MC7530CA 的 `nrca` SCell 记录会作为独立组成载波保留；
+例如 `n77 50 MHz + n77 30 MHz` 不会被丢成一条，也不会误写成单载波 80 MHz。
 
 打开控制面板后，同一个限定路径的认证 session 只提供后端声明的无线控制方法。
 每项 MC7530CA 无线 RPC 都使用实机验证过的 SID 认证请求形式：`Z-Mode: 0` 和空
@@ -233,7 +234,7 @@ Cellular Modem Monitor
 ```
 
 NAS 返回活动 NR/LTE 频段、信道、带宽、可用射频指标、注册网络、Cell ID、LTE
-邻区测量及详细 LTE PCell/SCell。NAS Get PLMN Name 用于补查空缺的服务网络名称；
+邻区测量、详细 LTE PCell/SCell，以及单独报告的活动 NR 组成载波。NAS Get PLMN Name 用于补查空缺的服务网络名称；
 DSD 通过明确的 service-option 位返回 SA/NSA。QRTR 节点与端口会在每次查询时
 动态发现，不使用写死的数值。`AT+GMR` 与 VOS 版本文件分别提供 modem 和设备
 固件版本。
@@ -395,8 +396,9 @@ dist/Cellular-Modem-Monitor-macOS.zip
 - 当 modem、固件或网络没有报告某项信息时，对应字段会显示 `—`，不会自行推测。
 - 标准 LTE CA 数据可能只提供 SCell 的频段/信道/带宽，而没有每个 SCell 的
   Global Cell ID 或全部信号指标。
-- 当前界面显示一个主要 NR 频段和详细 LTE PCell/SCell；两种后端目前都不能枚举
-  所有可能的 NR 组成载波。
+- 界面会在 **NR CA** 卡片中分别显示设备报告的 NR 组成载波。MC7530CA 使用
+  `nrca` 提供 SCell；VOS 使用 Qualcomm NAS 返回的活动 NR 条目。modem 仍可能不返回
+  某条 SCell 的 Cell ID、PCI 或独立信号指标，此时保持 `—`，不会推测。
 - VOS 无线偏好持续到断电；MC7530CA 无线偏好会持久保存，直到再次修改或明确恢复。
 
 ## 致谢

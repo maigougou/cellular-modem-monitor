@@ -4,6 +4,7 @@ import XCTest
 final class SignalStatusTests: XCTestCase {
     private let lteBand = "02010031002400020400000000000106000108790084031108000108790084030000120600010805000000"
     private let nrAndLTE = "0201003100270002040000000000110f00020c0d0180ac090008790084030000120b00020c0d0000000805000000"
+    private let nrCAAndLTE = "0201003100330002040000000000111600030c0c0160c609000c0c0180ac090008790084030000121000030c0d0000000c0b0000000805000000"
     private let noActiveBand = "0201003100070002040000000000"
     private let dsdNSA = "02010024001b000204000000000010110001000000000600000000000000000a0000"
     private let dsdSA = "02010024001b00020400000000001011000100000000060000000000000000120000"
@@ -15,6 +16,7 @@ final class SignalStatusTests: XCTestCase {
     private let legacyNoCA = "020100ac00180002040000000000120e0000000000ff000000780000000000"
     private let telusPLMNName = "020700440029000204000000000010140000000000000554454c55530000000554454c55531504000400000016010000"
     private let nrCellLocation = "02050043002700020400000000002e0400dea206002f1600030222010203785634120000000029006affa0fbf1ff"
+    private let nrCACellLocation = "02050043002700020400000000002e040080ac09002f1600030222010203785634120000000029006affa0fbf1ff"
 
     func testAppLanguageDefaultsToChineseForChineseSystemLanguages() {
         XCTAssertEqual(AppLanguage.systemDefault(preferredLanguages: ["zh-Hans-CN", "en-CA"]), .simplifiedChinese)
@@ -693,11 +695,28 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(sa.nrGlobalCellID, 305_419_896)
         XCTAssertNil(sa.lteBand)
 
+        let nrCA = try MC7530Parser.parse(data: mc7530Fixture("sa-nr-ca.json"))
+        XCTAssertEqual(nrCA.nrPrimaryCell?.band, "n77")
+        XCTAssertEqual(nrCA.nrPrimaryCell?.nrarfcn, 640_608)
+        XCTAssertEqual(nrCA.nrPrimaryCell?.bandwidthMHz, 50)
+        XCTAssertEqual(nrCA.nrSecondaryCells.count, 1)
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.role, .secondary(index: 1))
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.band, "n77")
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.nrarfcn, 633_984)
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.bandwidthMHz, 30)
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.physicalCellID, 41)
+        XCTAssertEqual(
+            nrCA.nrSecondaryCells.first?.signal,
+            RadioSignal(rsrpDBm: -140, rsrqDB: -43, rssiDBm: -120, snrDB: -23)
+        )
+        XCTAssertEqual(nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count, 1)
+
         let lte = try MC7530Parser.parse(data: mc7530Fixture("lte-sentinels.json"))
         XCTAssertEqual(lte.lteBand, "B12")
         XCTAssertEqual(lte.lteChannel, "5010")
         XCTAssertEqual(lte.lteSignal, .empty)
         XCTAssertNil(lte.nrBand)
+        XCTAssertTrue(lte.nrSecondaryCells.isEmpty)
         XCTAssertEqual(lte.mcc, "001")
         XCTAssertEqual(lte.mnc, "01")
 
@@ -713,6 +732,7 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertNil(ranges.nrBandwidthMHz)
         XCTAssertNil(ranges.nrGlobalCellID)
         XCTAssertNil(ranges.nrPhysicalCellID)
+        XCTAssertTrue(ranges.nrSecondaryCells.isEmpty)
         XCTAssertThrowsError(try MC7530Parser.parse(data: Data("[]".utf8)))
     }
 
@@ -1549,6 +1569,27 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(radios.map(\.band), ["n78", "B2"])
         XCTAssertEqual(radios.map(\.channel), [633_984, 900])
         XCTAssertEqual(radios.map(\.bandwidthMHz), [50, 20])
+    }
+
+    func testMultipleActiveNRComponentCarriers() throws {
+        let radios = try QMIParser.activeRadios(from: data(nrCAAndLTE))
+        XCTAssertEqual(radios.map(\.band), ["n77", "n77", "B2"])
+        XCTAssertEqual(radios.map(\.channel), [640_608, 633_984, 900])
+        XCTAssertEqual(radios.map(\.bandwidthMHz), [50, 30, 20])
+
+        let snapshot = try VOSClient.makeSnapshot(
+            host: "192.168.225.1",
+            interfaceName: "en13",
+            probe: VOSProbeOutput(
+                band: data(nrCAAndLTE), signal: data(signal), serving: data(serving), ca: nil,
+                location: data(nrCACellLocation), dsd: data(dsdNSA),
+                modemVersion: nil, deviceFirmware: nil
+            )
+        )
+        XCTAssertEqual(snapshot.nrPrimaryCell?.nrarfcn, 633_984)
+        XCTAssertEqual(snapshot.nrPrimaryCell?.bandwidthMHz, 30)
+        XCTAssertEqual(snapshot.nrSecondaryCells.map(\.nrarfcn), [640_608])
+        XCTAssertEqual(snapshot.nrSecondaryCells.map(\.bandwidthMHz), [50])
     }
 
     func testNoActiveBandBecomesReachableNoServiceSnapshot() throws {

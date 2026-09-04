@@ -372,13 +372,23 @@ actor VOSClient {
             )
         }
 
-        let nrReadings = radios.filter { $0.kind == .nr }
+        var seenNRCarriers = Set<String>()
+        let nrReadings = radios.filter { reading in
+            guard reading.kind == .nr else { return false }
+            return seenNRCarriers.insert("\(reading.band)-\(reading.channel)").inserted
+        }
         let lteReadings = radios.filter { $0.kind == .lte }
-        let nr = nrReadings.first
-        let lte = lteReadings.first
         let signal = probe.signal.flatMap { try? QMIParser.signalInfo(from: $0) }
         let serving = probe.serving.flatMap { try? QMIParser.servingInfo(from: $0) }
         let location = probe.location.flatMap { try? QMIParser.cellLocationInfo(from: $0) }
+        let nr = location?.nrARFCN.flatMap { servingARFCN in
+            nrReadings.first { $0.channel == servingARFCN }
+        } ?? nrReadings.first
+        let nrSecondaryReadings = nrReadings.filter { reading in
+            guard let nr else { return false }
+            return reading.band != nr.band || reading.channel != nr.channel
+        }
+        let lte = lteReadings.first
         let explicitMode: NRSystemMode? = {
             guard nr != nil, let dsd = probe.dsd else { return nil }
             return try? QMIParser.systemMode(from: dsd)
@@ -393,6 +403,28 @@ actor VOSClient {
             rssiDBm: nrLocationSignal?.rssiDBm,
             snrDB: signal?.nrSNR ?? nrLocationSignal?.snrDB
         )
+        let nrPrimaryCell = nr.map {
+            NRCarrier(
+                role: .primary,
+                band: $0.band,
+                nrarfcn: $0.channel,
+                bandwidthMHz: $0.bandwidthMHz,
+                physicalCellID: location?.nr?.physicalCellID,
+                state: .active,
+                globalCellID: location?.nr?.globalCellID,
+                signal: nrSignal
+            )
+        }
+        let nrSecondaryCells = nrSecondaryReadings.enumerated().map { index, reading in
+            NRCarrier(
+                role: .secondary(index: index + 1),
+                band: reading.band,
+                nrarfcn: reading.channel,
+                bandwidthMHz: reading.bandwidthMHz,
+                physicalCellID: nil,
+                state: .active
+            )
+        }
         let lteSignal = RadioSignal(
             rsrpDBm: signal?.lteRSRP ?? lteLocationSignal?.rsrpDBm,
             rsrqDB: signal?.lteRSRQ.map(Double.init) ?? lteLocationSignal?.rsrqDB,
@@ -448,6 +480,8 @@ actor VOSClient {
             nrSignal: nrSignal,
             nrGlobalCellID: location?.nr?.globalCellID,
             nrPhysicalCellID: location?.nr?.physicalCellID,
+            nrPrimaryCell: nrPrimaryCell,
+            nrSecondaryCells: nrSecondaryCells,
             lteBand: lte?.band,
             lteChannel: lte.map { String($0.channel) },
             lteBandwidthMHz: lte?.bandwidthMHz,
@@ -469,7 +503,7 @@ actor VOSClient {
         location: QMICellLocationInfo?,
         primarySignal: RadioSignal?
     ) -> LTECarrier {
-        let role: LTECarrierRole
+        let role: RadioCarrierRole
         switch carrier.role {
         case .primary:
             role = .primary
@@ -477,7 +511,7 @@ actor VOSClient {
             role = .secondary(index: carrier.index.map(Int.init))
         }
 
-        let state: LTECarrierState?
+        let state: RadioCarrierState?
         switch carrier.state {
         case .none:
             state = nil

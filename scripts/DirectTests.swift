@@ -9,12 +9,14 @@ enum DirectTests {
     private static let serving = "02030024004c000204000000000001060001010102010810010001110200010b120a002e01dc000554454c55531503000108011b0100011d040001000000210500000000000024020001002705002e01dc0001"
     private static let noCA = "020400ac004e00020400000000001008000100640000000000110400ff000000120e0000000000ff000000780000000000130a00010064000500000079001401000015010000160400640000001701000018010000"
     private static let nrAndLTE = "0201003100270002040000000000110f00020c0d0180ac090008790084030000120b00020c0d0000000805000000"
+    private static let nrCAAndLTE = "0201003100330002040000000000111600030c0c0160c609000c0c0180ac090008790084030000121000030c0d0000000c0b0000000805000000"
     private static let dsdNSA = "02010024001b000204000000000010110001000000000600000000000000000a0000"
     private static let dsdSA = "02010024001b00020400000000001011000100000000060000000000000000120000"
     private static let dsdLTE = "02010024001b00020400000000001011000100000000030000000010000000000000"
     private static let ca = "020100ac00360002040000000000130a00df008403050000007900151f000229000208050000007b0002000000012a00c0210300000094000100000002"
     private static let legacyNoCA = "020100ac00180002040000000000120e0000000000ff000000780000000000"
     private static let nrCellLocation = "02050043002700020400000000002e0400dea206002f1600030222010203785634120000000029006affa0fbf1ff"
+    private static let nrCACellLocation = "02050043002700020400000000002e040080ac09002f1600030222010203785634120000000029006affa0fbf1ff"
     private static let telusPLMNName = "020700440029000204000000000010140000000000000554454c55530000000554454c55531504000400000016010000"
 
     static func main() async {
@@ -825,6 +827,33 @@ enum DirectTests {
             check(combined.map(\.band) == ["n78", "B2"], "NR/LTE bands", failures: &failures)
             check(combined.map(\.channel) == [633_984, 900], "NR/LTE channels", failures: &failures)
             check(combined.map(\.bandwidthMHz) == [50, 20], "parallel bandwidths", failures: &failures)
+
+            let nrCA = try QMIParser.activeRadios(from: data(nrCAAndLTE))
+            check(nrCA.map(\.band) == ["n77", "n77", "B2"], "NR CA bands", failures: &failures)
+            check(nrCA.map(\.channel) == [640_608, 633_984, 900], "NR CA channels", failures: &failures)
+            check(nrCA.map(\.bandwidthMHz) == [50, 30, 20], "NR CA bandwidths", failures: &failures)
+
+            let nrCASnapshot = try VOSClient.makeSnapshot(
+                host: "192.168.225.1",
+                interfaceName: "en13",
+                probe: VOSProbeOutput(
+                    band: data(nrCAAndLTE), signal: data(signal), serving: data(serving), ca: nil,
+                    location: data(nrCACellLocation), dsd: data(dsdNSA),
+                    modemVersion: nil, deviceFirmware: nil
+                )
+            )
+            check(
+                nrCASnapshot.nrPrimaryCell?.nrarfcn == 633_984
+                    && nrCASnapshot.nrPrimaryCell?.bandwidthMHz == 30,
+                "VOS NR CA primary carrier",
+                failures: &failures
+            )
+            check(
+                nrCASnapshot.nrSecondaryCells.map(\.nrarfcn) == [640_608]
+                    && nrCASnapshot.nrSecondaryCells.map(\.bandwidthMHz) == [50],
+                "VOS NR CA secondary carrier",
+                failures: &failures
+            )
 
             let noServiceSnapshot = try VOSClient.makeSnapshot(
                 host: "192.168.225.1",
@@ -2183,11 +2212,43 @@ enum DirectTests {
             check(sa.lteBand == nil && sa.lteSignal == .empty,
                   "MC7530 SA clears inactive LTE", failures: &failures)
 
+            let nrCA = try MC7530Parser.parse(data: fixture("MC7530CA/sa-nr-ca.json"))
+            check(
+                nrCA.nrPrimaryCell?.band == "n77"
+                    && nrCA.nrPrimaryCell?.nrarfcn == 640_608
+                    && nrCA.nrPrimaryCell?.bandwidthMHz == 50,
+                "MC7530 NR CA primary carrier",
+                failures: &failures
+            )
+            check(
+                nrCA.nrSecondaryCells.count == 1
+                    && nrCA.nrSecondaryCells.first?.role == .secondary(index: 1)
+                    && nrCA.nrSecondaryCells.first?.band == "n77"
+                    && nrCA.nrSecondaryCells.first?.nrarfcn == 633_984
+                    && nrCA.nrSecondaryCells.first?.bandwidthMHz == 30
+                    && nrCA.nrSecondaryCells.first?.physicalCellID == 41,
+                "MC7530 NR CA secondary carrier",
+                failures: &failures
+            )
+            check(
+                nrCA.nrSecondaryCells.first?.signal
+                    == RadioSignal(rsrpDBm: -140, rsrqDB: -43, rssiDBm: -120, snrDB: -23),
+                "MC7530 NR CA secondary signal",
+                failures: &failures
+            )
+            check(
+                nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count == 1,
+                "MC7530 NR CA snapshot propagation",
+                failures: &failures
+            )
+
             let lte = try MC7530Parser.parse(data: fixture("MC7530CA/lte-sentinels.json"))
             check(lte.lteBand == "B12" && lte.lteChannel == "5010", "MC7530 LTE-only fixture", failures: &failures)
             check(lte.lteSignal == .empty, "MC7530 signal sentinels hidden", failures: &failures)
             check(lte.nrBand == nil && lte.nrSignal == .empty && lte.nrSystemMode == nil,
                   "MC7530 inactive NR cleared", failures: &failures)
+            check(lte.nrSecondaryCells.isEmpty,
+                  "MC7530 ignores stale NR CA without an active NR carrier", failures: &failures)
             check(lte.mcc == "001" && lte.mnc == "01", "MC7530 PLMN zero padding", failures: &failures)
 
             let ranges = try MC7530Parser.parse(data: fixture("MC7530CA/range-sentinels.json"))
@@ -2201,6 +2262,8 @@ enum DirectTests {
                   "MC7530 rejects out-of-range NR channel", failures: &failures)
             check(ranges.nrBandwidthMHz == nil && ranges.nrGlobalCellID == nil && ranges.nrPhysicalCellID == nil,
                   "MC7530 rejects out-of-range NR fields", failures: &failures)
+            check(ranges.nrSecondaryCells.isEmpty,
+                  "MC7530 rejects NR CA without a valid primary NR channel", failures: &failures)
 
             checkThrows("MC7530 malformed payload rejected", failures: &failures) {
                 _ = try MC7530Parser.parse(data: Data("[]".utf8))

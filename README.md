@@ -30,7 +30,7 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - RSRP, RSRQ, RSSI and SNR when each metric is available
 - Human-readable downlink frequency and channel bandwidth; raw ARFCN remains
   in diagnostics
-- Serving NR/LTE Cell ID and detailed LTE PCell/SCell aggregation when the
+- Serving NR/LTE Cell ID and detailed NR/LTE PCell/SCell aggregation when the
   device supplies enough information to map it safely
 - Clickable Cell IDs: LTE opens CellMapper's prefilled ID calculator; NR copies
   the full NCI and opens the matching MCC-MNC NR map for **Cell Search**
@@ -244,8 +244,10 @@ identity before exposing any write operation.
 
 Normal polling calls the read-only `zte_nwinfo_api.nwinfo_get_netinfo` method.
 The parser maps reported operator/PLMN, LTE and NR bands, channels, bandwidth,
-PCI, Cell ID, signal metrics and LTE carrier aggregation without inventing
-missing values.
+PCI, Cell ID, signal metrics and LTE/NR carrier aggregation without inventing
+missing values. MC7530CA's `nrca` SCell records are kept as separate component
+carriers, so for example `n77 50 MHz + n77 30 MHz` is not collapsed into one
+carrier or mislabeled as a single 80 MHz channel.
 
 When the control panel is opened, the same scoped authenticated session exposes
 only the radio methods declared by the backend. Every MC7530CA radio RPC uses the
@@ -278,8 +280,9 @@ Cellular Modem Monitor
 ```
 
 NAS supplies active NR/LTE bands, channels, bandwidth, available RF metrics,
-serving-network data, Cell ID, LTE neighbor measurements and detailed LTE
-PCell/SCell information. NAS Get PLMN Name resolves an empty serving name. DSD
+serving-network data, Cell ID, LTE neighbor measurements, detailed LTE
+PCell/SCell information and separately reported active NR component carriers.
+NAS Get PLMN Name resolves an empty serving name. DSD
 supplies the explicit SA/NSA service-option bit. QRTR node and port numbers are
 discovered for every query rather than hard-coded. `AT+GMR` and the VOS version
 file provide modem and device firmware versions.
@@ -486,8 +489,10 @@ authoritative readback described above were validated on physical hardware on
   them. Missing values are shown as `—` rather than inferred.
 - Standard LTE CA data may identify SCell band/channel/bandwidth without every
   SCell's global Cell ID or all signal metrics.
-- The UI currently shows one primary NR band and detailed LTE PCell/SCell data;
-  neither backend currently enumerates every possible NR component carrier.
+- The UI shows reported NR component carriers separately in an **NR CA** card.
+  MC7530CA supplies per-SCell data through `nrca`; VOS supplies the active NR
+  rows exposed by Qualcomm NAS. A modem may still omit an SCell's Cell ID, PCI
+  or individual signal metrics, which remain `—` instead of being inferred.
 - VOS radio preferences are power-cycle scoped. MC7530CA radio preferences are
   persistent and remain in effect until changed or explicitly restored.
 

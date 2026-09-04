@@ -705,7 +705,7 @@ struct RadioSignal: Equatable, Sendable {
     )
 }
 
-enum LTECarrierRole: Equatable, Sendable {
+enum RadioCarrierRole: Equatable, Sendable {
     case primary
     case secondary(index: Int?)
 
@@ -719,7 +719,7 @@ enum LTECarrierRole: Equatable, Sendable {
     }
 }
 
-enum LTECarrierState: Equatable, Sendable {
+enum RadioCarrierState: Equatable, Sendable {
     case active
     case configured
     case deconfigured
@@ -736,18 +736,33 @@ enum LTECarrierState: Equatable, Sendable {
 }
 
 struct LTECarrier: Equatable, Sendable {
-    var role: LTECarrierRole
+    var role: RadioCarrierRole
     var band: String?
     var earfcn: UInt32
     var bandwidthMHz: Double?
     var physicalCellID: UInt16
-    var state: LTECarrierState?
+    var state: RadioCarrierState?
     var globalCellID: UInt64? = nil
     var signal: RadioSignal = .empty
 
     var downlinkFrequencyMHz: Double? {
         guard let band else { return nil }
         return ChannelFrequency.lteMHz(band: band, earfcn: earfcn)
+    }
+}
+
+struct NRCarrier: Equatable, Sendable {
+    var role: RadioCarrierRole
+    var band: String?
+    var nrarfcn: UInt32
+    var bandwidthMHz: Double?
+    var physicalCellID: UInt16?
+    var state: RadioCarrierState?
+    var globalCellID: UInt64? = nil
+    var signal: RadioSignal = .empty
+
+    var downlinkFrequencyMHz: Double? {
+        ChannelFrequency.nrMHz(nrarfcn)
     }
 }
 
@@ -780,6 +795,8 @@ struct DeviceSnapshot: Equatable, Sendable {
     var nrSignal: RadioSignal
     var nrGlobalCellID: UInt64? = nil
     var nrPhysicalCellID: UInt16? = nil
+    var nrPrimaryCell: NRCarrier? = nil
+    var nrSecondaryCells: [NRCarrier] = []
 
     var lteBand: String?
     var lteChannel: String?
@@ -894,6 +911,10 @@ struct DeviceSnapshot: Equatable, Sendable {
             "LTE signal: \(Self.signalText(lteSignal))"
         ]
         if let nrBandwidthMHz { lines.append("NR bandwidth: \(Self.bandwidthText(nrBandwidthMHz))") }
+        if let nrPrimaryCell { lines.append("NR PCell: \(Self.carrierText(nrPrimaryCell))") }
+        for cell in nrSecondaryCells {
+            lines.append("NR \(cell.role.label): \(Self.carrierText(cell))")
+        }
         if let lteBandwidthMHz { lines.append("LTE bandwidth: \(Self.bandwidthText(lteBandwidthMHz))") }
         if let ltePrimaryCell { lines.append("LTE PCell: \(Self.carrierText(ltePrimaryCell))") }
         for cell in lteSecondaryCells {
@@ -928,6 +949,20 @@ struct DeviceSnapshot: Equatable, Sendable {
 
     private static func carrierText(_ carrier: LTECarrier) -> String {
         var values = [carrier.band ?? "Unknown band", "EARFCN \(carrier.earfcn)"]
+        if let cellID = carrier.globalCellID { values.append("Cell ID \(cellIDText(cellID))") }
+        if let bandwidthMHz = carrier.bandwidthMHz {
+            values.append(bandwidthText(bandwidthMHz))
+        }
+        if let frequency = carrier.downlinkFrequencyMHz {
+            values.append(frequencyText(frequency))
+        }
+        if let state = carrier.state { values.append(state.label) }
+        values.append(signalText(carrier.signal))
+        return values.joined(separator: ", ")
+    }
+
+    private static func carrierText(_ carrier: NRCarrier) -> String {
+        var values = [carrier.band ?? "Unknown band", "NR-ARFCN \(carrier.nrarfcn)"]
         if let cellID = carrier.globalCellID { values.append("Cell ID \(cellIDText(cellID))") }
         if let bandwidthMHz = carrier.bandwidthMHz {
             values.append(bandwidthText(bandwidthMHz))

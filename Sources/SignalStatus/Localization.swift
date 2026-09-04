@@ -394,14 +394,14 @@ extension NetworkControlOperation {
     }
 }
 
-extension LTECarrierRole {
+extension RadioCarrierRole {
     func localizedLabel(language: AppLanguage) -> String {
         // PCell/SCell are standardized radio terms and intentionally remain unchanged.
         label
     }
 }
 
-extension LTECarrierState {
+extension RadioCarrierState {
     func localizedLabel(language: AppLanguage) -> String {
         L10n.text(label, language: language)
     }
