@@ -21,6 +21,8 @@ struct MC7530RadioInfo: Equatable, Sendable {
     var nrSignal: RadioSignal
     var nrGlobalCellID: UInt64?
     var nrPhysicalCellID: UInt16?
+    var nrPrimaryCell: NRCarrier?
+    var nrSecondaryCells: [NRCarrier]
 
     var lteBand: String?
     var lteChannel: String?
@@ -31,8 +33,7 @@ struct MC7530RadioInfo: Equatable, Sendable {
     var ltePrimaryCell: LTECarrier?
     var lteSecondaryCells: [LTECarrier]
 
-    /// Retained for diagnostics only. Their vendor formats are not documented
-    /// well enough to map individual values to cells without guessing.
+    /// Retained for diagnostics even when the supported carrier fields parse.
     var unparsedLTECASignal: String?
     var unparsedNRCA: String?
 
@@ -55,6 +56,8 @@ struct MC7530RadioInfo: Equatable, Sendable {
             nrSignal: nrSignal,
             nrGlobalCellID: nrGlobalCellID,
             nrPhysicalCellID: nrPhysicalCellID,
+            nrPrimaryCell: nrPrimaryCell,
+            nrSecondaryCells: nrSecondaryCells,
             lteBand: lteBand,
             lteChannel: lteChannel,
             lteBandwidthMHz: lteBandwidthMHz,
@@ -113,10 +116,36 @@ enum MC7530Parser {
         )
         let nrSignal = nrBand == nil ? .empty : RadioSignal(
             rsrpDBm: boundedInteger(object["nr5g_rsrp"], range: -160 ... -40),
-            rsrqDB: boundedDouble(object["nr5g_rsrq"], range: -40 ... 0),
+            rsrqDB: boundedDouble(object["nr5g_rsrq"], range: -43 ... 0),
             rssiDBm: boundedInteger(object["nr5g_rssi"], range: -140 ... -20),
             snrDB: boundedDouble(object["nr5g_snr"], range: -30 ... 50)
         )
+
+        let nrBandwidth = nrBand == nil ? nil : standardBandwidth(
+            object["nr5g_bandwidth"],
+            allowed: nrBandwidthsMHz
+        )
+        let nrGlobalCellID = nrBand == nil ? nil : boundedPositiveUInt64(
+            object["nr5g_cell_id"],
+            maximum: maximumNRCellID
+        )
+        let nrSecondaryCells = nrBand != nil && nrChannelValue != nil
+            ? parseNRSecondaryCarriers(cleanString(object["nrca"]))
+            : []
+        let nrPrimaryCell = nrBand.flatMap { band in
+            nrChannelValue.map { nrarfcn in
+                NRCarrier(
+                    role: .primary,
+                    band: band,
+                    nrarfcn: nrarfcn,
+                    bandwidthMHz: nrBandwidth,
+                    physicalCellID: nrPCI,
+                    state: .active,
+                    globalCellID: nrGlobalCellID,
+                    signal: nrSignal
+                )
+            }
+        }
 
         let ca = parseLTECarriers(cleanString(object["lteca"]), primarySignal: lteSignal)
         var primary = ca.primary
@@ -157,16 +186,14 @@ enum MC7530Parser {
             nrSystemMode: nrMode,
             nrBand: nrBand,
             nrChannel: nrBand == nil ? nil : nrChannelValue.map(String.init),
-            nrBandwidthMHz: nrBand == nil ? nil : standardBandwidth(
-                object["nr5g_bandwidth"],
-                allowed: nrBandwidthsMHz
-            ),
+            nrBandwidthMHz: nrBandwidth,
             nrSignal: nrSignal,
-            nrGlobalCellID: nrBand == nil ? nil : boundedPositiveUInt64(
-                object["nr5g_cell_id"],
-                maximum: maximumNRCellID
-            ),
+            nrGlobalCellID: nrGlobalCellID,
             nrPhysicalCellID: nrBand == nil ? nil : nrPCI,
+            nrPrimaryCell: nrPrimaryCell,
+            nrSecondaryCells: nrSecondaryCells.filter {
+                $0.nrarfcn != nrPrimaryCell?.nrarfcn
+            },
             lteBand: lteBand,
             lteChannel: lteBand == nil ? nil : effectiveLTEChannel.map(String.init),
             lteBandwidthMHz: primary?.bandwidthMHz,
@@ -276,6 +303,51 @@ enum MC7530Parser {
         return (primary, secondary)
     }
 
+    /// MC7530CA reports active NR component carriers as semicolon-separated
+    /// records. A verified unit reports SCells in this layout:
+    /// `vendor,pci,vendor,band,nrarfcn,bandwidth,vendor,rsrp,rsrq,snr,rssi;`.
+    /// Only the stable identity fields are mandatory; unavailable signal
+    /// columns are ignored independently so one bad metric cannot hide a CC.
+    private static func parseNRSecondaryCarriers(_ raw: String?) -> [NRCarrier] {
+        guard let raw else { return [] }
+        var secondary: [NRCarrier] = []
+        var seen = Set<String>()
+
+        for entry in raw.split(separator: ";", omittingEmptySubsequences: true) {
+            let fields = entry.split(separator: ",", omittingEmptySubsequences: false)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard fields.count >= 6,
+                  let band = normalizeNRBand(fields[3]),
+                  let nrarfcn = UInt32(fields[4]),
+                  nrARFCNRange.contains(nrarfcn),
+                  let bandwidth = bandwidthText(fields[5]),
+                  nrBandwidthsMHz.contains(bandwidth)
+            else { continue }
+            let pci = uint16Text(fields[1], range: nrPCIRange)
+            guard seen.insert("\(band)-\(nrarfcn)-\(pci.map(String.init) ?? "-")").inserted else {
+                continue
+            }
+
+            let carrier = NRCarrier(
+                role: .secondary(index: secondary.count + 1),
+                band: band,
+                nrarfcn: nrarfcn,
+                bandwidthMHz: bandwidth,
+                physicalCellID: pci,
+                state: .active,
+                signal: RadioSignal(
+                    rsrpDBm: integerText(field(fields, at: 7), range: -160 ... -40),
+                    rsrqDB: doubleText(field(fields, at: 8), range: -43 ... 0),
+                    rssiDBm: integerText(field(fields, at: 10), range: -140 ... -20),
+                    snrDB: doubleText(field(fields, at: 9), range: -30 ... 50)
+                )
+            )
+
+            secondary.append(carrier)
+        }
+        return secondary
+    }
+
     private static func cleanString(_ value: ZTEJSONValue?) -> String? {
         guard let raw = value?.stringValue?
             .replacingOccurrences(of: "\0", with: "")
@@ -314,6 +386,36 @@ enum MC7530Parser {
 
     private static func finiteDouble(_ value: ZTEJSONValue?) -> Double? {
         value?.doubleValue
+    }
+
+    private static func field(_ values: [String], at index: Int) -> String? {
+        values.indices.contains(index) ? values[index] : nil
+    }
+
+    private static func bandwidthText(_ value: String) -> Double? {
+        Double(value.lowercased().replacingOccurrences(of: "mhz", with: ""))
+    }
+
+    private static func uint16Text(_ value: String, range: ClosedRange<UInt16>) -> UInt16? {
+        guard let result = UInt16(value), range.contains(result) else { return nil }
+        return result
+    }
+
+    private static func integerText(_ value: String?, range: ClosedRange<Int>) -> Int? {
+        guard let value, let number = Double(value), number.isFinite else { return nil }
+        let rounded = number.rounded()
+        guard rounded == number,
+              let result = Int(exactly: rounded),
+              range.contains(result)
+        else { return nil }
+        return result
+    }
+
+    private static func doubleText(_ value: String?, range: ClosedRange<Double>) -> Double? {
+        guard let value, let result = Double(value), result.isFinite, range.contains(result) else {
+            return nil
+        }
+        return result
     }
 
     private static func standardBandwidth(

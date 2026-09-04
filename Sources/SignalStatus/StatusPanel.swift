@@ -45,6 +45,9 @@ struct StatusPanel: View {
                         }
                         heroCard
                         radioCards
+                        if !model.snapshot.nrSecondaryCells.isEmpty {
+                            nrCarrierAggregationCard
+                        }
                         if !model.snapshot.lteSecondaryCells.isEmpty {
                             carrierAggregationCard
                         }
@@ -317,6 +320,15 @@ struct StatusPanel: View {
         LTECarrierAggregationCard(
             primaryCell: model.snapshot.ltePrimaryCell,
             secondaryCells: model.snapshot.lteSecondaryCells,
+            mcc: model.snapshot.mcc,
+            mnc: model.snapshot.mnc
+        )
+    }
+
+    private var nrCarrierAggregationCard: some View {
+        NRCarrierAggregationCard(
+            primaryCell: model.snapshot.nrPrimaryCell,
+            secondaryCells: model.snapshot.nrSecondaryCells,
             mcc: model.snapshot.mcc,
             mnc: model.snapshot.mnc
         )
@@ -1447,6 +1459,118 @@ private struct SignalMetric: View {
                 .minimumScaleFactor(0.72)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct NRCarrierAggregationCard: View {
+    @State private var isExpanded = false
+
+    let primaryCell: NRCarrier?
+    let secondaryCells: [NRCarrier]
+    let mcc: String?
+    let mnc: String?
+
+    var body: some View {
+        CollapsibleCard(
+            isExpanded: $isExpanded,
+            accessibilityLabel: "NR CA",
+            accent: AppPalette.cyan
+        ) {
+            VStack(spacing: 8) {
+                if let primaryCell {
+                    NRCarrierRow(carrier: primaryCell, mcc: mcc, mnc: mnc)
+                }
+                ForEach(Array(secondaryCells.enumerated()), id: \.offset) { _, carrier in
+                    NRCarrierRow(carrier: carrier, mcc: mcc, mnc: mnc)
+                }
+            }
+            .padding(.top, 9)
+        } label: {
+            HStack(spacing: 8) {
+                Label("NR CA", systemImage: "square.stack.3d.up")
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 6)
+                Text(combination)
+                    .font(.caption.monospaced().weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
+            }
+        }
+    }
+
+    private var combination: String {
+        ([primaryCell].compactMap { $0 } + secondaryCells)
+            .map { carrier in
+                let band = carrier.band ?? "n?"
+                guard let bandwidth = carrier.bandwidthMHz else { return band }
+                return "\(band) \(DeviceSnapshot.bandwidthText(bandwidth))"
+            }
+            .joined(separator: " + ")
+    }
+}
+
+private struct NRCarrierRow: View {
+    @Environment(\.appLanguage) private var language
+
+    let carrier: NRCarrier
+    let mcc: String?
+    let mnc: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                Text(carrier.role.localizedLabel(language: language))
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(carrier.band ?? L10n.text("Unknown", language: language))
+                    .font(.caption.monospaced().weight(.semibold))
+                Spacer(minLength: 4)
+                if let state = carrier.state {
+                    Text(state.localizedLabel(language: language))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(state == .active ? AppPalette.cyan : .secondary)
+                }
+            }
+
+            HStack(spacing: 5) {
+                if let frequency = carrier.downlinkFrequencyMHz {
+                    Text(DeviceSnapshot.frequencyText(frequency))
+                }
+                if let bandwidth = carrier.bandwidthMHz {
+                    Text(DeviceSnapshot.bandwidthText(bandwidth))
+                }
+                if let cellID = carrier.globalCellID {
+                    CellIDLink(cellID: cellID, radio: .nr, mcc: mcc, mnc: mnc)
+                } else {
+                    Text("Cell ID —")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
+            HStack(spacing: 10) {
+                CompactSignalMetric(label: "RSRP", value: carrier.signal.rsrpDBm.map { "\($0)" })
+                CompactSignalMetric(label: "RSRQ", value: carrier.signal.rsrqDB.map(Self.metricText))
+                CompactSignalMetric(label: "RSSI", value: carrier.signal.rssiDBm.map { "\($0)" })
+                CompactSignalMetric(label: "SNR", value: carrier.signal.snrDB.map(Self.metricText))
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        var value = "NR-ARFCN \(carrier.nrarfcn)"
+        if let pci = carrier.physicalCellID { value += ", PCI \(pci)" }
+        return value
+    }
+
+    private static func metricText(_ value: Double) -> String {
+        value.rounded() == value ? "\(Int(value))" : String(format: "%.1f", value)
     }
 }
 
