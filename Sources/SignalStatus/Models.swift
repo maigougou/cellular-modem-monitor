@@ -705,6 +705,43 @@ struct RadioSignal: Equatable, Sendable {
     )
 }
 
+struct CarrierAggregationSummaryItem: Equatable, Sendable {
+    var band: String?
+    var bandwidthMHz: Double?
+}
+
+enum CarrierAggregationFormatting {
+    static func summary(for items: [CarrierAggregationSummaryItem]) -> String {
+        guard let first = items.first else { return "" }
+        if items.count == 1 {
+            let band = first.band ?? "?"
+            guard let bandwidth = first.bandwidthMHz else { return band }
+            return "\(band) · \(bandwidthText(bandwidth))"
+        }
+
+        let bandwidths = items.compactMap(\.bandwidthMHz)
+
+        guard bandwidths.count == items.count else { return "\(items.count)CC" }
+        return "\(items.count)CC · \(bandwidthText(bandwidths.reduce(0, +)))"
+    }
+
+    private static func bandwidthText(_ value: Double) -> String {
+        value.rounded() == value ? "\(Int(value)) MHz" : "\(value) MHz"
+    }
+}
+
+enum CarrierCellReference: Equatable, Sendable {
+    case global(UInt64)
+    case physical(UInt16)
+    case unavailable
+
+    static func resolve(globalCellID: UInt64?, physicalCellID: UInt16?) -> Self {
+        if let globalCellID { return .global(globalCellID) }
+        if let physicalCellID { return .physical(physicalCellID) }
+        return .unavailable
+    }
+}
+
 enum RadioCarrierRole: Equatable, Sendable {
     case primary
     case secondary(index: Int?)

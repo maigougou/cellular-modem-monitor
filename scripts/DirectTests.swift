@@ -36,6 +36,29 @@ enum DirectTests {
                 failures: &failures
             )
             check(
+                CarrierAggregationFormatting.summary(for: [
+                    CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 50)
+                ]) == "n77 · 50 MHz"
+                    && CarrierAggregationFormatting.summary(for: [
+                        CarrierAggregationSummaryItem(band: "B7", bandwidthMHz: 20)
+                    ]) == "B7 · 20 MHz"
+                    && CarrierAggregationFormatting.summary(for: [
+                        CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 50),
+                        CarrierAggregationSummaryItem(band: "n66", bandwidthMHz: 30),
+                        CarrierAggregationSummaryItem(band: "n71", bandwidthMHz: 10),
+                        CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 30)
+                    ]) == "4CC · 120 MHz",
+                "shared carrier aggregation summary formatting",
+                failures: &failures
+            )
+            check(
+                CarrierCellReference.resolve(globalCellID: 12_345, physicalCellID: 203) == .global(12_345)
+                    && CarrierCellReference.resolve(globalCellID: nil, physicalCellID: 203) == .physical(203)
+                    && CarrierCellReference.resolve(globalCellID: nil, physicalCellID: nil) == .unavailable,
+                "carrier cell identity fallback",
+                failures: &failures
+            )
+            check(
                 AppLanguage.resolved(storedValue: AppLanguage.english.rawValue, preferredLanguages: ["zh-Hans"]) == .english,
                 "saved language overrides system language",
                 failures: &failures
@@ -2215,6 +2238,8 @@ enum DirectTests {
             check(
                 endc.ltePrimaryCell?.state == .active
                     && endc.lteSecondaryCells.map(\.band) == ["B66", "B7"]
+                    && endc.lteSecondaryCells.map(\.role)
+                        == [.secondary(index: 1), .secondary(index: 2)]
                     && endc.lteSecondaryCells.map(\.state) == [.active, .configured]
                     && endc.lteSecondaryCells.filter(\.isActive).count == 1,
                 "MC7530 LTE CA active/inactive state mapping",
@@ -2223,8 +2248,7 @@ enum DirectTests {
             check(
                 endc.lteSecondaryCells.first?.signal
                     == RadioSignal(rsrpDBm: -108, rsrqDB: -14.1, rssiDBm: -86, snrDB: 10)
-                    && endc.lteSecondaryCells.last?.signal
-                    == RadioSignal(rsrpDBm: nil, rsrqDB: -3, rssiDBm: nil, snrDB: 16.4),
+                    && endc.lteSecondaryCells.last?.signal == .empty,
                 "MC7530 LTE CA SCell signals and sentinels",
                 failures: &failures
             )
@@ -2256,7 +2280,8 @@ enum DirectTests {
                     && nrCA.nrSecondaryCells.first?.state == .active
                     && nrCA.nrSecondaryCells.last?.role == .secondary(index: 2)
                     && nrCA.nrSecondaryCells.last?.band == "n77"
-                    && nrCA.nrSecondaryCells.last?.state == .configured,
+                    && nrCA.nrSecondaryCells.last?.state == .configured
+                    && nrCA.nrSecondaryCells.last?.signal == .empty,
                 "MC7530 NR CA secondary carrier",
                 failures: &failures
             )

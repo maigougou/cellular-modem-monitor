@@ -32,6 +32,42 @@ final class SignalStatusTests: XCTestCase {
         )
     }
 
+    func testCarrierAggregationPresentationFormatting() {
+        XCTAssertEqual(
+            CarrierAggregationFormatting.summary(for: [
+                CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 50)
+            ]),
+            "n77 · 50 MHz"
+        )
+        XCTAssertEqual(
+            CarrierAggregationFormatting.summary(for: [
+                CarrierAggregationSummaryItem(band: "B7", bandwidthMHz: 20)
+            ]),
+            "B7 · 20 MHz"
+        )
+        XCTAssertEqual(
+            CarrierAggregationFormatting.summary(for: [
+                CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 50),
+                CarrierAggregationSummaryItem(band: "n66", bandwidthMHz: 30),
+                CarrierAggregationSummaryItem(band: "n71", bandwidthMHz: 10),
+                CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 30)
+            ]),
+            "4CC · 120 MHz"
+        )
+        XCTAssertEqual(
+            CarrierCellReference.resolve(globalCellID: 12_345, physicalCellID: 203),
+            .global(12_345)
+        )
+        XCTAssertEqual(
+            CarrierCellReference.resolve(globalCellID: nil, physicalCellID: 203),
+            .physical(203)
+        )
+        XCTAssertEqual(
+            CarrierCellReference.resolve(globalCellID: nil, physicalCellID: nil),
+            .unavailable
+        )
+    }
+
     func testAppLanguageDefaultsToEnglishForOtherOrMissingSystemLanguages() {
         XCTAssertEqual(AppLanguage.systemDefault(preferredLanguages: ["en-CA", "zh-Hans-CN"]), .english)
         XCTAssertEqual(AppLanguage.systemDefault(preferredLanguages: ["fr-CA"]), .english)
@@ -686,6 +722,10 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(endc.ltePrimaryCell?.state, .active)
         XCTAssertEqual(endc.lteSecondaryCells.map(\.band), ["B66", "B7"])
         XCTAssertEqual(endc.lteSecondaryCells.map(\.earfcn), [66_811, 3_350])
+        XCTAssertEqual(
+            endc.lteSecondaryCells.map(\.role),
+            [.secondary(index: 1), .secondary(index: 2)]
+        )
         XCTAssertEqual(endc.lteSecondaryCells.map(\.state), [.active, .configured])
         XCTAssertEqual(endc.lteSecondaryCells.filter(\.isActive).count, 1)
         XCTAssertEqual(
@@ -694,7 +734,7 @@ final class SignalStatusTests: XCTestCase {
         )
         XCTAssertEqual(
             endc.lteSecondaryCells.last?.signal,
-            RadioSignal(rsrpDBm: nil, rsrqDB: -3, rssiDBm: nil, snrDB: 16.4)
+            .empty
         )
         XCTAssertEqual(endc.unparsedNRCA, "opaque-vendor-value")
 
@@ -732,6 +772,7 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(nrCA.nrSecondaryCells.last?.role, .secondary(index: 2))
         XCTAssertEqual(nrCA.nrSecondaryCells.last?.band, "n77")
         XCTAssertEqual(nrCA.nrSecondaryCells.last?.state, .configured)
+        XCTAssertEqual(nrCA.nrSecondaryCells.last?.signal, .empty)
         XCTAssertEqual(nrCA.nrSecondaryCells.filter(\.isActive).count, 1)
         XCTAssertEqual(nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count, 2)
 

@@ -305,7 +305,7 @@ enum MC7530Parser {
                         : nil
                 )
                 secondary.append(LTECarrier(
-                    role: .secondary(index: nil),
+                    role: .secondary(index: secondary.count + 1),
                     band: band,
                     earfcn: earfcn,
                     bandwidthMHz: bandwidth,
@@ -333,6 +333,11 @@ enum MC7530Parser {
         case 2: .active
         case 1: .configured
         default: .unknown
+        }
+        let rsrp = Double(fields[0])
+        let rssi = Double(fields[3])
+        if rsrp.map({ $0 <= -255 }) == true || rssi == 0 {
+            return (state, .empty)
         }
         return (
             state,
@@ -376,6 +381,7 @@ enum MC7530Parser {
                 continue
             }
 
+            let signal = parseNRSecondarySignal(fields)
             let carrier = NRCarrier(
                 role: .secondary(index: secondary.count + 1),
                 band: band,
@@ -383,17 +389,39 @@ enum MC7530Parser {
                 bandwidthMHz: bandwidth,
                 physicalCellID: pci,
                 state: state,
-                signal: RadioSignal(
-                    rsrpDBm: integerText(field(fields, at: 7), range: -160 ... -40),
-                    rsrqDB: doubleText(field(fields, at: 8), range: -43 ... 0),
-                    rssiDBm: integerText(field(fields, at: 10), range: -140 ... -20),
-                    snrDB: doubleText(field(fields, at: 9), range: -30 ... 50)
-                )
+                signal: signal
             )
 
             secondary.append(carrier)
         }
         return secondary
+    }
+
+    private static func parseNRSecondarySignal(_ fields: [String]) -> RadioSignal {
+        let rsrpText = field(fields, at: 7)
+        let rsrqText = field(fields, at: 8)
+        let snrText = field(fields, at: 9)
+        let rssiText = field(fields, at: 10)
+        if let rsrpText,
+           let rsrqText,
+           let snrText,
+           let rssiText,
+           let rsrp = Double(rsrpText),
+           let rsrq = Double(rsrqText),
+           let snr = Double(snrText),
+           let rssi = Double(rssiText),
+           rsrp <= -140,
+           rsrq <= -43,
+           snr <= -23,
+           rssi <= -120 {
+            return .empty
+        }
+        return RadioSignal(
+            rsrpDBm: roundedIntegerText(rsrpText, range: -160 ... -40),
+            rsrqDB: doubleText(rsrqText, range: -43 ... 0),
+            rssiDBm: roundedIntegerText(rssiText, range: -140 ... -20),
+            snrDB: doubleText(snrText, range: -30 ... 50)
+        )
     }
 
     private static func cleanString(_ value: ZTEJSONValue?) -> String? {

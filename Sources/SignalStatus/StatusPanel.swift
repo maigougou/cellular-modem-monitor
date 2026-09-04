@@ -1399,19 +1399,21 @@ private struct RadioCard: View {
             .lineLimit(1)
             .help(channelDetail)
 
-            if let globalCellID {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                if let globalCellID {
                     CellIDLink(
                         cellID: globalCellID,
                         radio: radio,
                         mcc: mcc,
                         mnc: mnc
                     )
+                } else {
+                    Text(L10n.text("Cell ID —", language: language))
                 }
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
             }
+            .font(.caption2.monospaced())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
 
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2),
@@ -1462,35 +1464,88 @@ private struct SignalMetric: View {
     }
 }
 
-private struct NRCarrierAggregationCard: View {
+private struct CarrierAggregationRowModel: Identifiable {
+    let id: String
+    let role: RadioCarrierRole
+    let radio: RadioKind
+    let band: String?
+    let channelLabel: String
+    let channel: UInt32
+    let frequencyMHz: Double?
+    let bandwidthMHz: Double?
+    let globalCellID: UInt64?
+    let physicalCellID: UInt16?
+    let state: RadioCarrierState?
+    let signal: RadioSignal
+
+    init(nr carrier: NRCarrier, position: Int) {
+        id = "nr-\(position)-\(carrier.nrarfcn)-\(carrier.physicalCellID.map(String.init) ?? "-")"
+        role = carrier.role
+        radio = .nr
+        band = carrier.band
+        channelLabel = "NR-ARFCN"
+        channel = carrier.nrarfcn
+        frequencyMHz = carrier.downlinkFrequencyMHz
+        bandwidthMHz = carrier.bandwidthMHz
+        globalCellID = carrier.globalCellID
+        physicalCellID = carrier.physicalCellID
+        state = carrier.state
+        signal = carrier.signal
+    }
+
+    init(lte carrier: LTECarrier, position: Int) {
+        id = "lte-\(position)-\(carrier.earfcn)-\(carrier.physicalCellID)"
+        role = carrier.role
+        radio = .lte
+        band = carrier.band
+        channelLabel = "EARFCN"
+        channel = carrier.earfcn
+        frequencyMHz = carrier.downlinkFrequencyMHz
+        bandwidthMHz = carrier.bandwidthMHz
+        globalCellID = carrier.globalCellID
+        physicalCellID = carrier.physicalCellID
+        state = carrier.state
+        signal = carrier.signal
+    }
+
+    var isActive: Bool { state == .active }
+
+    var summaryItem: CarrierAggregationSummaryItem {
+        CarrierAggregationSummaryItem(band: band, bandwidthMHz: bandwidthMHz)
+    }
+
+    var cellReference: CarrierCellReference {
+        CarrierCellReference.resolve(globalCellID: globalCellID, physicalCellID: physicalCellID)
+    }
+}
+
+private struct CarrierAggregationCard: View {
     @State private var isExpanded = false
 
-    let primaryCell: NRCarrier?
-    let secondaryCells: [NRCarrier]
+    let title: String
+    let accent: Color
+    let rows: [CarrierAggregationRowModel]
     let mcc: String?
     let mnc: String?
 
     var body: some View {
         CollapsibleCard(
             isExpanded: $isExpanded,
-            accessibilityLabel: "NR CA",
-            accent: AppPalette.cyan
+            accessibilityLabel: title,
+            accent: accent
         ) {
             VStack(spacing: 8) {
-                if let primaryCell {
-                    NRCarrierRow(carrier: primaryCell, mcc: mcc, mnc: mnc)
-                }
-                ForEach(Array(secondaryCells.enumerated()), id: \.offset) { _, carrier in
-                    NRCarrierRow(carrier: carrier, mcc: mcc, mnc: mnc)
+                ForEach(rows) { row in
+                    CarrierAggregationRow(row: row, accent: accent, mcc: mcc, mnc: mnc)
                 }
             }
             .padding(.top, 9)
         } label: {
             HStack(spacing: 8) {
-                Label("NR CA", systemImage: "square.stack.3d.up")
+                Label(title, systemImage: "square.stack.3d.up")
                     .font(.subheadline.weight(.semibold))
                 Spacer(minLength: 6)
-                Text(combination)
+                Text(summary)
                     .font(.caption.monospaced().weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1499,52 +1554,52 @@ private struct NRCarrierAggregationCard: View {
         }
     }
 
-    private var combination: String {
-        ([primaryCell].compactMap { $0 } + secondaryCells)
-            .filter(\.isActive)
-            .map { carrier in
-                let band = carrier.band ?? "n?"
-                guard let bandwidth = carrier.bandwidthMHz else { return band }
-                return "\(band) \(DeviceSnapshot.bandwidthText(bandwidth))"
-            }
-            .joined(separator: " + ")
+    private var summary: String {
+        let value = CarrierAggregationFormatting.summary(
+            for: rows.filter(\.isActive).map(\.summaryItem)
+        )
+        return value.isEmpty ? "—" : value
     }
 }
 
-private struct NRCarrierRow: View {
+private struct CarrierAggregationRow: View {
     @Environment(\.appLanguage) private var language
 
-    let carrier: NRCarrier
+    let row: CarrierAggregationRowModel
+    let accent: Color
     let mcc: String?
     let mnc: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 7) {
-                Text(carrier.role.localizedLabel(language: language))
+                Text(row.role.localizedLabel(language: language))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text(carrier.band ?? L10n.text("Unknown", language: language))
+                Text(row.band ?? L10n.text("Unknown", language: language))
                     .font(.caption.monospaced().weight(.semibold))
                 Spacer(minLength: 4)
-                if let state = carrier.state {
+                if let state = row.state {
                     Text(state.localizedLabel(language: language))
                         .font(.caption2.weight(.medium))
-                        .foregroundStyle(state == .active ? AppPalette.cyan : .secondary)
+                        .foregroundStyle(state == .active ? accent : .secondary)
                 }
             }
 
             HStack(spacing: 5) {
-                if let frequency = carrier.downlinkFrequencyMHz {
+                if let frequency = row.frequencyMHz {
                     Text(DeviceSnapshot.frequencyText(frequency))
                 }
-                if let bandwidth = carrier.bandwidthMHz {
+                if let bandwidth = row.bandwidthMHz {
                     Text(DeviceSnapshot.bandwidthText(bandwidth))
                 }
-                if let cellID = carrier.globalCellID {
-                    CellIDLink(cellID: cellID, radio: .nr, mcc: mcc, mnc: mnc)
-                } else {
-                    Text("Cell ID —")
+                switch row.cellReference {
+                case let .global(cellID):
+                    CellIDLink(cellID: cellID, radio: row.radio, mcc: mcc, mnc: mnc)
+                case let .physical(pci):
+                    Text("PCI \(pci)")
+                case .unavailable:
+                    Text(L10n.text("Cell ID —", language: language))
                 }
             }
             .font(.caption2)
@@ -1552,10 +1607,10 @@ private struct NRCarrierRow: View {
             .lineLimit(1)
 
             HStack(spacing: 10) {
-                CompactSignalMetric(label: "RSRP", value: carrier.signal.rsrpDBm.map { "\($0)" })
-                CompactSignalMetric(label: "RSRQ", value: carrier.signal.rsrqDB.map(Self.metricText))
-                CompactSignalMetric(label: "RSSI", value: carrier.signal.rssiDBm.map { "\($0)" })
-                CompactSignalMetric(label: "SNR", value: carrier.signal.snrDB.map(Self.metricText))
+                CompactSignalMetric(label: "RSRP", value: row.signal.rsrpDBm.map { "\($0)" })
+                CompactSignalMetric(label: "RSRQ", value: row.signal.rsrqDB.map(Self.metricText))
+                CompactSignalMetric(label: "RSSI", value: row.signal.rssiDBm.map { "\($0)" })
+                CompactSignalMetric(label: "SNR", value: row.signal.snrDB.map(Self.metricText))
             }
         }
         .padding(.horizontal, 9)
@@ -1565,8 +1620,8 @@ private struct NRCarrierRow: View {
     }
 
     private var helpText: String {
-        var value = "NR-ARFCN \(carrier.nrarfcn)"
-        if let pci = carrier.physicalCellID { value += ", PCI \(pci)" }
+        var value = "\(row.channelLabel) \(row.channel)"
+        if let pci = row.physicalCellID { value += ", PCI \(pci)" }
         return value
     }
 
@@ -1575,111 +1630,41 @@ private struct NRCarrierRow: View {
     }
 }
 
-private struct LTECarrierAggregationCard: View {
-    @State private var isExpanded = false
-    @Environment(\.appLanguage) private var language
+private struct NRCarrierAggregationCard: View {
+    let primaryCell: NRCarrier?
+    let secondaryCells: [NRCarrier]
+    let mcc: String?
+    let mnc: String?
 
+    var body: some View {
+        CarrierAggregationCard(
+            title: "NR CA",
+            accent: AppPalette.cyan,
+            rows: ([primaryCell].compactMap { $0 } + secondaryCells)
+                .enumerated()
+                .map { CarrierAggregationRowModel(nr: $0.element, position: $0.offset) },
+            mcc: mcc,
+            mnc: mnc
+        )
+    }
+}
+
+private struct LTECarrierAggregationCard: View {
     let primaryCell: LTECarrier?
     let secondaryCells: [LTECarrier]
     let mcc: String?
     let mnc: String?
 
     var body: some View {
-        CollapsibleCard(
-            isExpanded: $isExpanded,
-            accessibilityLabel: "LTE CA",
-            accent: AppPalette.blue
-        ) {
-            VStack(spacing: 8) {
-                if let primaryCell {
-                    LTECarrierRow(carrier: primaryCell, mcc: mcc, mnc: mnc)
-                }
-                ForEach(Array(secondaryCells.enumerated()), id: \.offset) { _, carrier in
-                    LTECarrierRow(carrier: carrier, mcc: mcc, mnc: mnc)
-                }
-            }
-            .padding(.top, 9)
-        } label: {
-            HStack(spacing: 8) {
-                Label("LTE CA", systemImage: "square.stack.3d.up")
-                    .font(.subheadline.weight(.semibold))
-                Spacer(minLength: 6)
-                Text(combination)
-                    .font(.caption.monospaced().weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-    }
-
-    private var combination: String {
-        let active = secondaryCells.filter(\.isActive)
-        var bands = [primaryCell?.band].compactMap { $0 }
-        bands.append(contentsOf: active.compactMap(\.band))
-        if active.isEmpty {
-            return bands.first.map {
-                L10n.format("%@ only", language: language, $0)
-            } ?? L10n.text("No active SCell", language: language)
-        }
-        return bands.joined(separator: "+")
-    }
-}
-
-private struct LTECarrierRow: View {
-    @Environment(\.appLanguage) private var language
-
-    let carrier: LTECarrier
-    let mcc: String?
-    let mnc: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 7) {
-                Text(carrier.role.localizedLabel(language: language))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Text(carrier.band ?? L10n.text("Unknown", language: language))
-                    .font(.caption.monospaced().weight(.semibold))
-                Spacer(minLength: 4)
-                if let state = carrier.state {
-                    Text(state.localizedLabel(language: language))
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(state == .active ? AppPalette.blue : .secondary)
-                }
-            }
-
-            HStack(spacing: 5) {
-                if let frequency = carrier.downlinkFrequencyMHz {
-                    Text(DeviceSnapshot.frequencyText(frequency))
-                }
-                if let bandwidth = carrier.bandwidthMHz {
-                    Text(DeviceSnapshot.bandwidthText(bandwidth))
-                }
-                if let cellID = carrier.globalCellID {
-                    CellIDLink(cellID: cellID, radio: .lte, mcc: mcc, mnc: mnc)
-                } else {
-                    Text("Cell ID —")
-                }
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-
-            HStack(spacing: 10) {
-                CompactSignalMetric(label: "RSRP", value: carrier.signal.rsrpDBm.map { "\($0)" })
-                CompactSignalMetric(label: "RSRQ", value: carrier.signal.rsrqDB.map(Self.metricText))
-                CompactSignalMetric(label: "RSSI", value: carrier.signal.rssiDBm.map { "\($0)" })
-                CompactSignalMetric(label: "SNR", value: carrier.signal.snrDB.map(Self.metricText))
-            }
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .help("EARFCN \(carrier.earfcn)")
-    }
-
-    private static func metricText(_ value: Double) -> String {
-        value.rounded() == value ? "\(Int(value))" : String(format: "%.1f", value)
+        CarrierAggregationCard(
+            title: "LTE CA",
+            accent: AppPalette.blue,
+            rows: ([primaryCell].compactMap { $0 } + secondaryCells)
+                .enumerated()
+                .map { CarrierAggregationRowModel(lte: $0.element, position: $0.offset) },
+            mcc: mcc,
+            mnc: mnc
+        )
     }
 }
 
