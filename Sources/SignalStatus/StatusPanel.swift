@@ -1,9 +1,26 @@
 import AppKit
 import SwiftUI
 
-private enum AppPalette {
+enum AppPalette {
     static let blue = Color(nsColor: .systemBlue)
-    static let cyan = Color(nsColor: .systemCyan)
+    static let cyan = adaptive(light: 0x007C91, dark: 0x56D5E5)
+    static let indigo = adaptive(light: 0x5856C7, dark: 0xA9A4FF)
+    static let canvas = adaptive(light: 0xEDF0F4, dark: 0x15171C)
+    static let surface = adaptive(light: 0xFFFFFF, dark: 0x24272E)
+    static let inset = adaptive(light: 0xF0F3F7, dark: 0x30343D)
+    static let mutedInset = adaptive(light: 0xF6F7F9, dark: 0x292C33)
+
+    private static func adaptive(light: UInt32, dark: UInt32) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let value = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(
+                srgbRed: Double((value >> 16) & 0xFF) / 255,
+                green: Double((value >> 8) & 0xFF) / 255,
+                blue: Double(value & 0xFF) / 255,
+                alpha: 1
+            )
+        })
+    }
 }
 
 struct StatusPanel: View {
@@ -26,20 +43,42 @@ struct StatusPanel: View {
     @State private var measuredChromeHeight: CGFloat = 96
     private let panelHeightLimit: CGFloat?
     private let initiallyShowCarrierAggregation: Bool
+    private let initiallyShowSpeedTest: Bool
+#if README_SCREENSHOTS
+    var readmeScene: ReadmeScene?
+#endif
 
     init(
         initiallyShowNetworkControls: Bool = false,
         initiallyShowSettings: Bool = false,
         initiallyShowCarrierAggregation: Bool = false,
+        initiallyShowSpeedTest: Bool = false,
         panelHeightLimit: CGFloat? = nil
     ) {
         _showNetworkControls = State(initialValue: initiallyShowNetworkControls)
         _showSettings = State(initialValue: initiallyShowSettings)
         self.initiallyShowCarrierAggregation = initiallyShowCarrierAggregation
+        self.initiallyShowSpeedTest = initiallyShowSpeedTest
         self.panelHeightLimit = panelHeightLimit
     }
 
     var body: some View {
+#if README_SCREENSHOTS
+        if let scene = readmeScene, scene != .overview {
+            readmeContent(scene)
+                .onAppear {
+                    showDeviceDetails = scene == .details
+                    bandSelection.synchronize(with: model.controlState, force: true)
+                }
+        } else {
+            mainPanel
+        }
+#else
+        mainPanel
+#endif
+    }
+
+    private var mainPanel: some View {
         VStack(spacing: 0) {
             header
             panelSeparator
@@ -62,7 +101,8 @@ struct StatusPanel: View {
                                 .id("network-controls")
                         }
                         SpeedTestCard(
-                            speedTest: model.speedTestModel
+                            speedTest: model.speedTestModel,
+                            initiallyExpanded: initiallyShowSpeedTest
                         )
                             .id("speed-test")
                         deviceDetailsCard
@@ -158,7 +198,7 @@ struct StatusPanel: View {
         .frame(width: model.panelWidth.points)
         .tint(AppPalette.blue)
         .background {
-            Color(nsColor: .windowBackgroundColor)
+            PanelBackdrop()
         }
         .onAppear {
             launchAtLogin = model.launchAtLogin
@@ -226,12 +266,12 @@ struct StatusPanel: View {
             HStack(spacing: 10) {
                 Image(systemName: "antenna.radiowaves.left.and.right")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(secondaryAccent)
-                    .frame(width: 30, height: 30)
-                    .background(AppPalette.blue.opacity(0.16), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .foregroundStyle(AppPalette.blue)
+                    .frame(width: 32, height: 32)
+                    .background(AppPalette.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 Text("Cellular Modem Monitor")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .font(.system(size: 15, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
                     .layoutPriority(1)
@@ -252,7 +292,7 @@ struct StatusPanel: View {
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(PanelIconButtonStyle())
                 .help(L10n.text("Refresh now", language: language))
                 .accessibilityLabel(L10n.text("Refresh now", language: language))
                 .disabled(model.isRefreshing || model.isControlBusy)
@@ -264,12 +304,12 @@ struct StatusPanel: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.82)
                 .allowsTightening(true)
-                .padding(.leading, 40)
+                .padding(.leading, 42)
                 .help(headerSubtitle)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        .background(Color.primary.opacity(0.018))
+        .modifier(ChromeSurface())
         .background {
             GeometryReader { geometry in
                 Color.clear.preference(
@@ -341,9 +381,9 @@ struct StatusPanel: View {
                 }
             }
             .foregroundStyle(AppPalette.blue)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(AppPalette.blue.opacity(0.10), in: Capsule())
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(AppPalette.blue.opacity(0.08), in: Capsule())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.visible)
@@ -396,7 +436,6 @@ struct StatusPanel: View {
                     RadioCard(
                         title: "NR",
                         radio: .nr,
-                        accent: secondaryAccent,
                         surfaceAccent: AppPalette.cyan,
                         band: band,
                         frequency: model.snapshot.nrFrequencyMHz,
@@ -414,7 +453,6 @@ struct StatusPanel: View {
                     RadioCard(
                         title: "LTE",
                         radio: .lte,
-                        accent: AppPalette.blue,
                         surfaceAccent: AppPalette.blue,
                         band: band,
                         frequency: model.snapshot.lteFrequencyMHz,
@@ -1094,7 +1132,7 @@ struct StatusPanel: View {
         .font(.caption)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.018))
+        .modifier(ChromeSurface())
         .background {
             GeometryReader { geometry in
                 Color.clear.preference(
@@ -1147,6 +1185,45 @@ struct StatusPanel: View {
         return min(measuredContentHeight, available)
     }
 }
+
+#if README_SCREENSHOTS
+enum ReadmeScene: String, CaseIterable {
+    case overview, sa, nsa, ca, connection, radio
+    case nrCA = "nr-ca"
+    case lteCA = "lte-ca"
+    case controls, speedtest, details, settings
+}
+
+extension StatusPanel {
+    @ViewBuilder
+    private func readmeContent(_ scene: ReadmeScene) -> some View {
+        VStack(spacing: 10) {
+            switch scene {
+            case .overview: EmptyView()
+            case .sa, .nsa:
+                heroCard
+                radioCards
+            case .ca:
+                heroCard
+                nrCarrierAggregationCard
+                carrierAggregationCard
+            case .connection: heroCard
+            case .radio: radioCards
+            case .nrCA: nrCarrierAggregationCard
+            case .lteCA: carrierAggregationCard
+            case .controls: networkControlsCard
+            case .speedtest: SpeedTestCard(speedTest: model.speedTestModel, initiallyExpanded: true)
+            case .details: deviceDetailsCard
+            case .settings: settingsCard
+            }
+        }
+        .padding(12)
+        .frame(width: model.panelWidth.points)
+        .background(AppPalette.canvas)
+        .tint(AppPalette.blue)
+    }
+}
+#endif
 
 struct ContextHelp: View {
     @Environment(\.appLanguage) private var language
@@ -1549,7 +1626,6 @@ private struct RadioCard: View {
 
     let title: String
     let radio: RadioKind
-    let accent: Color
     let surfaceAccent: Color
     let band: String
     let frequency: Double?
@@ -1567,9 +1643,12 @@ private struct RadioCard: View {
             HStack {
                 Text(title)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(accent)
+                    .foregroundStyle(surfaceAccent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(surfaceAccent.opacity(0.08), in: Capsule())
                 Spacer()
-                SignalBars(signal: signal.rsrpDBm, accent: accent)
+                SignalBars(signal: signal.rsrpDBm, accent: surfaceAccent)
             }
             Text(band)
                 .font(.system(size: 24, weight: .bold, design: .rounded))
@@ -1608,6 +1687,8 @@ private struct RadioCard: View {
             .font(.caption2.monospaced())
             .foregroundStyle(.secondary)
             .lineLimit(1)
+
+            Divider().padding(.vertical, 2)
 
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2),
@@ -1797,6 +1878,12 @@ private struct CarrierAggregationRow: View {
                 Text((row.state ?? .unknown).localizedLabel(language: language))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(row.isActive ? accent : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(
+                        row.isActive ? accent.opacity(0.10) : Color.primary.opacity(0.045),
+                        in: Capsule()
+                    )
                     .frame(width: 68, alignment: .trailing)
             }
             .lineLimit(1)
@@ -1826,7 +1913,7 @@ private struct CarrierAggregationRow: View {
             }
         }
         .padding(10)
-        .background(Color.primary.opacity(row.isActive ? 0.045 : 0.018), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .insetSurface(accent: row.isActive ? accent : nil, isMuted: !row.isActive)
         .help(helpText)
     }
 
@@ -2065,10 +2152,12 @@ struct CollapsibleCard<Content: View, Header: View>: View {
                 HStack(spacing: 8) {
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                         .rotationEffect(isExpanded ? .degrees(90) : .zero)
                         .frame(width: 10)
                         .accessibilityHidden(true)
                     header
+                        .labelStyle(PanelSectionLabelStyle(accent: accent ?? .secondary))
                     Spacer(minLength: 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2109,39 +2198,138 @@ struct CollapsibleCard<Content: View, Header: View>: View {
     }
 }
 
-private struct CardStyle: ViewModifier {
+private struct PanelBackdrop: View {
+    var body: some View {
+        AppPalette.canvas.ignoresSafeArea()
+    }
+}
+
+private struct PanelSectionLabelStyle: LabelStyle {
+    let accent: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 8) {
+            configuration.icon
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(accent)
+                .frame(width: 26, height: 26)
+                .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            configuration.title
+                .foregroundStyle(.primary)
+        }
+    }
+}
+
+private struct ChromeSurface: ViewModifier {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
+        content.background {
+            if reduceTransparency {
+                AppPalette.surface
+            } else {
+                Rectangle().fill(.regularMaterial)
+            }
+        }
+    }
+}
+
+struct PanelIconButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Color.primary.opacity(configuration.isPressed ? 0.10 : 0.04),
+                in: Circle()
+            )
+            .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+struct InsetSurfaceStyle: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var accent: Color?
+    var isMuted = false
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+        content
+            .background {
+                ZStack {
+                    shape.fill(isMuted ? AppPalette.mutedInset : AppPalette.inset)
+                    if let accent {
+                        shape.fill(accent.opacity(colorScheme == .dark ? 0.04 : 0.025))
+                    }
+                }
+            }
+            .overlay {
+                shape.strokeBorder(
+                    Color.primary.opacity(contrast == .increased ? 0.30 : 0.045),
+                    lineWidth: contrast == .increased ? 1 : 0.5
+                )
+            }
+    }
+}
+
+struct CardStyle: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var prominent = false
     var tint: Color?
     var accent: Color?
 
     func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
         content
-            .padding(14)
-            .background(background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(border, lineWidth: 0.5)
+            .padding(15)
+            .background {
+                ZStack {
+                    shape.fill(AppPalette.surface)
+                    if prominent {
+                        LinearGradient(
+                            colors: [
+                                (accent ?? AppPalette.blue).opacity(colorScheme == .dark ? 0.085 : 0.045),
+                                .clear
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .clipShape(shape)
+                    }
+                    if let tint {
+                        shape.fill(tint.opacity(colorScheme == .dark ? 0.12 : 0.08))
+                    }
+                }
+            }
+            .overlay {
+                shape.strokeBorder(border, lineWidth: contrast == .increased ? 1 : 0.65)
+            }
+            .shadow(
+                color: Color.black.opacity(colorScheme == .dark ? 0.12 : 0.035),
+                radius: 3,
+                x: 0,
+                y: 2
             )
     }
 
-    private var background: Color {
-        if let tint { return tint.opacity(0.09) }
-        return colorScheme == .dark
-            ? Color(white: prominent ? 0.16 : 0.14)
-            : Color(nsColor: .controlBackgroundColor)
-    }
-
     private var border: Color {
-        if let tint { return tint.opacity(0.18) }
-        return Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.065)
+        if contrast == .increased { return Color.primary.opacity(0.35) }
+        if let tint { return tint.opacity(colorScheme == .dark ? 0.25 : 0.20) }
+        return Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.075)
     }
 }
 
 extension View {
     func cardStyle(prominent: Bool = false, tint: Color? = nil, accent: Color? = nil) -> some View {
         modifier(CardStyle(prominent: prominent, tint: tint, accent: accent))
+    }
+
+    func insetSurface(accent: Color? = nil, isMuted: Bool = false) -> some View {
+        modifier(InsetSurfaceStyle(accent: accent, isMuted: isMuted))
     }
 }
 

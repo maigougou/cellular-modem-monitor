@@ -10,11 +10,190 @@ Normal status collection is read-only on both devices. An optional, explicitly
 opened **Network & radio controls** panel provides verified controls through
 either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 
-<p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor showing a 5G NSA n77 and B7 connection with carrier aggregation">
-  <br>
-  <sub>Unified NR/LTE status and component-carrier presentation.</sub>
-</p>
+<!-- BEGIN README PREVIEWS -->
+## Full interface preview
+
+Every pair shows **light on the left, dark on the right**, using the same illustrative data. Click an image to view it at full size. Fixtures are checked for consistency; available features depend on the modem backend.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/overview-light.png"><img src="assets/previews/en/overview-light.png" width="360" alt="Full interface — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/overview-dark.png"><img src="assets/previews/en/overview-dark.png" width="360" alt="Full interface — dark"></a></td>
+  </tr>
+</table>
+
+## SA, NSA and CA scenarios
+
+<details>
+<summary><strong>5G SA</strong></summary>
+
+Standalone n77 at 50 MHz. Only the NR serving card is present; there is no LTE anchor.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/sa-light.png"><img src="assets/previews/en/sa-light.png" width="360" alt="5G SA — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/sa-dark.png"><img src="assets/previews/en/sa-dark.png" width="360" alt="5G SA — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>5G NSA</strong></summary>
+
+NR n77 at 50 MHz with an LTE B2 anchor at 20 MHz. This example has no secondary carriers.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/nsa-light.png"><img src="assets/previews/en/nsa-light.png" width="360" alt="5G NSA — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/nsa-dark.png"><img src="assets/previews/en/nsa-dark.png" width="360" alt="5G NSA — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>NR + LTE carrier aggregation</strong></summary>
+
+NSA with two active n77 carriers (50 + 30 MHz) and active LTE B2 + B66 (20 + 20 MHz). Configured but inactive n71 and B7 remain visible and are excluded from the active totals.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/ca-light.png"><img src="assets/previews/en/ca-light.png" width="360" alt="NR + LTE carrier aggregation — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/ca-dark.png"><img src="assets/previews/en/ca-dark.png" width="360" alt="NR + LTE carrier aggregation — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+## Explore the cards
+
+Expand a card name to see its function and matching light/dark previews.
+
+<details>
+<summary><strong>Current connection</strong></summary>
+
+See the current radio mode and serving bands at a glance. The upper-right menu switches Auto / SA / NSA / LTE through the existing confirmation and read-back flow.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/connection-light.png"><img src="assets/previews/en/connection-light.png" width="360" alt="Current connection — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/connection-dark.png"><img src="assets/previews/en/connection-dark.png" width="360" alt="Current connection — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>NR and LTE signal cards</strong></summary>
+
+Aligned cards show each serving carrier's band, frequency, bandwidth, Cell ID and signal metrics. Each card matches the PCell in its own CA list; missing measurements remain “—”.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/radio-light.png"><img src="assets/previews/en/radio-light.png" width="360" alt="NR and LTE signal cards — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/radio-dark.png"><img src="assets/previews/en/radio-dark.png" width="360" alt="NR and LTE signal cards — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>NR CA</strong></summary>
+
+Inspect every NR PCell/SCell separately, including two carriers on the same band. Here, active n77 50 MHz + n77 30 MHz total 80 MHz across two carriers; inactive n71 10 MHz is not included.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/nr-ca-light.png"><img src="assets/previews/en/nr-ca-light.png" width="360" alt="NR CA — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/nr-ca-dark.png"><img src="assets/previews/en/nr-ca-dark.png" width="360" alt="NR CA — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>LTE CA</strong></summary>
+
+The LTE B2 serving card corresponds to the active B2 20 MHz PCell below. B66 20 MHz is an active SCell, so the summary reads 2CC · 40 MHz for B2+B66. Inactive B7 remains listed.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/lte-ca-light.png"><img src="assets/previews/en/lte-ca-light.png" width="360" alt="LTE CA — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/lte-ca-dark.png"><img src="assets/previews/en/lte-ca-dark.png" width="360" alt="LTE CA — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>Network & radio controls</strong></summary>
+
+Scan or select operators, switch radio modes, select allowed NR/LTE bands and restore automatic defaults. Controls are enabled according to the selected modem's capabilities.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/controls-light.png"><img src="assets/previews/en/controls-light.png" width="360" alt="Network & radio controls — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/controls-dark.png"><img src="assets/previews/en/controls-dark.png" width="360" alt="Network & radio controls — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>Speed test</strong></summary>
+
+Run the official Ookla CLI through the verified modem interface and view live rates, final download/upload results, latency, jitter, packet loss and server details. The values shown here are illustrative, not a device benchmark.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/speedtest-light.png"><img src="assets/previews/en/speedtest-light.png" width="360" alt="Speed test — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/speedtest-dark.png"><img src="assets/previews/en/speedtest-dark.png" width="360" alt="Speed test — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>Device details</strong></summary>
+
+Confirm the identified modem, management address, Mac interface, connection path and data source. This fixture consistently uses the ZTE MC7530CA / G5 MAX, 192.168.254.1 and en12.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/details-light.png"><img src="assets/previews/en/details-light.png" width="360" alt="Device details — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/details-dark.png"><img src="assets/previews/en/details-dark.png" width="360" alt="Device details — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>Settings</strong></summary>
+
+Choose a modem backend, enter its existing credentials, and configure polling, language, menu-bar presentation, panel width, login startup and update checks.
+
+<table>
+  <tr><th align="center">Light</th><th align="center">Dark</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/en/settings-light.png"><img src="assets/previews/en/settings-light.png" width="360" alt="Settings — light"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/en/settings-dark.png"><img src="assets/previews/en/settings-dark.png" width="360" alt="Settings — dark"></a></td>
+  </tr>
+</table>
+
+</details>
+<!-- END README PREVIEWS -->
 
 ## Features
 
@@ -53,16 +232,6 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - Physical-device identity verification before every write
 - Read-only LTE neighbor measurements when the active backend reports them
 
-<details>
-<summary><strong>Network and radio controls preview</strong></summary>
-
-<p align="center">
-  <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="360" alt="Cellular Modem Monitor showing verified network, radio-mode and band controls">
-  <br>
-  <sub>Readback-driven controls in dark mode; demo values use synthetic Cell IDs.</sub>
-</p>
-
-</details>
 
 Controls are routed through the currently active backend rather than directly
 to a particular transport. VOS preferences last until power loss. MC7530CA

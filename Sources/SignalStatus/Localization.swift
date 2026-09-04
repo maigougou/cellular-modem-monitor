@@ -119,6 +119,7 @@ enum L10n {
         "View result": "查看结果",
         "Run Ookla test": "运行 Ookla 测速",
         "Test again": "再次测速",
+        "Test details": "测速说明",
         "Uses the separately installed official Ookla CLI.": "使用另行安装的官方 Ookla CLI。",
         "Ookla terms": "Ookla 条款",
         "Install official CLI": "安装官方 CLI",

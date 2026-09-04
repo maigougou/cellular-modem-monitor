@@ -42,6 +42,19 @@ enum ModemOperationInterruption {
 
 @MainActor
 final class StatusModel: ObservableObject {
+#if README_SCREENSHOTS
+    // Only compiled into the offline README renderer, never the shipped app.
+    func configureReadmeModem(_ modem: ActiveModem, controls: ModemControlState) {
+        precondition(demoMode)
+        activeModem = modem
+        modemSelection = modem.identity.kind == .zteMC7530CA ? .zteMC7530CA : .vos5G
+        operatorSelection = controls.operatorSelection
+        controlState = controls
+        scannedNetworks = []
+        snapshot.moduleVersion = nil
+        snapshot.deviceFirmware = nil
+    }
+#endif
     @Published private(set) var snapshot = DeviceSnapshot.empty
     @Published private(set) var connectionState: ConnectionState = .connecting
     @Published private(set) var lastError: String?

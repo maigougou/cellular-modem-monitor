@@ -8,11 +8,190 @@
 两种设备的常规状态采集都只读。需要用户主动展开的**网络与无线控制**面板，
 可通过 VOS SSH/QMI 后端或 ZTE 认证 Web UBus 后端执行带验证的控制。
 
-<p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor 显示 5G NSA n77 与 B7 连接和载波聚合">
-  <br>
-  <sub>统一的 NR/LTE 状态和组成载波界面。</sub>
-</p>
+<!-- BEGIN README PREVIEWS -->
+## 完整界面预览
+
+每组预览均为**左浅色、右深色**，两侧使用相同的示例数据。点击图片可查看原图；所有数值均为一致性校验过的界面示例，实际可用功能由设备后端决定。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/overview-light.png"><img src="assets/previews/zh-CN/overview-light.png" width="360" alt="完整界面 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/overview-dark.png"><img src="assets/previews/zh-CN/overview-dark.png" width="360" alt="完整界面 — 深色"></a></td>
+  </tr>
+</table>
+
+## SA、NSA 与 CA 场景
+
+<details>
+<summary><strong>5G SA</strong></summary>
+
+独立组网 n77、50 MHz。只显示 NR 服务载波，不出现 LTE 锚点。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/sa-light.png"><img src="assets/previews/zh-CN/sa-light.png" width="360" alt="5G SA — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/sa-dark.png"><img src="assets/previews/zh-CN/sa-dark.png" width="360" alt="5G SA — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>5G NSA</strong></summary>
+
+NR n77 50 MHz 搭配 LTE B2 20 MHz 锚点；这组示例不配置辅助载波。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/nsa-light.png"><img src="assets/previews/zh-CN/nsa-light.png" width="360" alt="5G NSA — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/nsa-dark.png"><img src="assets/previews/zh-CN/nsa-dark.png" width="360" alt="5G NSA — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>NR 与 LTE 载波聚合</strong></summary>
+
+NSA 下，两条活动 n77 载波为 50 + 30 MHz；活动 LTE B2 + B66 为 20 + 20 MHz。已配置但未激活的 n71、B7 保留显示，不计入活动汇总。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/ca-light.png"><img src="assets/previews/zh-CN/ca-light.png" width="360" alt="NR 与 LTE 载波聚合 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/ca-dark.png"><img src="assets/previews/zh-CN/ca-dark.png" width="360" alt="NR 与 LTE 载波聚合 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+## 各卡片功能预览
+
+点击卡片标题展开对应说明与深浅色预览。
+
+<details>
+<summary><strong>当前连接</strong></summary>
+
+快速查看当前组网模式与服务频段。右上角下拉菜单提供 Auto／SA／NSA／LTE 切换，并沿用确认及读回验证流程。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/connection-light.png"><img src="assets/previews/zh-CN/connection-light.png" width="360" alt="当前连接 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/connection-dark.png"><img src="assets/previews/zh-CN/connection-dark.png" width="360" alt="当前连接 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>NR 与 LTE 信号卡片</strong></summary>
+
+对齐显示各自的服务频段、频率、带宽、Cell ID 与信号指标；每张卡都对应其 CA 列表中的 PCell，缺失测量值显示为“—”。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/radio-light.png"><img src="assets/previews/zh-CN/radio-light.png" width="360" alt="NR 与 LTE 信号卡片 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/radio-dark.png"><img src="assets/previews/zh-CN/radio-dark.png" width="360" alt="NR 与 LTE 信号卡片 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>NR CA</strong></summary>
+
+逐条查看 NR PCell／SCell，同频段的不同载波也分别显示。图中活动 n77 50 MHz + n77 30 MHz 为两载波共 80 MHz；未激活的 n71 10 MHz 不计入。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/nr-ca-light.png"><img src="assets/previews/zh-CN/nr-ca-light.png" width="360" alt="NR CA — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/nr-ca-dark.png"><img src="assets/previews/zh-CN/nr-ca-dark.png" width="360" alt="NR CA — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>LTE CA</strong></summary>
+
+LTE 服务卡中的 B2 对应这里活动的 B2 20 MHz PCell；B66 20 MHz 是活动 SCell，因此 B2+B66 汇总显示为 2CC · 40 MHz。未激活的 B7 仍保留在列表中。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/lte-ca-light.png"><img src="assets/previews/zh-CN/lte-ca-light.png" width="360" alt="LTE CA — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/lte-ca-dark.png"><img src="assets/previews/zh-CN/lte-ca-dark.png" width="360" alt="LTE CA — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>网络与无线控制</strong></summary>
+
+扫描或选择运营商、切换无线模式、勾选 NR／LTE 允许频段，以及恢复自动默认设置。可用控制项取决于所选设备的能力。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/controls-light.png"><img src="assets/previews/zh-CN/controls-light.png" width="360" alt="网络与无线控制 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/controls-dark.png"><img src="assets/previews/zh-CN/controls-dark.png" width="360" alt="网络与无线控制 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>测速</strong></summary>
+
+通过已验证的 modem 接口运行官方 Ookla CLI，查看实时速率、最终下载／上传结果、延迟、抖动、丢包与服务器。图中数值是界面示例，不是设备性能测试结果。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/speedtest-light.png"><img src="assets/previews/zh-CN/speedtest-light.png" width="360" alt="测速 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/speedtest-dark.png"><img src="assets/previews/zh-CN/speedtest-dark.png" width="360" alt="测速 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>设备详情</strong></summary>
+
+确认识别出的设备、管理地址、Mac 接口、连接路径与数据来源。本组示例统一使用 ZTE MC7530CA／G5 MAX、192.168.254.1 和 en12。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/details-light.png"><img src="assets/previews/zh-CN/details-light.png" width="360" alt="设备详情 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/details-dark.png"><img src="assets/previews/zh-CN/details-dark.png" width="360" alt="设备详情 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+
+<details>
+<summary><strong>设置</strong></summary>
+
+选择设备后端、填写现有登录凭据，并配置刷新周期、语言、菜单栏样式、面板宽度、登录时启动与更新检查。
+
+<table>
+  <tr><th align="center">浅色</th><th align="center">深色</th></tr>
+  <tr>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/settings-light.png"><img src="assets/previews/zh-CN/settings-light.png" width="360" alt="设置 — 浅色"></a></td>
+    <td width="50%" valign="top"><a href="assets/previews/zh-CN/settings-dark.png"><img src="assets/previews/zh-CN/settings-dark.png" width="360" alt="设置 — 深色"></a></td>
+  </tr>
+</table>
+
+</details>
+<!-- END README PREVIEWS -->
 
 ## 功能
 
@@ -46,16 +225,6 @@
 - 每次写入前验证物理设备身份
 - 在当前后端明确支持时读取 LTE 邻区测量
 
-<details>
-<summary><strong>网络与无线控制界面预览</strong></summary>
-
-<p align="center">
-  <img src="assets/cellular-modem-monitor-nsa-n78-b2.png" width="360" alt="Cellular Modem Monitor 显示带验证的选网、无线模式与频段控制">
-  <br>
-  <sub>深色模式下由设备读回驱动的控制界面；图中使用虚构 Cell ID。</sub>
-</p>
-
-</details>
 
 控制始终交给当前活动后端，不会由界面直接调用某种传输。VOS 偏好持续到断电；
 MC7530CA 偏好会持久保存，直到再次修改或恢复。界面只显示当前后端声明的能力。

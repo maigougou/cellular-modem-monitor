@@ -3,7 +3,12 @@ import SwiftUI
 struct SpeedTestCard: View {
     @ObservedObject var speedTest: SpeedTestModel
     @Environment(\.appLanguage) private var language
-    @State private var isExpanded = false
+    @State private var isExpanded: Bool
+
+    init(speedTest: SpeedTestModel, initiallyExpanded: Bool = false) {
+        self.speedTest = speedTest
+        _isExpanded = State(initialValue: initiallyExpanded)
+    }
 
     var body: some View {
         CollapsibleCard(
@@ -11,38 +16,11 @@ struct SpeedTestCard: View {
             accessibilityLabel: L10n.text("Speed test", language: language),
             accent: .blue
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                if let interfaceName = boundInterfaceName {
-                    HStack(spacing: 5) {
-                        Text(L10n.text("Bound interface", language: language))
-                            .foregroundStyle(.secondary)
-                        Text(interfaceName)
-                            .fontWeight(.semibold)
-                            .monospaced()
-                    }
-                    .font(.caption)
-                }
-
-                SpeedTestEngineSection(
-                    speedTest: speedTest
-                )
-
-                Text(routeVerificationNote)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Label(
-                    L10n.text(
-                        "Speed tests can use a substantial amount of cellular data.",
-                        language: language
-                    ),
-                    systemImage: "exclamationmark.circle"
-                )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-            .padding(.top, 10)
+            SpeedTestEngineSection(
+                speedTest: speedTest,
+                routeVerificationNote: routeVerificationNote
+            )
+            .padding(.top, 8)
         } label: {
             Label(
                 L10n.text("Speed test", language: language),
@@ -50,10 +28,6 @@ struct SpeedTestCard: View {
             )
             .font(.subheadline.weight(.semibold))
         }
-    }
-
-    private var boundInterfaceName: String? {
-        speedTest.boundInterfaceName
     }
 
     private var routeVerificationNote: String {
@@ -70,47 +44,99 @@ struct SpeedTestCard: View {
     }
 }
 
+private struct SpeedTestInformationButton: View {
+    @Environment(\.appLanguage) private var language
+    @State private var isPresented = false
+    let routeVerificationNote: String
+
+    var body: some View {
+        Button { isPresented.toggle() } label: {
+            Image(systemName: "info.circle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PanelIconButtonStyle())
+        .help(L10n.text("Test details", language: language))
+        .accessibilityLabel(L10n.text("Test details", language: language))
+        .popover(isPresented: $isPresented) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label(L10n.text("Test details", language: language), systemImage: "speedometer")
+                    .font(.headline)
+                Text(routeVerificationNote)
+                    .foregroundStyle(.secondary)
+                Label(
+                    L10n.text("Speed tests can use a substantial amount of cellular data.", language: language),
+                    systemImage: "exclamationmark.circle"
+                )
+                .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    Text(L10n.text("Uses the separately installed official Ookla CLI.", language: language))
+                    Link(
+                        L10n.text("Ookla terms", language: language),
+                        destination: URL(string: "https://www.speedtest.net/about/eula")!
+                    )
+                }
+                .foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(18)
+            .frame(width: 330, alignment: .leading)
+        }
+    }
+}
+
 private struct SpeedTestEngineSection: View {
     @ObservedObject var speedTest: SpeedTestModel
     @Environment(\.appLanguage) private var language
+    let routeVerificationNote: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Label(
-                L10n.text("Ookla Speedtest CLI", language: language),
-                systemImage: "speedometer"
-            )
-            .font(.caption.weight(.semibold))
+            HStack(spacing: 8) {
+                Text(L10n.text("Ookla Speedtest CLI", language: language))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Spacer(minLength: 6)
+                if let interfaceName = speedTest.boundInterfaceName {
+                    Label(interfaceName, systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.caption2.monospaced().weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(AppPalette.inset, in: Capsule())
+                        .help("\(L10n.text("Bound interface", language: language)) \(interfaceName)")
+                }
+                SpeedTestInformationButton(routeVerificationNote: routeVerificationNote)
+            }
 
             HStack(spacing: 8) {
                 SpeedTestRateTile(
                     title: L10n.text("Download", language: language),
                     systemImage: "arrow.down",
-                    value: displayedDownload
+                    bitsPerSecond: displayedDownload,
+                    accent: AppPalette.cyan
                 )
                 SpeedTestRateTile(
                     title: L10n.text("Upload", language: language),
                     systemImage: "arrow.up",
-                    value: displayedUpload
+                    bitsPerSecond: displayedUpload,
+                    accent: AppPalette.indigo
                 )
             }
 
             stateDetails
 
-            HStack(spacing: 4) {
-                Text(L10n.text(
-                    "Uses the separately installed official Ookla CLI.",
-                    language: language
-                ))
-                Link(
-                    L10n.text("Ookla terms", language: language),
-                    destination: URL(string: "https://www.speedtest.net/about/eula")!
-                )
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-
             HStack {
+                if case let .completed(result) = speedTest.state, let resultURL = result.resultURL {
+                    Link(L10n.text("View result", language: language), destination: resultURL)
+                        .font(.caption)
+                }
                 if showsInstallLink {
                     Link(
                         L10n.text("Install official CLI", language: language),
@@ -156,24 +182,26 @@ private struct SpeedTestEngineSection: View {
                 .foregroundStyle(.secondary)
             }
         case let .completed(result):
-            VStack(spacing: 6) {
-                if let latency = result.idleLatencyMilliseconds {
-                    SpeedTestDetailRow(
-                        label: L10n.text("Idle latency", language: language),
-                        value: String(format: "%.0f ms", latency)
-                    )
-                }
-                if let jitter = result.jitterMilliseconds {
-                    SpeedTestDetailRow(
-                        label: L10n.text("Jitter", language: language),
-                        value: String(format: "%.1f ms", jitter)
-                    )
-                }
-                if let packetLoss = result.packetLossPercent {
-                    SpeedTestDetailRow(
-                        label: L10n.text("Packet loss", language: language),
-                        value: String(format: "%.1f%%", packetLoss)
-                    )
+            VStack(spacing: 10) {
+                HStack(alignment: .top, spacing: 8) {
+                    if let latency = result.idleLatencyMilliseconds {
+                        SpeedTestCompactMetric(
+                            label: L10n.text("Idle latency", language: language),
+                            value: String(format: "%.0f ms", latency)
+                        )
+                    }
+                    if let jitter = result.jitterMilliseconds {
+                        SpeedTestCompactMetric(
+                            label: L10n.text("Jitter", language: language),
+                            value: String(format: "%.1f ms", jitter)
+                        )
+                    }
+                    if let packetLoss = result.packetLossPercent {
+                        SpeedTestCompactMetric(
+                            label: L10n.text("Packet loss", language: language),
+                            value: String(format: "%.1f%%", packetLoss)
+                        )
+                    }
                 }
                 if let server = result.serverName {
                     SpeedTestDetailRow(
@@ -181,14 +209,8 @@ private struct SpeedTestEngineSection: View {
                         value: server
                     )
                 }
-                if let resultURL = result.resultURL {
-                    HStack {
-                        Spacer()
-                        Link(L10n.text("View result", language: language), destination: resultURL)
-                            .font(.caption)
-                    }
-                }
             }
+            .padding(.vertical, 3)
         case let .unavailable(error), let .failed(error):
             Label(
                 error.localizedMessage(language: language),
@@ -217,59 +239,85 @@ private struct SpeedTestEngineSection: View {
         return false
     }
 
-    private var displayedDownload: String {
+    private var displayedDownload: Double? {
         switch speedTest.state {
         case let .running(progress):
-            return Self.rate(progress.downloadBitsPerSecond)
+            return progress.downloadBitsPerSecond
         case let .completed(result):
-            return Self.rate(result.downloadBitsPerSecond)
+            return result.downloadBitsPerSecond
         default:
-            return "—"
+            return nil
         }
     }
 
-    private var displayedUpload: String {
+    private var displayedUpload: Double? {
         switch speedTest.state {
         case let .running(progress):
-            return Self.rate(progress.uploadBitsPerSecond)
+            return progress.uploadBitsPerSecond
         case let .completed(result):
-            return Self.rate(result.uploadBitsPerSecond)
+            return result.uploadBitsPerSecond
         default:
-            return "—"
+            return nil
         }
     }
 
-    private static func rate(_ bitsPerSecond: Double) -> String {
-        guard bitsPerSecond.isFinite, bitsPerSecond >= 0 else { return "—" }
-        if bitsPerSecond >= 1_000_000_000 {
-            return String(format: "%.2f Gbps", bitsPerSecond / 1_000_000_000)
-        }
-        if bitsPerSecond >= 1_000_000 {
-            return String(format: "%.1f Mbps", bitsPerSecond / 1_000_000)
-        }
-        return String(format: "%.0f Kbps", bitsPerSecond / 1_000)
-    }
 }
 
 private struct SpeedTestRateTile: View {
     let title: String
     let systemImage: String
+    let bitsPerSecond: Double?
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label(title, systemImage: systemImage)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(accent)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(formattedRate.value)
+                    .font(.system(size: 24, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                if let unit = formattedRate.unit {
+                    Text(unit)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(11)
+        .insetSurface(accent: accent)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var formattedRate: (value: String, unit: String?) {
+        guard let bitsPerSecond, bitsPerSecond.isFinite, bitsPerSecond >= 0 else { return ("—", nil) }
+        if bitsPerSecond >= 1_000_000_000 {
+            return (String(format: "%.2f", bitsPerSecond / 1_000_000_000), "Gbps")
+        }
+        if bitsPerSecond >= 1_000_000 {
+            return (String(format: "%.1f", bitsPerSecond / 1_000_000), "Mbps")
+        }
+        return (String(format: "%.0f", bitsPerSecond / 1_000), "Kbps")
+    }
+}
+
+private struct SpeedTestCompactMetric: View {
+    let label: String
     let value: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Label(title, systemImage: systemImage)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(.body, design: .rounded).weight(.bold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 13, weight: .medium)).monospacedDigit()
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(9)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .accessibilityElement(children: .combine)
     }
 }
 
