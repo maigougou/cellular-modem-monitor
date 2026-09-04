@@ -206,8 +206,11 @@ PLMN、也未产生可观察注册变化的换卡。
 
 常规轮询调用只读方法 `zte_nwinfo_api.nwinfo_get_netinfo`。解析器映射设备实际
 报告的运营商/PLMN、LTE/NR 频段、信道、带宽、PCI、Cell ID、信号指标和 LTE/NR
-载波聚合，不会编造缺失值。MC7530CA 的 `nrca` SCell 记录会作为独立组成载波保留；
-例如 `n77 50 MHz + n77 30 MHz` 不会被丢成一条，也不会误写成单载波 80 MHz。
+载波聚合，不会编造缺失值。MC7530CA 的 `nrca` NR SCell 记录和
+`lteca`/`ltecasig` LTE SCell 记录都会作为独立组成载波保留；例如
+`n77 50 MHz + n77 30 MHz` 不会被丢成一条，也不会误写成单载波 80 MHz。
+两种无线制式中设备报告的每载波状态也会保留：状态 `2` 显示为 **Active**，状态 `1`
+仍列出但显示为 **Inactive**，并且不会计入活动载波摘要。
 
 打开控制面板后，同一个限定路径的认证 session 只提供后端声明的无线控制方法。
 每项 MC7530CA 无线 RPC 都使用实机验证过的 SID 认证请求形式：`Z-Mode: 0` 和空

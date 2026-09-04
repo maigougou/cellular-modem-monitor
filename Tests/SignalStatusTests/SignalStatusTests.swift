@@ -24,6 +24,14 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(AppLanguage.systemDefault(preferredLanguages: ["ZH-cn"]), .simplifiedChinese)
     }
 
+    func testCarrierStateUsesInactiveForConfiguredDeactivatedCells() {
+        XCTAssertEqual(RadioCarrierState.configured.label, "Inactive")
+        XCTAssertEqual(
+            RadioCarrierState.configured.localizedLabel(language: .simplifiedChinese),
+            "未激活"
+        )
+    }
+
     func testAppLanguageDefaultsToEnglishForOtherOrMissingSystemLanguages() {
         XCTAssertEqual(AppLanguage.systemDefault(preferredLanguages: ["en-CA", "zh-Hans-CN"]), .english)
         XCTAssertEqual(AppLanguage.systemDefault(preferredLanguages: ["fr-CA"]), .english)
@@ -675,8 +683,19 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(endc.lteSignal, RadioSignal(rsrpDBm: -99, rsrqDB: -15.5, rssiDBm: -65, snrDB: 2))
         XCTAssertEqual(endc.lteGlobalCellID, 19_088_743)
         XCTAssertEqual(endc.ltePrimaryCell?.band, "B2")
-        XCTAssertEqual(endc.lteSecondaryCells.map(\.band), ["B66"])
-        XCTAssertEqual(endc.lteSecondaryCells.map(\.earfcn), [66_811])
+        XCTAssertEqual(endc.ltePrimaryCell?.state, .active)
+        XCTAssertEqual(endc.lteSecondaryCells.map(\.band), ["B66", "B7"])
+        XCTAssertEqual(endc.lteSecondaryCells.map(\.earfcn), [66_811, 3_350])
+        XCTAssertEqual(endc.lteSecondaryCells.map(\.state), [.active, .configured])
+        XCTAssertEqual(endc.lteSecondaryCells.filter(\.isActive).count, 1)
+        XCTAssertEqual(
+            endc.lteSecondaryCells.first?.signal,
+            RadioSignal(rsrpDBm: -108, rsrqDB: -14.1, rssiDBm: -86, snrDB: 10)
+        )
+        XCTAssertEqual(
+            endc.lteSecondaryCells.last?.signal,
+            RadioSignal(rsrpDBm: nil, rsrqDB: -3, rssiDBm: nil, snrDB: 16.4)
+        )
         XCTAssertEqual(endc.unparsedNRCA, "opaque-vendor-value")
 
         let snapshot = endc.snapshot(
@@ -699,17 +718,22 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(nrCA.nrPrimaryCell?.band, "n77")
         XCTAssertEqual(nrCA.nrPrimaryCell?.nrarfcn, 640_608)
         XCTAssertEqual(nrCA.nrPrimaryCell?.bandwidthMHz, 50)
-        XCTAssertEqual(nrCA.nrSecondaryCells.count, 1)
+        XCTAssertEqual(nrCA.nrSecondaryCells.count, 2)
         XCTAssertEqual(nrCA.nrSecondaryCells.first?.role, .secondary(index: 1))
-        XCTAssertEqual(nrCA.nrSecondaryCells.first?.band, "n77")
-        XCTAssertEqual(nrCA.nrSecondaryCells.first?.nrarfcn, 633_984)
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.band, "n66")
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.nrarfcn, 438_000)
         XCTAssertEqual(nrCA.nrSecondaryCells.first?.bandwidthMHz, 30)
-        XCTAssertEqual(nrCA.nrSecondaryCells.first?.physicalCellID, 41)
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.physicalCellID, 203)
+        XCTAssertEqual(nrCA.nrSecondaryCells.first?.state, .active)
         XCTAssertEqual(
             nrCA.nrSecondaryCells.first?.signal,
-            RadioSignal(rsrpDBm: -140, rsrqDB: -43, rssiDBm: -120, snrDB: -23)
+            RadioSignal(rsrpDBm: -91, rsrqDB: -12, rssiDBm: -78, snrDB: 14.3)
         )
-        XCTAssertEqual(nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count, 1)
+        XCTAssertEqual(nrCA.nrSecondaryCells.last?.role, .secondary(index: 2))
+        XCTAssertEqual(nrCA.nrSecondaryCells.last?.band, "n77")
+        XCTAssertEqual(nrCA.nrSecondaryCells.last?.state, .configured)
+        XCTAssertEqual(nrCA.nrSecondaryCells.filter(\.isActive).count, 1)
+        XCTAssertEqual(nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count, 2)
 
         let lte = try MC7530Parser.parse(data: mc7530Fixture("lte-sentinels.json"))
         XCTAssertEqual(lte.lteBand, "B12")

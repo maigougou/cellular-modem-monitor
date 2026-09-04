@@ -30,6 +30,12 @@ enum DirectTests {
             check(AppLanguage.systemDefault(preferredLanguages: []) == .english,
                   "missing system language default", failures: &failures)
             check(
+                RadioCarrierState.configured.label == "Inactive"
+                    && RadioCarrierState.configured.localizedLabel(language: .simplifiedChinese) == "未激活",
+                "configured-deactivated carrier label",
+                failures: &failures
+            )
+            check(
                 AppLanguage.resolved(storedValue: AppLanguage.english.rawValue, preferredLanguages: ["zh-Hans"]) == .english,
                 "saved language overrides system language",
                 failures: &failures
@@ -2187,9 +2193,13 @@ enum DirectTests {
                   "MC7530 LTE cell identifiers", failures: &failures)
             check(endc.ltePrimaryCell?.band == "B2" && endc.ltePrimaryCell?.earfcn == 900,
                   "MC7530 LTE primary carrier", failures: &failures)
-            check(endc.lteSecondaryCells.count == 1 && endc.lteSecondaryCells.first?.band == "B66",
+            check(endc.lteSecondaryCells.count == 2 && endc.lteSecondaryCells.first?.band == "B66",
                   "MC7530 LTE secondary carrier", failures: &failures)
-            check(endc.lteSecondaryCells.first?.earfcn == 66_811 && endc.lteSecondaryCells.first?.bandwidthMHz == 15,
+            check(
+                endc.lteSecondaryCells.first?.earfcn == 66_811
+                    && endc.lteSecondaryCells.first?.bandwidthMHz == 15
+                    && endc.lteSecondaryCells.last?.earfcn == 3_350
+                    && endc.lteSecondaryCells.last?.bandwidthMHz == 20,
                   "MC7530 LTE secondary channel/bandwidth", failures: &failures)
             check(endc.unparsedLTECASignal != nil && endc.unparsedNRCA == "opaque-vendor-value",
                   "MC7530 undocumented CA fields retained", failures: &failures)
@@ -2202,6 +2212,22 @@ enum DirectTests {
             check(snapshot.host == "192.168.254.1" && snapshot.interfaceName == "en8",
                   "MC7530 scoped snapshot", failures: &failures)
             check(snapshot.detailedMenuTitle == "NSA n66+B2", "MC7530 snapshot mode title", failures: &failures)
+            check(
+                endc.ltePrimaryCell?.state == .active
+                    && endc.lteSecondaryCells.map(\.band) == ["B66", "B7"]
+                    && endc.lteSecondaryCells.map(\.state) == [.active, .configured]
+                    && endc.lteSecondaryCells.filter(\.isActive).count == 1,
+                "MC7530 LTE CA active/inactive state mapping",
+                failures: &failures
+            )
+            check(
+                endc.lteSecondaryCells.first?.signal
+                    == RadioSignal(rsrpDBm: -108, rsrqDB: -14.1, rssiDBm: -86, snrDB: 10)
+                    && endc.lteSecondaryCells.last?.signal
+                    == RadioSignal(rsrpDBm: nil, rsrqDB: -3, rssiDBm: nil, snrDB: 16.4),
+                "MC7530 LTE CA SCell signals and sentinels",
+                failures: &failures
+            )
 
             let sa = try MC7530Parser.parse(data: fixture("MC7530CA/sa.json"))
             check(sa.nrSystemMode == .sa && sa.nrBand == "n77", "MC7530 SA numeric band", failures: &failures)
@@ -2221,23 +2247,28 @@ enum DirectTests {
                 failures: &failures
             )
             check(
-                nrCA.nrSecondaryCells.count == 1
+                nrCA.nrSecondaryCells.count == 2
                     && nrCA.nrSecondaryCells.first?.role == .secondary(index: 1)
-                    && nrCA.nrSecondaryCells.first?.band == "n77"
-                    && nrCA.nrSecondaryCells.first?.nrarfcn == 633_984
+                    && nrCA.nrSecondaryCells.first?.band == "n66"
+                    && nrCA.nrSecondaryCells.first?.nrarfcn == 438_000
                     && nrCA.nrSecondaryCells.first?.bandwidthMHz == 30
-                    && nrCA.nrSecondaryCells.first?.physicalCellID == 41,
+                    && nrCA.nrSecondaryCells.first?.physicalCellID == 203
+                    && nrCA.nrSecondaryCells.first?.state == .active
+                    && nrCA.nrSecondaryCells.last?.role == .secondary(index: 2)
+                    && nrCA.nrSecondaryCells.last?.band == "n77"
+                    && nrCA.nrSecondaryCells.last?.state == .configured,
                 "MC7530 NR CA secondary carrier",
                 failures: &failures
             )
             check(
                 nrCA.nrSecondaryCells.first?.signal
-                    == RadioSignal(rsrpDBm: -140, rsrqDB: -43, rssiDBm: -120, snrDB: -23),
+                    == RadioSignal(rsrpDBm: -91, rsrqDB: -12, rssiDBm: -78, snrDB: 14.3),
                 "MC7530 NR CA secondary signal",
                 failures: &failures
             )
             check(
-                nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count == 1,
+                nrCA.nrSecondaryCells.filter(\.isActive).count == 1
+                    && nrCA.snapshot(host: "192.168.254.1", interfaceName: "en9").nrSecondaryCells.count == 2,
                 "MC7530 NR CA snapshot propagation",
                 failures: &failures
             )

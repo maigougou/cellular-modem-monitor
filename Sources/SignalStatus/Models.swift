@@ -728,7 +728,7 @@ enum RadioCarrierState: Equatable, Sendable {
     var label: String {
         switch self {
         case .active: return "Active"
-        case .configured: return "Configured"
+        case .configured: return "Inactive"
         case .deconfigured: return "Deconfigured"
         case .unknown: return "Unknown"
         }
@@ -745,6 +745,8 @@ struct LTECarrier: Equatable, Sendable {
     var globalCellID: UInt64? = nil
     var signal: RadioSignal = .empty
 
+    var isActive: Bool { state == .active }
+
     var downlinkFrequencyMHz: Double? {
         guard let band else { return nil }
         return ChannelFrequency.lteMHz(band: band, earfcn: earfcn)
@@ -760,6 +762,8 @@ struct NRCarrier: Equatable, Sendable {
     var state: RadioCarrierState?
     var globalCellID: UInt64? = nil
     var signal: RadioSignal = .empty
+
+    var isActive: Bool { state == .active }
 
     var downlinkFrequencyMHz: Double? {
         ChannelFrequency.nrMHz(nrarfcn)

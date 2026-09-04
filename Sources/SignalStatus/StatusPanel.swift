@@ -1501,6 +1501,7 @@ private struct NRCarrierAggregationCard: View {
 
     private var combination: String {
         ([primaryCell].compactMap { $0 } + secondaryCells)
+            .filter(\.isActive)
             .map { carrier in
                 let band = carrier.band ?? "n?"
                 guard let bandwidth = carrier.bandwidthMHz else { return band }
@@ -1612,7 +1613,7 @@ private struct LTECarrierAggregationCard: View {
     }
 
     private var combination: String {
-        let active = secondaryCells.filter { $0.state == .active }
+        let active = secondaryCells.filter(\.isActive)
         var bands = [primaryCell?.band].compactMap { $0 }
         bands.append(contentsOf: active.compactMap(\.band))
         if active.isEmpty {
