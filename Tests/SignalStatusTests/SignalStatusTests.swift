@@ -32,6 +32,34 @@ final class SignalStatusTests: XCTestCase {
         )
     }
 
+    func testQuickArchitectureMenuOrderAndCompactLabels() {
+        XCTAssertEqual(
+            NRArchitectureMode.quickAccessModes,
+            [.saOnly, .nsaOnly, .automatic, .lteOnly]
+        )
+        XCTAssertEqual(
+            NRArchitectureMode.quickAccessModes.map(\.compactLabel),
+            ["SA", "NSA", "Auto", "LTE"]
+        )
+    }
+
+    @MainActor
+    func testPanelWidthPersistsImmediatelyAndInvalidValueUsesStandard() {
+        let suiteName = "SignalStatusTests.panel-width.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        @MainActor func model() -> StatusModel {
+            StatusModel(defaults: defaults, credentialStore: EmptyTestCredentialStore(), demoSnapshot: .empty)
+        }
+        let first = model()
+        XCTAssertEqual(first.panelWidth, .standard)
+        first.panelWidth = .wide
+        XCTAssertEqual(model().panelWidth, .wide)
+        defaults.set("unknown-width", forKey: "panelWidth")
+        XCTAssertEqual(model().panelWidth, .standard)
+        XCTAssertEqual(PanelWidth.allCases.map(\.points), [360, 420, 480])
+    }
+
     func testCarrierAggregationPresentationFormatting() {
         XCTAssertEqual(
             CarrierAggregationFormatting.summary(for: [

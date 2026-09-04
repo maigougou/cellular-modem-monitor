@@ -36,6 +36,27 @@ enum DirectTests {
                 failures: &failures
             )
             check(
+                NRArchitectureMode.quickAccessModes == [.saOnly, .nsaOnly, .automatic, .lteOnly]
+                    && NRArchitectureMode.quickAccessModes.map(\.compactLabel) == ["SA", "NSA", "Auto", "LTE"],
+                "quick radio access menu order and labels",
+                failures: &failures
+            )
+            let widthPreferencesWork = await MainActor.run { () -> Bool in
+                let suiteName = "DirectTests.panel-width.\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: suiteName)!
+                defer { defaults.removePersistentDomain(forName: suiteName) }
+                @MainActor func model() -> StatusModel {
+                    StatusModel(defaults: defaults, credentialStore: DirectCredentialStore(values: [:]), demoSnapshot: .empty)
+                }
+                let first = model()
+                guard first.panelWidth == .standard else { return false }
+                first.panelWidth = .wide
+                guard model().panelWidth == .wide else { return false }
+                defaults.set("unknown-width", forKey: "panelWidth")
+                return model().panelWidth == .standard && PanelWidth.allCases.map(\.points) == [360, 420, 480]
+            }
+            check(widthPreferencesWork, "panel width persists independently of connection settings and falls back safely", failures: &failures)
+            check(
                 CarrierAggregationFormatting.summary(for: [
                     CarrierAggregationSummaryItem(band: "n77", bandwidthMHz: 50)
                 ]) == "n77 · 50 MHz"

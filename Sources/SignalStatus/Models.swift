@@ -75,6 +75,26 @@ enum MenuBarStyle: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum PanelWidth: String, CaseIterable, Identifiable, Sendable {
+    case compact, standard, wide
+
+    var id: String { rawValue }
+    var points: Double {
+        switch self {
+        case .compact: return 360
+        case .standard: return 420
+        case .wide: return 480
+        }
+    }
+    var label: String {
+        switch self {
+        case .compact: return "Compact"
+        case .standard: return "Standard"
+        case .wide: return "Wide"
+        }
+    }
+}
+
 enum OperatorSelectionMode: Int, Equatable, Sendable {
     case automatic = 0
     case manual = 1
@@ -296,6 +316,18 @@ enum NRArchitectureMode: String, CaseIterable, Identifiable, Equatable, Sendable
     case unavailable
 
     var id: String { rawValue }
+
+    static let quickAccessModes: [Self] = [.saOnly, .nsaOnly, .automatic, .lteOnly]
+
+    var compactLabel: String {
+        switch self {
+        case .automatic: return "Auto"
+        case .saOnly: return "SA"
+        case .nsaOnly: return "NSA"
+        case .lteOnly: return "LTE"
+        case .unavailable: return "—"
+        }
+    }
 
     var label: String {
         switch self {

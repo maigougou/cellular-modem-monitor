@@ -16,20 +16,26 @@ struct StatusPanel: View {
     @State private var showDeviceDetails = false
     @State private var showNetworkControls = false
     @State private var pendingControl: ControlConfirmation?
+    @State private var pendingQuickArchitecture: NRArchitectureMode?
+    @State private var quickArchitectureAwaitingResult = false
+    @State private var quickArchitectureError: String?
     @State private var launchAtLogin = false
     @State private var launchError: String?
     @State private var bandSelection = ModemBandSelectionDraft()
     @State private var measuredContentHeight: CGFloat = 320
     @State private var measuredChromeHeight: CGFloat = 96
     private let panelHeightLimit: CGFloat?
+    private let initiallyShowCarrierAggregation: Bool
 
     init(
         initiallyShowNetworkControls: Bool = false,
         initiallyShowSettings: Bool = false,
+        initiallyShowCarrierAggregation: Bool = false,
         panelHeightLimit: CGFloat? = nil
     ) {
         _showNetworkControls = State(initialValue: initiallyShowNetworkControls)
         _showSettings = State(initialValue: initiallyShowSettings)
+        self.initiallyShowCarrierAggregation = initiallyShowCarrierAggregation
         self.panelHeightLimit = panelHeightLimit
     }
 
@@ -128,29 +134,40 @@ struct StatusPanel: View {
                     // exact modem + endpoint binding that produced them. Never
                     // carry them to another device or connection path.
                     pendingControl = nil
+                    pendingQuickArchitecture = nil
+                    quickArchitectureAwaitingResult = false
+                    quickArchitectureError = nil
                     bandSelection.synchronize(with: model.controlState, force: true)
-                    guard showNetworkControls, model.supportsControlSession else { return }
-                    model.loadNetworkControls()
+                    guard model.supportsControlSession else { return }
+                    if showNetworkControls || model.supportsControl(.radioAccessPreference) {
+                        model.loadNetworkControls()
+                    }
                 }
                 .onChange(of: model.controlState) { state in
                     bandSelection.synchronize(with: state)
+                }
+                .onChange(of: model.controlOperation) { operation in
+                    guard operation == nil, quickArchitectureAwaitingResult else { return }
+                    quickArchitectureAwaitingResult = false
+                    quickArchitectureError = model.controlError
                 }
             }
             panelSeparator
             footer
         }
-        .frame(width: 360)
+        .frame(width: model.panelWidth.points)
         .tint(AppPalette.blue)
         .background {
-            ZStack {
-                Rectangle().fill(.ultraThinMaterial)
-                Color(nsColor: .windowBackgroundColor)
-                    .opacity(colorScheme == .dark ? 0.18 : 0.10)
-            }
+            Color(nsColor: .windowBackgroundColor)
         }
         .onAppear {
             launchAtLogin = model.launchAtLogin
             bandSelection.synchronize(with: model.controlState, force: true)
+            if model.supportsControlSession,
+               model.supportsControl(.radioAccessPreference),
+               model.controlState == nil {
+                model.loadNetworkControls()
+            }
         }
         .onPreferenceChange(ContentHeightPreferenceKey.self) { height in
             guard height > 0, abs(height - measuredContentHeight) > 0.5 else { return }
@@ -164,6 +181,38 @@ struct StatusPanel: View {
         .animation(.easeInOut(duration: 0.2), value: showNetworkControls)
         .animation(.easeInOut(duration: 0.16), value: pendingControl?.id)
         .animation(.easeInOut(duration: 0.2), value: scrollViewportHeight)
+        .alert(
+            quickArchitectureConfirmation?.title(language: language) ?? "",
+            isPresented: quickArchitectureConfirmationPresented
+        ) {
+            Button(L10n.text("Cancel", language: language), role: .cancel) {
+                pendingQuickArchitecture = nil
+            }
+            if let mode = pendingQuickArchitecture {
+                let confirmation = ControlConfirmation.architecture(mode)
+                Button(confirmation.buttonTitle(language: language)) {
+                    performQuickArchitectureChange(mode)
+                }
+            }
+        } message: {
+            if let confirmation = quickArchitectureConfirmation {
+                Text(confirmation.message(
+                    language: language,
+                    modemKind: model.activeModem?.identity.kind,
+                    preferenceLifetime: model.controlState?.preferenceLifetime ?? .unknown
+                ))
+            }
+        }
+        .alert(
+            L10n.text("Radio access mode change failed", language: language),
+            isPresented: quickArchitectureErrorPresented
+        ) {
+            Button(L10n.text("OK", language: language)) {
+                quickArchitectureError = nil
+            }
+        } message: {
+            Text(quickArchitectureError ?? "")
+        }
     }
 
     private var panelSeparator: some View {
@@ -239,10 +288,8 @@ struct StatusPanel: View {
                     .foregroundStyle(.secondary)
                     .tracking(0.6)
                 Spacer()
-                if let updated = updatedText {
-                    Text(updated)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                if model.supportsControl(.radioAccessPreference) {
+                    quickArchitectureMenu
                 }
             }
 
@@ -260,8 +307,85 @@ struct StatusPanel: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if model.connectionState != .online, let updated = updatedText {
+                Label(updated, systemImage: "clock")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .cardStyle(prominent: true, accent: AppPalette.blue)
+    }
+
+    private var quickArchitectureMenu: some View {
+        Menu {
+            ForEach(NRArchitectureMode.quickAccessModes) { mode in
+                Button {
+                    pendingQuickArchitecture = mode
+                } label: {
+                    if model.controlState?.architecture == mode {
+                        Label(L10n.text(mode.label, language: language), systemImage: "checkmark")
+                    } else {
+                        Text(L10n.text(mode.label, language: language))
+                    }
+                }
+                .disabled(model.controlState?.architecture == mode)
+            }
+        } label: {
+            HStack(spacing: 3) {
+                if model.controlOperation == .loading || quickArchitectureAwaitingResult {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Text(model.controlState?.architecture.compactLabel ?? "—")
+                        .font(.caption2.weight(.semibold))
+                }
+            }
+            .foregroundStyle(AppPalette.blue)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(AppPalette.blue.opacity(0.10), in: Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .disabled(
+            model.controlState == nil ||
+                model.isControlBusy ||
+                pendingControl != nil ||
+                pendingQuickArchitecture != nil ||
+                !model.canRestoreControlDefaults
+        )
+        .help(L10n.text("Radio access preference", language: language))
+        .accessibilityLabel(L10n.text("Radio access preference", language: language))
+    }
+
+    private var quickArchitectureConfirmation: ControlConfirmation? {
+        pendingQuickArchitecture.map(ControlConfirmation.architecture)
+    }
+
+    private var quickArchitectureConfirmationPresented: Binding<Bool> {
+        Binding(
+            get: { pendingQuickArchitecture != nil },
+            set: { isPresented in
+                if !isPresented { pendingQuickArchitecture = nil }
+            }
+        )
+    }
+
+    private var quickArchitectureErrorPresented: Binding<Bool> {
+        Binding(
+            get: { quickArchitectureError != nil },
+            set: { isPresented in
+                if !isPresented { quickArchitectureError = nil }
+            }
+        )
+    }
+
+    private func performQuickArchitectureChange(_ mode: NRArchitectureMode) {
+        pendingQuickArchitecture = nil
+        quickArchitectureError = nil
+        model.setNRArchitecture(mode)
+        quickArchitectureAwaitingResult = model.controlOperation != nil
     }
 
     @ViewBuilder
@@ -321,7 +445,8 @@ struct StatusPanel: View {
             primaryCell: model.snapshot.ltePrimaryCell,
             secondaryCells: model.snapshot.lteSecondaryCells,
             mcc: model.snapshot.mcc,
-            mnc: model.snapshot.mnc
+            mnc: model.snapshot.mnc,
+            initiallyExpanded: initiallyShowCarrierAggregation
         )
     }
 
@@ -330,7 +455,8 @@ struct StatusPanel: View {
             primaryCell: model.snapshot.nrPrimaryCell,
             secondaryCells: model.snapshot.nrSecondaryCells,
             mcc: model.snapshot.mcc,
-            mnc: model.snapshot.mnc
+            mnc: model.snapshot.mnc,
+            initiallyExpanded: initiallyShowCarrierAggregation
         )
     }
 
@@ -379,7 +505,7 @@ struct StatusPanel: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
-                if let operation = model.controlOperation {
+                if let operation = model.controlOperation, !isRadioControlOperation(operation) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         Text(operation.localizedLabel(language: language))
@@ -397,11 +523,12 @@ struct StatusPanel: View {
 
                 if model.supportsControl(.networkScan), !model.scannedNetworks.isEmpty {
                     Divider()
-                    Text(L10n.text("Scanned networks", language: language))
-                        .font(.caption.weight(.semibold))
-                    Text(L10n.text("Reported access is the modem's scan result, not a complete list of every band offered by the operator.", language: language))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text(L10n.text("Scanned networks", language: language))
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        ContextHelp(message: L10n.text("Reported access is the modem's scan result, not a complete list of every band offered by the operator.", language: language))
+                    }
                     VStack(spacing: 7) {
                         ForEach(model.scannedNetworks) { network in
                             ScannedNetworkRow(
@@ -484,20 +611,33 @@ struct StatusPanel: View {
 
     private var architectureControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(L10n.text("Radio access preference", language: language))
-                .font(.caption.weight(.semibold))
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible())],
-                spacing: 6
-            ) {
-                architectureButton(.automatic)
-                architectureButton(.saOnly)
-                architectureButton(.nsaOnly)
-                architectureButton(.lteOnly)
+            HStack {
+                Text(L10n.text("Radio access preference", language: language))
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                ContextHelp(message: architecturePersistenceDescription)
             }
-            Text(architecturePersistenceDescription)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            Picker(L10n.text("Radio access preference", language: language), selection: Binding(
+                get: { model.controlState?.architecture ?? .unavailable },
+                set: { mode in
+                    guard mode != model.controlState?.architecture else { return }
+                    pendingControl = .architecture(mode)
+                }
+            )) {
+                if model.controlState?.architecture == nil || model.controlState?.architecture == .unavailable {
+                    Text("—").tag(NRArchitectureMode.unavailable)
+                }
+                ForEach([NRArchitectureMode.automatic, .saOnly, .nsaOnly, .lteOnly]) { mode in
+                    Text(mode.compactLabel).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(controlsDisabled || !model.canRestoreControlDefaults)
+
+            if case .changingArchitecture = model.controlOperation {
+                radioOperationProgress
+            }
             if model.controlState != nil, !model.canRestoreControlDefaults {
                 Label(
                     L10n.text("Automatic defaults were not available to capture. Reconnect or power-cycle the modem, then close and reopen this panel before changing radio access mode.", language: language),
@@ -522,17 +662,23 @@ struct StatusPanel: View {
         return operatorIdentity.formatted ?? L10n.text("Not registered", language: language)
     }
 
-    private func architectureButton(_ mode: NRArchitectureMode) -> some View {
-        let isSelected = model.controlState?.architecture == mode
-        return Button {
-            pendingControl = .architecture(mode)
-        } label: {
-            Text(L10n.text(mode.label, language: language))
-                .frame(maxWidth: .infinity)
+    private func isRadioControlOperation(_ operation: NetworkControlOperation) -> Bool {
+        switch operation {
+        case .changingArchitecture, .lockingNRBands, .lockingLTEBands: return true
+        default: return false
         }
-        .buttonStyle(.bordered)
-        .tint(isSelected ? AppPalette.blue : Color.gray)
-        .disabled(controlsDisabled || !model.canRestoreControlDefaults)
+    }
+
+    @ViewBuilder
+    private var radioOperationProgress: some View {
+        if let operation = model.controlOperation {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(operation.localizedLabel(language: language))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private var controlsDisabled: Bool {
@@ -540,16 +686,17 @@ struct StatusPanel: View {
         // causes a focused control to resign focus and visibly flashes the
         // entire card at short polling intervals. The model serializes a
         // control command behind an in-flight read on its own.
-        model.isControlBusy || pendingControl != nil
+        model.isControlBusy || pendingControl != nil || pendingQuickArchitecture != nil
     }
 
     private var bandLockControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(L10n.text("Band locking", language: language))
-                .font(.caption.weight(.semibold))
-            Text(bandLockPersistenceDescription)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(L10n.text("Band locking", language: language))
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                ContextHelp(message: bandLockPersistenceDescription)
+            }
 
             if model.supportsControl(.nrBandLock) {
                 BandSelectionPicker(
@@ -564,6 +711,7 @@ struct StatusPanel: View {
                     bandSelection.toggleNR(band)
                 }
                 HStack {
+                    if model.controlOperation == .lockingNRBands { radioOperationProgress }
                     if bandSelection.nrBands.isEmpty {
                         Label(
                             L10n.text("Select at least one band.", language: language),
@@ -599,6 +747,7 @@ struct StatusPanel: View {
                     bandSelection.toggleLTE(band)
                 }
                 HStack {
+                    if model.controlOperation == .lockingLTEBands { radioOperationProgress }
                     if bandSelection.lteBands.isEmpty {
                         Label(
                             L10n.text("Select at least one band.", language: language),
@@ -820,6 +969,19 @@ struct StatusPanel: View {
                     .frame(width: 190)
                 }
 
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(L10n.text("Panel width", language: language))
+                        .font(.caption.weight(.semibold))
+                    Picker(L10n.text("Panel width", language: language), selection: $model.panelWidth) {
+                        ForEach(PanelWidth.allCases) { width in
+                            Text(L10n.text(width.label, language: language)).tag(width)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: .infinity)
+                }
+
                 Toggle(L10n.text("Open at Login", language: language), isOn: Binding(
                     get: { launchAtLogin },
                     set: { newValue in
@@ -986,6 +1148,33 @@ struct StatusPanel: View {
     }
 }
 
+struct ContextHelp: View {
+    @Environment(\.appLanguage) private var language
+    @State private var isPresented = false
+    let message: String
+
+    var body: some View {
+        Button { isPresented.toggle() } label: {
+            Image(systemName: "info.circle")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(L10n.text("More information", language: language))
+        .help(L10n.text("More information", language: language))
+        .popover(isPresented: $isPresented) {
+            Text(message)
+                .font(.callout)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(16)
+                .frame(width: 300, alignment: .leading)
+        }
+    }
+}
+
 private struct InlineControlConfirmation: View {
     @Environment(\.appLanguage) private var language
 
@@ -1054,9 +1243,14 @@ private struct BandSelectionPicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                Spacer()
+                Text("\(selectedBands.count) / \(bands.count)")
+                    .font(.caption2.monospacedDigit())
+            }
+            .foregroundStyle(.secondary)
 
             if bands.isEmpty {
                 ProgressView()
@@ -1418,13 +1612,14 @@ private struct RadioCard: View {
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2),
                 alignment: .leading,
-                spacing: 7
+                spacing: 12
             ) {
-                SignalMetric(label: "RSRP", value: signal.rsrpDBm.map { "\($0) dBm" })
-                SignalMetric(label: "RSRQ", value: signal.rsrqDB.map { Self.metricText($0, unit: "dB") })
-                SignalMetric(label: "SNR", value: signal.snrDB.map { Self.metricText($0, unit: "dB") })
-                SignalMetric(label: "RSSI", value: signal.rssiDBm.map { "\($0) dBm" })
+                SignalMetric(label: "RSRP", value: signal.rsrpDBm.map(String.init), unit: "dBm", prominent: true)
+                SignalMetric(label: radio == .nr ? "SINR" : "SNR", value: signal.snrDB.map(Self.metricText), unit: "dB", prominent: true)
+                SignalMetric(label: "RSRQ", value: signal.rsrqDB.map(Self.metricText), unit: "dB")
+                SignalMetric(label: "RSSI", value: signal.rssiDBm.map(String.init), unit: "dBm")
             }
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, minHeight: 156, alignment: .topLeading)
         .cardStyle(accent: surfaceAccent)
@@ -1435,9 +1630,8 @@ private struct RadioCard: View {
         return raw ?? L10n.text("Channel unavailable", language: language)
     }
 
-    private static func metricText(_ value: Double, unit: String) -> String {
-        let number = value.rounded() == value ? "\(Int(value))" : String(format: "%.1f", value)
-        return "\(number) \(unit)"
+    private static func metricText(_ value: Double) -> String {
+        value.rounded() == value ? "\(Int(value))" : String(format: "%.1f", value)
     }
 
     fileprivate static func cellIDText(_ value: UInt64) -> String {
@@ -1448,18 +1642,26 @@ private struct RadioCard: View {
 private struct SignalMetric: View {
     let label: String
     let value: String?
+    let unit: String
+    var prominent = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(label)
-                .font(.caption2)
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
-            Text(value ?? "—")
-                .font(.caption.weight(.semibold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value ?? "—")
+                    .font(.system(size: prominent ? 18 : 12, weight: prominent ? .semibold : .medium, design: .rounded))
+                    .monospacedDigit()
+                Text(unit)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 }
@@ -1520,13 +1722,22 @@ private struct CarrierAggregationRowModel: Identifiable {
 }
 
 private struct CarrierAggregationCard: View {
-    @State private var isExpanded = false
+    @State private var isExpanded: Bool
 
     let title: String
     let accent: Color
     let rows: [CarrierAggregationRowModel]
     let mcc: String?
     let mnc: String?
+
+    init(title: String, accent: Color, rows: [CarrierAggregationRowModel], mcc: String?, mnc: String?, initiallyExpanded: Bool = false) {
+        self.title = title
+        self.accent = accent
+        self.rows = rows
+        self.mcc = mcc
+        self.mnc = mnc
+        _isExpanded = State(initialValue: initiallyExpanded)
+    }
 
     var body: some View {
         CollapsibleCard(
@@ -1571,28 +1782,28 @@ private struct CarrierAggregationRow: View {
     let mnc: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
                 Text(row.role.localizedLabel(language: language))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .frame(width: 48, alignment: .leading)
                 Text(row.band ?? L10n.text("Unknown", language: language))
-                    .font(.caption.monospaced().weight(.semibold))
-                Spacer(minLength: 4)
-                if let state = row.state {
-                    Text(state.localizedLabel(language: language))
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(state == .active ? accent : .secondary)
-                }
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(row.bandwidthMHz.map(DeviceSnapshot.bandwidthText) ?? "— MHz")
+                    .font(.caption2.monospacedDigit())
+                    .frame(width: 64, alignment: .trailing)
+                Text((row.state ?? .unknown).localizedLabel(language: language))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(row.isActive ? accent : .secondary)
+                    .frame(width: 68, alignment: .trailing)
             }
+            .lineLimit(1)
 
-            HStack(spacing: 5) {
-                if let frequency = row.frequencyMHz {
-                    Text(DeviceSnapshot.frequencyText(frequency))
-                }
-                if let bandwidth = row.bandwidthMHz {
-                    Text(DeviceSnapshot.bandwidthText(bandwidth))
-                }
+            HStack(spacing: 8) {
+                Text(row.frequencyMHz.map(DeviceSnapshot.frequencyText) ?? "— MHz")
+                Spacer(minLength: 0)
                 switch row.cellReference {
                 case let .global(cellID):
                     CellIDLink(cellID: cellID, radio: row.radio, mcc: mcc, mnc: mnc)
@@ -1605,17 +1816,17 @@ private struct CarrierAggregationRow: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+            .minimumScaleFactor(0.85)
 
-            HStack(spacing: 10) {
-                CompactSignalMetric(label: "RSRP", value: row.signal.rsrpDBm.map { "\($0)" })
-                CompactSignalMetric(label: "RSRQ", value: row.signal.rsrqDB.map(Self.metricText))
-                CompactSignalMetric(label: "RSSI", value: row.signal.rssiDBm.map { "\($0)" })
-                CompactSignalMetric(label: "SNR", value: row.signal.snrDB.map(Self.metricText))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 4), spacing: 6) {
+                SignalMetric(label: "RSRP", value: row.signal.rsrpDBm.map(String.init), unit: "dBm")
+                SignalMetric(label: row.radio == .nr ? "SINR" : "SNR", value: row.signal.snrDB.map(Self.metricText), unit: "dB")
+                SignalMetric(label: "RSRQ", value: row.signal.rsrqDB.map(Self.metricText), unit: "dB")
+                SignalMetric(label: "RSSI", value: row.signal.rssiDBm.map(String.init), unit: "dBm")
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(10)
+        .background(Color.primary.opacity(row.isActive ? 0.045 : 0.018), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .help(helpText)
     }
 
@@ -1635,6 +1846,7 @@ private struct NRCarrierAggregationCard: View {
     let secondaryCells: [NRCarrier]
     let mcc: String?
     let mnc: String?
+    var initiallyExpanded = false
 
     var body: some View {
         CarrierAggregationCard(
@@ -1644,7 +1856,8 @@ private struct NRCarrierAggregationCard: View {
                 .enumerated()
                 .map { CarrierAggregationRowModel(nr: $0.element, position: $0.offset) },
             mcc: mcc,
-            mnc: mnc
+            mnc: mnc,
+            initiallyExpanded: initiallyExpanded
         )
     }
 }
@@ -1654,6 +1867,7 @@ private struct LTECarrierAggregationCard: View {
     let secondaryCells: [LTECarrier]
     let mcc: String?
     let mnc: String?
+    var initiallyExpanded = false
 
     var body: some View {
         CarrierAggregationCard(
@@ -1663,7 +1877,8 @@ private struct LTECarrierAggregationCard: View {
                 .enumerated()
                 .map { CarrierAggregationRowModel(lte: $0.element, position: $0.offset) },
             mcc: mcc,
-            mnc: mnc
+            mnc: mnc,
+            initiallyExpanded: initiallyExpanded
         )
     }
 }
@@ -1903,35 +2118,24 @@ private struct CardStyle: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .padding(prominent ? 13 : 11)
-            .background {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(.thinMaterial)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(background)
-                    }
-            }
+            .padding(14)
+            .background(background, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(border, lineWidth: 0.5)
             )
     }
 
     private var background: Color {
         if let tint { return tint.opacity(0.09) }
-        if prominent {
-            return Color(nsColor: .controlBackgroundColor)
-                .opacity(colorScheme == .dark ? 0.38 : 0.52)
-        }
-        return Color(nsColor: .controlBackgroundColor)
-            .opacity(colorScheme == .dark ? 0.28 : 0.42)
+        return colorScheme == .dark
+            ? Color(white: prominent ? 0.16 : 0.14)
+            : Color(nsColor: .controlBackgroundColor)
     }
 
     private var border: Color {
         if let tint { return tint.opacity(0.18) }
-        if let accent { return accent.opacity(0.14) }
-        return Color.primary.opacity(0.075)
+        return Color.primary.opacity(colorScheme == .dark ? 0.09 : 0.065)
     }
 }
 

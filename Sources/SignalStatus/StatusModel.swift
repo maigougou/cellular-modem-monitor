@@ -73,6 +73,9 @@ final class StatusModel: ObservableObject {
     @Published var ztePassword: String
     @Published var refreshInterval: Double
     @Published var menuBarStyle: MenuBarStyle
+    @Published var panelWidth: PanelWidth {
+        didSet { defaults.set(panelWidth.rawValue, forKey: Key.panelWidth) }
+    }
     @Published var language: AppLanguage {
         didSet {
             defaults.set(language.rawValue, forKey: Key.language)
@@ -120,6 +123,7 @@ final class StatusModel: ObservableObject {
         static let interval = "refreshInterval"
         static let intervalSchema = "refreshIntervalSchema"
         static let menuStyle = "menuBarStyle"
+        static let panelWidth = "panelWidth"
         static let language = "appLanguage"
     }
 
@@ -133,7 +137,8 @@ final class StatusModel: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         credentialStore: any CredentialStoring = LocalCredentialStore.shared,
-        speedTestRunner: any SpeedTestRunning = OoklaSpeedTestRunner()
+        speedTestRunner: any SpeedTestRunning = OoklaSpeedTestRunner(),
+        demoSnapshot: DeviceSnapshot? = nil
     ) {
         self.defaults = defaults
         self.credentialStore = credentialStore
@@ -152,7 +157,7 @@ final class StatusModel: ObservableObject {
         let arguments = ProcessInfo.processInfo.arguments
         let isSADemo = arguments.contains("--demo-sa")
         let showsDemoControls = arguments.contains("--demo-controls")
-        demoMode = ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"] == "1" ||
+        demoMode = demoSnapshot != nil || ProcessInfo.processInfo.environment["SIGNAL_STATUS_DEMO"] == "1" ||
             arguments.contains("--demo") || arguments.contains("--demo-nsa") || isSADemo || showsDemoControls
         modemSelection = ModemSelection(
             rawValue: defaults.string(forKey: Key.modemSelection) ?? ""
@@ -203,6 +208,7 @@ final class StatusModel: ObservableObject {
             defaults.set(Self.currentIntervalSchema, forKey: Key.intervalSchema)
         }
         menuBarStyle = MenuBarStyle(rawValue: defaults.string(forKey: Key.menuStyle) ?? "") ?? .detailed
+        panelWidth = PanelWidth(rawValue: defaults.string(forKey: Key.panelWidth) ?? "") ?? .standard
         language = AppLanguage.resolved(
             storedValue: defaults.string(forKey: Key.language),
             preferredLanguages: Locale.preferredLanguages
@@ -269,6 +275,7 @@ final class StatusModel: ObservableObject {
                 deviceFirmware: "326.73_0R19",
                 updatedAt: Date()
             )
+            if let demoSnapshot { snapshot = demoSnapshot }
             activeModem = ActiveModem(
                 identity: ModemIdentity(
                     kind: .vos5G,

@@ -11,9 +11,9 @@ opened **Network & radio controls** panel provides verified controls through
 either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 
 <p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor showing a 5G SA n77 connection with NR carrier aggregation">
+  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor showing a 5G NSA n77 and B7 connection with carrier aggregation">
   <br>
-  <sub>Live SA n77 status with active NR component carriers.</sub>
+  <sub>Unified NR/LTE status and component-carrier presentation.</sub>
 </p>
 
 ## Features
@@ -39,12 +39,15 @@ either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 - An interface-bound official Ookla Speedtest CLI test with live
   download/upload rates and final latency, jitter, packet-loss and server data
 - Manual refresh, 1/5/10/15/30/60-second polling, launch at login, faster
-  recovery polling and copyable diagnostics
+  recovery polling, copyable diagnostics, and remembered compact/standard/wide
+  panel widths
 
 ### Device-control features
 
 - Network scan, manual PLMN selection and automatic operator selection
 - Auto SA/NSA, SA only, NSA only and LTE only preferences with exact read-back
+- A quick Auto/SA/NSA/LTE menu in the Current connection card, using the same
+  confirmation and verified backend operation as the full controls panel
 - NR and LTE band locks with allowlist validation and automatic rollback
 - A backend-specific restore operation with final read-back verification
 - Physical-device identity verification before every write

@@ -9,9 +9,9 @@
 可通过 VOS SSH/QMI 后端或 ZTE 认证 Web UBus 后端执行带验证的控制。
 
 <p align="center">
-  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor 显示 5G SA n77 连接与 NR 载波聚合">
+  <img src="assets/cellular-modem-monitor-sa-n77-nr-ca.png" width="360" alt="Cellular Modem Monitor 显示 5G NSA n77 与 B7 连接和载波聚合">
   <br>
-  <sub>SA n77 实时状态与活动 NR 组成载波。</sub>
+  <sub>统一的 NR/LTE 状态和组成载波界面。</sub>
 </p>
 
 ## 功能
@@ -32,12 +32,15 @@
 - 提供英文和简体中文界面，可即时切换语言
 - 提供绑定当前 modem 接口的官方 Ookla Speedtest CLI 测速，显示实时下载/上传
   速度及最终延迟、抖动、丢包率和服务器信息
-- 支持手动刷新、1/5/10/15/30/60 秒轮询、登录时启动、快速恢复轮询和复制诊断
+- 支持手动刷新、1/5/10/15/30/60 秒轮询、登录时启动、快速恢复轮询、复制诊断，
+  并记忆紧凑/标准/宽三档面板宽度
 
 ### 设备控制功能
 
 - 扫描网络、手动选择 PLMN 和恢复自动选网
 - Auto SA/NSA、SA only、NSA only、LTE only，并精确读回验证
+- Current connection 卡片提供 Auto/SA/NSA/LTE 快捷菜单，与完整控制面板共用确认、
+  后端写入及读回验证流程
 - 锁定 NR/LTE 频段，按允许列表校验并支持自动失败回滚
 - 后端专属的恢复操作及最终读回验证
 - 每次写入前验证物理设备身份
