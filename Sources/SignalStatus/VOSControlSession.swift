@@ -4,6 +4,7 @@ import Foundation
 /// Keeping transport mechanics behind this protocol makes cancellation,
 /// rollback and identity binding testable without an SSH-connected modem.
 protocol VOSControlTransport: Sendable {
+    func requestRestart(configuration: DeviceConfiguration) async throws
     func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String
     func fetchOperatorSelection(configuration: DeviceConfiguration) async throws -> OperatorSelection
     func scanNetworks(configuration: DeviceConfiguration) async throws -> [CellularNetwork]
@@ -24,6 +25,12 @@ protocol VOSControlTransport: Sendable {
     ) async throws -> NRSystemSelectionPreferences
 }
 
+extension VOSControlTransport {
+    func requestRestart(configuration: DeviceConfiguration) async throws {
+        throw ModemBackendError.unsupportedCapability(.deviceRestart)
+    }
+}
+
 extension VOSClient: VOSControlTransport {}
 
 struct VOSControlTiming: Sendable {
@@ -41,9 +48,9 @@ struct VOSControlTiming: Sendable {
 ///
 /// All VOS-specific ordering and exact QMI tuple rollback live here rather
 /// than in StatusModel, so the UI can drive every modem through one contract.
-actor VOSControlSession: ModemControlSession {
+actor VOSControlSession: ModemRestartSession {
     nonisolated let kind = ModemKind.vos5G
-    nonisolated let capabilities = ModemCapability.deviceControls
+    nonisolated let capabilities = ModemCapability.deviceControls.union(.deviceRestart)
     nonisolated let stableIdentifier: String
 
     private let client: any VOSControlTransport
@@ -86,6 +93,19 @@ actor VOSControlSession: ModemControlSession {
 
     func invalidate() async {
         invalidated = true
+    }
+
+    func requestRestart() async throws {
+        guard !operationInProgress else {
+            throw ModemControlError.invalidState("Another VOS control operation is already in progress.")
+        }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        try await validateDevice()
+        try Task.checkCancellation()
+        guard !invalidated else { throw ModemControlError.deviceChanged }
+        invalidated = true
+        try await client.requestRestart(configuration: configuration)
     }
 
     func refresh() async throws -> ModemControlState {

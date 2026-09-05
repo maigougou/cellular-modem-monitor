@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import ServiceManagement
 
@@ -40,6 +41,46 @@ enum ModemOperationInterruption {
     }
 }
 
+/// High-frequency samples do not invalidate settings, controls or menu chrome.
+/// Keep the latest timestamp even when the visible values are unchanged.
+@MainActor
+final class RadioSnapshotStore: ObservableObject {
+    @Published private var revision: UInt64 = 0
+    private(set) var snapshot = DeviceSnapshot.empty
+    private var visibleConsumers: Set<UUID> = []
+    private var panelVisible = true
+
+    func setPanelVisible(_ visible: Bool) {
+        guard panelVisible != visible else { return }
+        panelVisible = visible
+        if visible, !visibleConsumers.isEmpty { revision &+= 1 }
+    }
+
+    func setVisible(_ visible: Bool, consumer: UUID) {
+        if visible {
+            if visibleConsumers.insert(consumer).inserted, panelVisible { revision &+= 1 }
+        } else {
+            visibleConsumers.remove(consumer)
+        }
+    }
+
+    func update(_ next: DeviceSnapshot) {
+        var comparable = next
+        comparable.updatedAt = snapshot.updatedAt
+        if comparable != snapshot, panelVisible, !visibleConsumers.isEmpty { revision &+= 1 }
+        snapshot = next
+    }
+}
+
+@MainActor
+final class RefreshActivity: ObservableObject {
+    @Published var isRefreshing = false
+    @Published private(set) var manualRequests = 0
+
+    func beginManualRequest() { manualRequests += 1 }
+    func endManualRequest() { manualRequests = max(0, manualRequests - 1) }
+}
+
 @MainActor
 final class StatusModel: ObservableObject {
 #if README_SCREENSHOTS
@@ -55,10 +96,23 @@ final class StatusModel: ObservableObject {
         snapshot.deviceFirmware = nil
     }
 #endif
-    @Published private(set) var snapshot = DeviceSnapshot.empty
+    let radioSnapshots = RadioSnapshotStore()
+    let refreshActivity = RefreshActivity()
+    private(set) var snapshot: DeviceSnapshot {
+        get { radioSnapshots.snapshot }
+        set {
+            if snapshot.panelContext != newValue.panelContext { objectWillChange.send() }
+            radioSnapshots.update(newValue)
+        }
+    }
     @Published private(set) var connectionState: ConnectionState = .connecting
     @Published private(set) var lastError: String?
-    @Published private(set) var isRefreshing = false
+    private(set) var isRefreshing: Bool {
+        get { refreshActivity.isRefreshing }
+        set {
+            if refreshActivity.isRefreshing != newValue { refreshActivity.isRefreshing = newValue }
+        }
+    }
     @Published private(set) var menuBarTitle = "Cellular …"
     @Published private(set) var operatorSelection: OperatorSelection?
     @Published private(set) var scannedNetworks: [CellularNetwork] = []
@@ -66,10 +120,13 @@ final class StatusModel: ObservableObject {
     @Published private(set) var controlOperation: NetworkControlOperation?
     @Published private(set) var controlError: String?
     @Published private(set) var controlNotice: String?
+    @Published private(set) var isRestartingDevice = false
+    @Published private(set) var restartNotice: String?
+    @Published private(set) var restartError: String?
     @Published private(set) var activeModem: ActiveModem? {
         didSet {
             speedTestModel.updateActiveModem(
-                activeModem,
+                isRestartingDevice ? nil : activeModem,
                 settingsGeneration: settingsGeneration
             )
         }
@@ -151,7 +208,8 @@ final class StatusModel: ObservableObject {
         defaults: UserDefaults = .standard,
         credentialStore: any CredentialStoring = LocalCredentialStore.shared,
         speedTestRunner: any SpeedTestRunning = OoklaSpeedTestRunner(),
-        demoSnapshot: DeviceSnapshot? = nil
+        demoSnapshot: DeviceSnapshot? = nil,
+        startImmediately: Bool = true
     ) {
         self.defaults = defaults
         self.credentialStore = credentialStore
@@ -355,7 +413,7 @@ final class StatusModel: ObservableObject {
 
         menuBarTitle = L10n.text("Cellular …", language: language)
 
-        start()
+        if startImmediately { start() }
     }
 
     deinit {
@@ -379,7 +437,79 @@ final class StatusModel: ObservableObject {
         return false
     }
 
-    var isControlBusy: Bool { controlOperation != nil }
+    var isControlBusy: Bool { controlOperation != nil || isRestartingDevice }
+
+    var restartTarget: ModemRestartTarget? {
+        guard !demoMode, let activeModem,
+              activeModem.capabilities.contains(.deviceRestart) else { return nil }
+        return ModemRestartTarget(
+            modemID: activeModem.id, endpoint: activeModem.endpoint,
+            settingsGeneration: settingsGeneration,
+            displayName: activeModem.identity.displayName
+        )
+    }
+
+    var canRestartDevice: Bool {
+        restartTarget != nil && connectionState == .online && !isControlBusy && !speedTestModel.isRunning
+    }
+
+    func dismissRestartMessage() {
+        restartNotice = nil
+        restartError = nil
+    }
+
+    func restartDevice(_ target: ModemRestartTarget) {
+        // The confirmation belongs to the exact click-time device and saved
+        // credentials generation. Never retarget a delayed confirmation.
+        guard canRestartDevice, restartTarget == target else { return }
+        let credentials = currentCredentials
+        isRestartingDevice = true
+        dismissRestartMessage()
+        speedTestModel.updateActiveModem(nil, settingsGeneration: settingsGeneration)
+        Task { await runRestart(target: target, credentials: credentials) }
+    }
+
+    private func runRestart(
+        target: ModemRestartTarget,
+        credentials: ModemConnectionCredentials
+    ) async {
+        defer {
+            isRestartingDevice = false
+            speedTestModel.updateActiveModem(activeModem, settingsGeneration: settingsGeneration)
+            refreshNow()
+        }
+        do {
+            while isRefreshing { try await Task.sleep(nanoseconds: 50_000_000) }
+            guard restartTarget == target else { throw ModemControlError.deviceChanged }
+            guard let coordinator else { throw ModemCoordinatorError.noMatchingModem }
+            let controlSession = try await coordinator.controlSession(credentials: credentials)
+            guard restartTarget == target else { throw ModemControlError.deviceChanged }
+            guard let session = controlSession as? any ModemRestartSession else {
+                throw ModemBackendError.unsupportedCapability(.deviceRestart)
+            }
+            try await session.requestRestart()
+            guard settingsGeneration == target.settingsGeneration else { return }
+            restartNotice = L10n.text("Restart requested. Monitoring will reconnect automatically.", language: language)
+            await retireRestartedDevice(target)
+        } catch {
+            guard settingsGeneration == target.settingsGeneration else { return }
+            restartError = error as? ModemControlError == .deviceChanged
+                ? L10n.text("The device changed. Open Restart again for the current device.", language: language)
+                : localizedError(error)
+            // Invalidate even on a rejected/ambiguous attempt: the session may
+            // already be retired. Read-only discovery establishes a fresh one.
+            await retireRestartedDevice(target)
+        }
+    }
+
+    private func retireRestartedDevice(_ target: ModemRestartTarget) async {
+        guard restartTarget == target else { return }
+        activeModem = nil
+        clearControlState()
+        lastError = nil
+        connectionState = .connecting
+        await coordinator?.invalidateActiveModem()
+    }
     var canRestoreControlDefaults: Bool { controlState?.canRestoreDefaults == true }
     var supportsDeviceControls: Bool {
         activeModem?.capabilities.supportsDeviceControlSurface == true
@@ -451,7 +581,10 @@ final class StatusModel: ObservableObject {
 
     func refreshNow() {
         Task { [weak self] in
-            await self?.refresh()
+            guard let self else { return }
+            refreshActivity.beginManualRequest()
+            defer { refreshActivity.endManualRequest() }
+            await refresh()
         }
     }
 
@@ -500,6 +633,7 @@ final class StatusModel: ObservableObject {
     ) {
         guard !demoMode,
               supportsControlSession,
+              !isRestartingDevice,
               controlOperation == nil,
               queuedControlToken == nil,
               let activeModem
@@ -740,43 +874,7 @@ final class StatusModel: ObservableObject {
             // result to the visible model.
             try Task.checkCancellation()
             guard settingsGeneration == generation else { return }
-            let latest = result.snapshot
-            let previousActiveModemID = activeModem?.id
-            let previousActiveEndpoint = activeModem?.endpoint
-            let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
-            let controlInvalidation = ControlPresentationInvalidation.transition(
-                previousModemID: previousActiveModemID,
-                nextModemID: result.activeModem.id,
-                previousEndpoint: previousActiveEndpoint,
-                nextEndpoint: result.activeModem.endpoint,
-                previousPLMN: snapshot.plmn,
-                nextPLMN: latest.plmn
-            )
-            snapshot = latest
-            activeModem = result.activeModem
-            switch controlInvalidation {
-            case .none:
-                break
-            case .operatorContext:
-                // A powered SIM replacement can leave the USB device and SSH
-                // identity unchanged while registration moves to a different
-                // PLMN (or temporarily disappears). Do not keep presenting a
-                // selection or scan result captured for the previous card.
-                // Serving PLMN is not a SIM identity: a normal manual operator
-                // change must not discard the physical modem's restore tuple.
-                clearOperatorContext()
-            case .all:
-                clearControlState()
-            }
-            persistLastSuccessful(result)
-            consecutiveFailures = 0
-            // During a physical SIM swap QMI remains reachable but may report
-            // no serving band while the new card initializes. Treat that as a
-            // reconnecting state so polling accelerates to the five-second
-            // recovery cadence instead of waiting the full user interval.
-            connectionState = latest.hasRadioData ? .online : .connecting
-            lastError = nil
-            updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged)
+            applyReadResult(result)
         } catch {
             guard !ModemOperationInterruption.shouldIgnoreRefreshFailure(
                 error,
@@ -806,6 +904,33 @@ final class StatusModel: ObservableObject {
                 updateMenuTitle(force: true)
             }
         }
+    }
+
+    /// Commit an already validated read. The async caller checks cancellation
+    /// and settings generation before reaching this synchronous boundary.
+    func applyReadResult(_ result: ModemReadResult) {
+        let latest = result.snapshot
+        let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
+        let invalidation = ControlPresentationInvalidation.transition(
+            previousModemID: activeModem?.id, nextModemID: result.activeModem.id,
+            previousEndpoint: activeModem?.endpoint, nextEndpoint: result.activeModem.endpoint,
+            previousPLMN: snapshot.plmn, nextPLMN: latest.plmn
+        )
+        snapshot = latest
+        if activeModem != result.activeModem { activeModem = result.activeModem }
+        switch invalidation {
+        case .none: break
+        // Serving PLMN is not SIM identity; preserve the modem restore tuple.
+        case .operatorContext: clearOperatorContext()
+        case .all: clearControlState()
+        }
+        persistLastSuccessful(result)
+        consecutiveFailures = 0
+        // Missing serving bands during SIM swaps still use recovery polling.
+        let nextConnectionState: ConnectionState = latest.hasRadioData ? .online : .connecting
+        if connectionState != nextConnectionState { connectionState = nextConnectionState }
+        if lastError != nil { lastError = nil }
+        updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged)
     }
 
     private func runControl(
@@ -1113,7 +1238,7 @@ final class StatusModel: ObservableObject {
         }
 
         if force || menuBarTitle.hasPrefix("Cellular") || menuBarTitle.hasPrefix("蜂窝网络") {
-            menuBarTitle = proposed
+            if menuBarTitle != proposed { menuBarTitle = proposed }
             candidateTitle = nil
             candidateTitleCount = 0
             return
@@ -1126,7 +1251,7 @@ final class StatusModel: ObservableObject {
             candidateTitleCount = 1
         }
         if candidateTitleCount >= 2 {
-            menuBarTitle = proposed
+            if menuBarTitle != proposed { menuBarTitle = proposed }
             candidateTitle = nil
             candidateTitleCount = 0
         }
@@ -1177,10 +1302,13 @@ final class StatusModel: ObservableObject {
     }
 
     private func persistLastSuccessful(_ result: ModemReadResult) {
-        lastSuccessfulScopeKey = result.lastSuccessfulScopeKey
-        lastSuccessfulEndpoint = result.lastSuccessfulEndpoint
-        defaults.set(result.lastSuccessfulScopeKey, forKey: Key.lastSuccessfulScopeKey)
-        if let data = try? JSONEncoder().encode(result.lastSuccessfulEndpoint) {
+        if lastSuccessfulScopeKey != result.lastSuccessfulScopeKey {
+            lastSuccessfulScopeKey = result.lastSuccessfulScopeKey
+            defaults.set(result.lastSuccessfulScopeKey, forKey: Key.lastSuccessfulScopeKey)
+        }
+        if lastSuccessfulEndpoint != result.lastSuccessfulEndpoint,
+           let data = try? JSONEncoder().encode(result.lastSuccessfulEndpoint) {
+            lastSuccessfulEndpoint = result.lastSuccessfulEndpoint
             defaults.set(data, forKey: Key.lastSuccessfulEndpoint)
         }
     }

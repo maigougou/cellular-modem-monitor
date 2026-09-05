@@ -225,12 +225,19 @@ Choose a modem backend, enter its existing credentials, and configure polling, l
 
 - Network scan, manual PLMN selection and automatic operator selection
 - Auto SA/NSA, SA only, NSA only and LTE only preferences with exact read-back
-- A quick Auto/SA/NSA/LTE menu in the Current connection card, using the same
+- A quick Auto SA/NSA → SA only → NSA only → LTE only menu in the Current connection card, using the same
   confirmation and verified backend operation as the full controls panel
 - NR and LTE band locks with allowlist validation and automatic rollback
 - A backend-specific restore operation with final read-back verification
 - Physical-device identity verification before every write
 - Read-only LTE neighbor measurements when the active backend reports them
+
+The bottom toolbar provides **Copy · Restart · Web UI · About · Quit** directly.
+Restart asks for confirmation showing the bound device and management address.
+It uses authenticated SSH on VOS or the vendor Web UBus reboot action on ZTE;
+it is unavailable during a speed test or another control operation. A successful
+reply means the request was accepted, not that boot has completed. Monitoring
+reconnects automatically; a lost reply never triggers an automatic second restart.
 
 
 Controls are routed through the currently active backend rather than directly

@@ -127,6 +127,38 @@ actor VOSClient {
         return try ATCOPSParser.selection(from: output)
     }
 
+    /// A short detached delay lets SSH acknowledge scheduling before the
+    /// device disconnects. No radio/NV settings or boot configuration change.
+    static let restartScript = """
+    set -eu
+    test -x /sbin/reboot
+    command -v nohup >/dev/null
+    nohup /bin/sh -c 'sleep 2; exec /sbin/reboot' </dev/null >/dev/null 2>&1 &
+    printf 'CMM_RESTART_REQUESTED\\n'
+    """
+
+    func requestRestart(configuration: DeviceConfiguration) async throws {
+        guard let host = configuration.sshHost else { throw VOSClientError.invalidHost }
+        try Task.checkCancellation()
+        let output: Data
+        do {
+            output = try await executor.run(
+                host: host,
+                username: configuration.username,
+                password: configuration.password,
+                sourceAddress: configuration.sourceAddress,
+                script: Self.restartScript
+            )
+        } catch let error as VOSClientError where error == .authenticationFailed {
+            throw error
+        } catch {
+            throw ModemRestartError.outcomeUnknown
+        }
+        guard String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "CMM_RESTART_REQUESTED" else {
+            throw ModemRestartError.outcomeUnknown
+        }
+    }
+
     func scanNetworks(configuration: DeviceConfiguration) async throws -> [CellularNetwork] {
         let output = try await runAT("AT+COPS=?", configuration: configuration, timeout: 155)
         try ATCOPSParser.requireOK(output)

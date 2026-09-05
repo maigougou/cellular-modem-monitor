@@ -2,6 +2,11 @@ import XCTest
 @testable import SignalStatus
 
 final class SignalStatusTests: XCTestCase {
+    func testEfficiencyWithoutLosingFreshnessOrInterfaceBinding() async {
+        let failures = await EfficiencyRegression.run()
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+
     private let lteBand = "02010031002400020400000000000106000108790084031108000108790084030000120600010805000000"
     private let nrAndLTE = "0201003100270002040000000000110f00020c0d0180ac090008790084030000120b00020c0d0000000805000000"
     private let nrCAAndLTE = "0201003100330002040000000000111600030c0c0160c609000c0c0180ac090008790084030000121000030c0d0000000c0b0000000805000000"
@@ -35,12 +40,38 @@ final class SignalStatusTests: XCTestCase {
     func testQuickArchitectureMenuOrderAndCompactLabels() {
         XCTAssertEqual(
             NRArchitectureMode.quickAccessModes,
-            [.saOnly, .nsaOnly, .automatic, .lteOnly]
+            [.automatic, .saOnly, .nsaOnly, .lteOnly]
         )
         XCTAssertEqual(
             NRArchitectureMode.quickAccessModes.map(\.compactLabel),
-            ["SA", "NSA", "Auto", "LTE"]
+            ["Auto", "SA", "NSA", "LTE"]
         )
+        XCTAssertEqual(
+            NRArchitectureMode.quickAccessModes.map(\.label),
+            ["Auto SA/NSA", "SA only", "NSA only", "LTE only"]
+        )
+    }
+
+    func testQuickArchitectureTitleRemainsVisibleThroughoutModeChange() {
+        let phases: [(NRArchitectureMode?, NetworkControlOperation?, String, Bool)] = [
+            (nil, .loading, "—", true),
+            (.automatic, nil, "Auto SA/NSA", false),
+            (.automatic, .changingArchitecture(.saOnly), "SA only…", true),
+            (.saOnly, .changingArchitecture(.saOnly), "SA only…", true),
+            (.saOnly, nil, "SA only", false),
+            (.saOnly, .loading, "SA only", true),
+            (.saOnly, .changingArchitecture(.automatic), "Auto SA/NSA…", true),
+            (.saOnly, nil, "SA only", false), // rollback must not keep the requested Auto label
+            (.automatic, nil, "Auto SA/NSA", false),
+            (.nsaOnly, nil, "NSA only", false),
+            (.lteOnly, nil, "LTE only", false),
+            (nil, nil, "—", false)
+        ]
+        for (mode, operation, title, busy) in phases {
+            let state = QuickArchitectureMenuState(confirmedMode: mode, operation: operation)
+            XCTAssertEqual(state.title, title)
+            XCTAssertEqual(state.isBusy, busy)
+        }
     }
 
     @MainActor

@@ -317,7 +317,7 @@ enum NRArchitectureMode: String, CaseIterable, Identifiable, Equatable, Sendable
 
     var id: String { rawValue }
 
-    static let quickAccessModes: [Self] = [.saOnly, .nsaOnly, .automatic, .lteOnly]
+    static let quickAccessModes: [Self] = [.automatic, .saOnly, .nsaOnly, .lteOnly]
 
     var compactLabel: String {
         switch self {
@@ -337,6 +337,31 @@ enum NRArchitectureMode: String, CaseIterable, Identifiable, Equatable, Sendable
         case .lteOnly: return "LTE only"
         case .unavailable: return "Unavailable"
         }
+    }
+}
+
+struct QuickArchitectureMenuState: Equatable {
+    private let displayedMode: NRArchitectureMode
+    private let isChangingMode: Bool
+    let isBusy: Bool
+
+    init(confirmedMode: NRArchitectureMode?, operation: NetworkControlOperation?) {
+        isBusy = operation != nil
+        if case let .changingArchitecture(target) = operation {
+            // The ellipsis denotes a requested mode, not a verified result.
+            displayedMode = target
+            isChangingMode = true
+        } else {
+            displayedMode = confirmedMode ?? .unavailable
+            isChangingMode = false
+        }
+    }
+
+    var title: String { title(language: .english) }
+
+    func title(language: AppLanguage) -> String {
+        let label = displayedMode == .unavailable ? "—" : displayedMode.localizedLabel(language: language)
+        return label + (isChangingMode ? "…" : "")
     }
 }
 
@@ -854,6 +879,24 @@ struct LTECellNeighbor: Equatable, Sendable, Identifiable {
 }
 
 struct DeviceSnapshot: Equatable, Sendable {
+    /// Only identity/header/details changes need to notify the entire panel.
+    struct PanelContext: Equatable {
+        let host: String
+        let interfaceName: String?
+        let operatorName: String?
+        let mcc: String?
+        let mnc: String?
+        let hasRadioData: Bool
+        let moduleVersion: String?
+        let deviceFirmware: String?
+    }
+
+    var panelContext: PanelContext {
+        PanelContext(host: host, interfaceName: interfaceName, operatorName: operatorName,
+                     mcc: mcc, mnc: mnc, hasRadioData: hasRadioData,
+                     moduleVersion: moduleVersion, deviceFirmware: deviceFirmware)
+    }
+
     var host: String
     var interfaceName: String?
     var operatorName: String?

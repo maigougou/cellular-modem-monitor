@@ -34,6 +34,7 @@ struct StatusPanel: View {
     @State private var showNetworkControls = false
     @State private var pendingControl: ControlConfirmation?
     @State private var pendingQuickArchitecture: NRArchitectureMode?
+    @State private var pendingRestart: ModemRestartTarget?
     @State private var quickArchitectureAwaitingResult = false
     @State private var quickArchitectureError: String?
     @State private var launchAtLogin = false
@@ -41,6 +42,7 @@ struct StatusPanel: View {
     @State private var bandSelection = ModemBandSelectionDraft()
     @State private var measuredContentHeight: CGFloat = 320
     @State private var measuredChromeHeight: CGFloat = 96
+    @State private var isPanelVisible = false
     private let panelHeightLimit: CGFloat?
     private let initiallyShowCarrierAggregation: Bool
     private let initiallyShowSpeedTest: Bool
@@ -88,16 +90,21 @@ struct StatusPanel: View {
                         if let error = model.lastError, model.connectionState != .online {
                             errorCard(error)
                         }
-                        heroCard
-                        radioCards
-                        if !model.snapshot.nrSecondaryCells.isEmpty {
-                            nrCarrierAggregationCard
-                        }
-                        if !model.snapshot.lteSecondaryCells.isEmpty {
-                            carrierAggregationCard
+                        LiveSnapshotContent(store: model.radioSnapshots) {
+                            VStack(spacing: 10) {
+                                heroCard
+                                radioCards
+                                if !model.snapshot.nrSecondaryCells.isEmpty {
+                                    nrCarrierAggregationCard
+                                }
+                                if !model.snapshot.lteSecondaryCells.isEmpty {
+                                    carrierAggregationCard
+                                }
+                            }
                         }
                         if model.supportsDeviceControls {
                             networkControlsCard
+                                .disabled(pendingRestart != nil)
                                 .id("network-controls")
                         }
                         SpeedTestCard(
@@ -175,6 +182,7 @@ struct StatusPanel: View {
                     // carry them to another device or connection path.
                     pendingControl = nil
                     pendingQuickArchitecture = nil
+                    pendingRestart = nil
                     quickArchitectureAwaitingResult = false
                     quickArchitectureError = nil
                     bandSelection.synchronize(with: model.controlState, force: true)
@@ -200,6 +208,12 @@ struct StatusPanel: View {
         .background {
             PanelBackdrop()
         }
+        .background {
+            PanelVisibilityReader { visible in
+                isPanelVisible = visible
+                model.radioSnapshots.setPanelVisible(visible)
+            }
+        }
         .onAppear {
             launchAtLogin = model.launchAtLogin
             bandSelection.synchronize(with: model.controlState, force: true)
@@ -221,38 +235,6 @@ struct StatusPanel: View {
         .animation(.easeInOut(duration: 0.2), value: showNetworkControls)
         .animation(.easeInOut(duration: 0.16), value: pendingControl?.id)
         .animation(.easeInOut(duration: 0.2), value: scrollViewportHeight)
-        .alert(
-            quickArchitectureConfirmation?.title(language: language) ?? "",
-            isPresented: quickArchitectureConfirmationPresented
-        ) {
-            Button(L10n.text("Cancel", language: language), role: .cancel) {
-                pendingQuickArchitecture = nil
-            }
-            if let mode = pendingQuickArchitecture {
-                let confirmation = ControlConfirmation.architecture(mode)
-                Button(confirmation.buttonTitle(language: language)) {
-                    performQuickArchitectureChange(mode)
-                }
-            }
-        } message: {
-            if let confirmation = quickArchitectureConfirmation {
-                Text(confirmation.message(
-                    language: language,
-                    modemKind: model.activeModem?.identity.kind,
-                    preferenceLifetime: model.controlState?.preferenceLifetime ?? .unknown
-                ))
-            }
-        }
-        .alert(
-            L10n.text("Radio access mode change failed", language: language),
-            isPresented: quickArchitectureErrorPresented
-        ) {
-            Button(L10n.text("OK", language: language)) {
-                quickArchitectureError = nil
-            }
-        } message: {
-            Text(quickArchitectureError ?? "")
-        }
     }
 
     private var panelSeparator: some View {
@@ -280,22 +262,10 @@ struct StatusPanel: View {
 
                 StatusBadge(state: model.connectionState)
 
-                Button(action: model.refreshNow) {
-                    Image(systemName: "arrow.clockwise")
-                        .rotationEffect(model.isRefreshing && !reduceMotion ? .degrees(360) : .zero)
-                        .animation(
-                            model.isRefreshing && !reduceMotion
-                                ? .linear(duration: 0.8).repeatForever(autoreverses: false)
-                                : .default,
-                            value: model.isRefreshing
-                        )
-                        .frame(width: 28, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(PanelIconButtonStyle())
-                .help(L10n.text("Refresh now", language: language))
-                .accessibilityLabel(L10n.text("Refresh now", language: language))
-                .disabled(model.isRefreshing || model.isControlBusy)
+                RefreshStatusButton(activity: model.refreshActivity,
+                                    isPanelVisible: isPanelVisible,
+                                    isControlBusy: model.isControlBusy,
+                                    refresh: model.refreshNow)
             }
 
             Text(headerSubtitle)
@@ -352,71 +322,57 @@ struct StatusPanel: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+
+            // A system alert opens another presentation from the transient
+            // MenuBarExtra window. Keep confirmation in this window to avoid
+            // the extra focus hand-off when the user clicks Apply or Cancel.
+            if let mode = pendingQuickArchitecture {
+                InlineControlConfirmation(
+                    confirmation: .architecture(mode),
+                    modemKind: model.activeModem?.identity.kind,
+                    preferenceLifetime: model.controlState?.preferenceLifetime ?? .unknown,
+                    cancel: { pendingQuickArchitecture = nil },
+                    confirm: { performQuickArchitectureChange(mode) }
+                )
+            }
+            if let error = quickArchitectureError {
+                VStack(alignment: .leading, spacing: 7) {
+                    Label(L10n.text("Radio access mode change failed", language: language),
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                    Text(error)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    HStack {
+                        Spacer()
+                        Button(L10n.text("OK", language: language)) {
+                            quickArchitectureError = nil
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(9)
+                .insetSurface()
+            }
         }
         .cardStyle(prominent: true, accent: AppPalette.blue)
     }
 
     private var quickArchitectureMenu: some View {
-        Menu {
-            ForEach(NRArchitectureMode.quickAccessModes) { mode in
-                Button {
-                    pendingQuickArchitecture = mode
-                } label: {
-                    if model.controlState?.architecture == mode {
-                        Label(L10n.text(mode.label, language: language), systemImage: "checkmark")
-                    } else {
-                        Text(L10n.text(mode.label, language: language))
-                    }
-                }
-                .disabled(model.controlState?.architecture == mode)
-            }
-        } label: {
-            HStack(spacing: 3) {
-                if model.controlOperation == .loading || quickArchitectureAwaitingResult {
-                    ProgressView()
-                        .controlSize(.mini)
-                } else {
-                    Text(model.controlState?.architecture.compactLabel ?? "—")
-                        .font(.caption2.weight(.semibold))
-                }
-            }
-            .foregroundStyle(AppPalette.blue)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(AppPalette.blue.opacity(0.08), in: Capsule())
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.visible)
-        .fixedSize()
-        .disabled(
-            model.controlState == nil ||
-                model.isControlBusy ||
-                pendingControl != nil ||
-                pendingQuickArchitecture != nil ||
-                !model.canRestoreControlDefaults
-        )
-        .help(L10n.text("Radio access preference", language: language))
-        .accessibilityLabel(L10n.text("Radio access preference", language: language))
-    }
-
-    private var quickArchitectureConfirmation: ControlConfirmation? {
-        pendingQuickArchitecture.map(ControlConfirmation.architecture)
-    }
-
-    private var quickArchitectureConfirmationPresented: Binding<Bool> {
-        Binding(
-            get: { pendingQuickArchitecture != nil },
-            set: { isPresented in
-                if !isPresented { pendingQuickArchitecture = nil }
-            }
-        )
-    }
-
-    private var quickArchitectureErrorPresented: Binding<Bool> {
-        Binding(
-            get: { quickArchitectureError != nil },
-            set: { isPresented in
-                if !isPresented { quickArchitectureError = nil }
+        QuickArchitectureMenu(
+            confirmedMode: model.controlState?.architecture,
+            operation: model.controlOperation,
+            isEnabled: model.controlState != nil &&
+                pendingControl == nil &&
+                pendingQuickArchitecture == nil &&
+                pendingRestart == nil &&
+                model.canRestoreControlDefaults,
+            onSelect: {
+                quickArchitectureError = nil
+                pendingQuickArchitecture = $0
             }
         )
     }
@@ -448,6 +404,7 @@ struct StatusPanel: View {
                         mnc: model.snapshot.mnc,
                         raw: model.snapshot.nrRaw
                     )
+                    .equatable()
                 }
                 if let band = model.snapshot.lteBand {
                     RadioCard(
@@ -465,6 +422,7 @@ struct StatusPanel: View {
                         mnc: model.snapshot.mnc,
                         raw: model.snapshot.lteRaw
                     )
+                    .equatable()
                 }
             }
         }
@@ -486,6 +444,7 @@ struct StatusPanel: View {
             mnc: model.snapshot.mnc,
             initiallyExpanded: initiallyShowCarrierAggregation
         )
+        .equatable()
     }
 
     private var nrCarrierAggregationCard: some View {
@@ -496,6 +455,7 @@ struct StatusPanel: View {
             mnc: model.snapshot.mnc,
             initiallyExpanded: initiallyShowCarrierAggregation
         )
+        .equatable()
     }
 
     private var deviceDetailsCard: some View {
@@ -591,7 +551,9 @@ struct StatusPanel: View {
 
                 if model.supportsControl(.neighborMeasurements) {
                     Divider()
-                    neighborMeasurements
+                    LiveSnapshotContent(store: model.radioSnapshots) {
+                        neighborMeasurements
+                    }
                 }
             }
             .padding(.top, 10)
@@ -665,7 +627,7 @@ struct StatusPanel: View {
                 if model.controlState?.architecture == nil || model.controlState?.architecture == .unavailable {
                     Text("—").tag(NRArchitectureMode.unavailable)
                 }
-                ForEach([NRArchitectureMode.automatic, .saOnly, .nsaOnly, .lteOnly]) { mode in
+                ForEach(NRArchitectureMode.quickAccessModes) { mode in
                     Text(mode.compactLabel).tag(mode)
                 }
             }
@@ -871,10 +833,9 @@ struct StatusPanel: View {
                 Text(L10n.text("Neighbor measurements", language: language))
                     .font(.caption.weight(.semibold))
                 Spacer()
-                Button(L10n.text("Refresh", language: language)) { model.refreshNow() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(model.isRefreshing || model.isControlBusy)
+                RefreshTextButton(activity: model.refreshActivity,
+                                  isControlBusy: model.isControlBusy,
+                                  refresh: model.refreshNow)
             }
             if model.snapshot.lteNeighborCells.isEmpty {
                 Text(L10n.text("No LTE neighbors were reported.", language: language))
@@ -1107,31 +1068,18 @@ struct StatusPanel: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 14) {
-            Button(action: model.copyDiagnostics) {
-                Label(L10n.text("Copy", language: language), systemImage: "doc.on.doc")
+        RestartAwareFooter(model: model, pendingRestart: $pendingRestart) {
+            pendingControl = nil
+            pendingQuickArchitecture = nil
+        } action: { item in
+            switch item {
+            case .copy: model.copyDiagnostics()
+            case .restart: break // handled by the device-bound confirmation
+            case .webUI: model.openWebUI()
+            case .about: model.showAbout()
+            case .quit: model.quit()
             }
-            .buttonStyle(.borderless)
-
-            Spacer()
-
-            Menu {
-                Button(L10n.text("Open Device Web UI", language: language), action: model.openWebUI)
-                Button(L10n.text("About Cellular Modem Monitor", language: language), action: model.showAbout)
-                Divider()
-                Button(L10n.text("Quit Cellular Modem Monitor", language: language), role: .destructive, action: model.quit)
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .help(L10n.text("Application menu", language: language))
-            .accessibilityLabel(L10n.text("Application menu", language: language))
         }
-        .font(.caption)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
         .modifier(ChromeSurface())
         .background {
             GeometryReader { geometry in
@@ -1183,6 +1131,36 @@ struct StatusPanel: View {
         let separators: CGFloat = 1
         let available = max(140, maximumPanelHeight - measuredChromeHeight - separators)
         return min(measuredContentHeight, available)
+    }
+}
+
+/// Observe speed-test activity locally, without subscribing the whole panel
+/// to live throughput. Restart must not race an in-progress speed test.
+private struct RestartAwareFooter: View {
+    let model: StatusModel
+    @ObservedObject private var speedTest: SpeedTestModel
+    @Binding var pendingRestart: ModemRestartTarget?
+    let willConfirmRestart: () -> Void
+    let action: (PanelFooterAction) -> Void
+
+    init(model: StatusModel, pendingRestart: Binding<ModemRestartTarget?>,
+         willConfirmRestart: @escaping () -> Void, action: @escaping (PanelFooterAction) -> Void) {
+        self.model = model
+        _speedTest = ObservedObject(wrappedValue: model.speedTestModel)
+        _pendingRestart = pendingRestart
+        self.willConfirmRestart = willConfirmRestart
+        self.action = action
+    }
+
+    var body: some View {
+        PanelFooter(
+            pendingRestart: $pendingRestart, target: model.restartTarget,
+            canRestart: model.canRestartDevice && !speedTest.isRunning,
+            isRestarting: model.isRestartingDevice,
+            notice: model.restartNotice, error: model.restartError,
+            willConfirmRestart: willConfirmRestart, restart: model.restartDevice,
+            dismissMessage: model.dismissRestartMessage, action: action
+        )
     }
 }
 
@@ -1252,6 +1230,108 @@ struct ContextHelp: View {
     }
 }
 
+/// Only this subtree observes frequent signal changes. Offscreen consumers
+/// retain their latest sample without scheduling hidden SwiftUI renders.
+private struct LiveSnapshotContent<Content: View>: View {
+    @ObservedObject var store: RadioSnapshotStore
+    @State private var consumer = UUID()
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .onAppear { store.setVisible(true, consumer: consumer) }
+            .onDisappear { store.setVisible(false, consumer: consumer) }
+    }
+}
+
+private struct RefreshStatusButton: View {
+    @ObservedObject var activity: RefreshActivity
+    @Environment(\.appLanguage) private var language
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isVisible = false
+    let isPanelVisible: Bool
+    let isControlBusy: Bool
+    let refresh: () -> Void
+
+    var body: some View {
+        Button(action: refresh) {
+            Group {
+                if isVisible && isPanelVisible && !reduceMotion && activity.manualRequests > 0 && activity.isRefreshing {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PanelIconButtonStyle())
+        .help(L10n.text("Refresh now", language: language))
+        .accessibilityLabel(L10n.text("Refresh now", language: language))
+        .disabled(activity.isRefreshing || isControlBusy)
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+    }
+}
+
+private struct RefreshTextButton: View {
+    @ObservedObject var activity: RefreshActivity
+    @Environment(\.appLanguage) private var language
+    let isControlBusy: Bool
+    let refresh: () -> Void
+
+    var body: some View {
+        Button(L10n.text("Refresh", language: language), action: refresh)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(activity.isRefreshing || isControlBusy)
+    }
+}
+
+/// MenuBarExtra may retain its hosting view while the window is hidden.
+/// Observe the actual window rather than relying solely on SwiftUI onDisappear.
+private struct PanelVisibilityReader: NSViewRepresentable {
+    let changed: (Bool) -> Void
+
+    func makeNSView(context: Context) -> VisibilityView {
+        let view = VisibilityView()
+        view.changed = changed
+        return view
+    }
+
+    func updateNSView(_ nsView: VisibilityView, context: Context) { nsView.changed = changed }
+
+    final class VisibilityView: NSView {
+        var changed: ((Bool) -> Void)?
+        private var lastValue: Bool?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            if let window {
+                NotificationCenter.default.addObserver(self, selector: #selector(checkVisibility),
+                    name: NSWindow.didChangeOcclusionStateNotification, object: window)
+                NotificationCenter.default.addObserver(self, selector: #selector(checkVisibility),
+                    name: NSWindow.willCloseNotification, object: window)
+            }
+            checkVisibility()
+        }
+
+        @objc private func checkVisibility() {
+            // Deliver outside AppKit layout/SwiftUI view updates.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let visible = window?.isVisible == true && window?.occlusionState.contains(.visible) == true
+                guard lastValue != visible else { return }
+                lastValue = visible
+                changed?(visible)
+            }
+        }
+
+        deinit { NotificationCenter.default.removeObserver(self) }
+    }
+}
+
 private struct InlineControlConfirmation: View {
     @Environment(\.appLanguage) private var language
 
@@ -1284,10 +1364,14 @@ private struct InlineControlConfirmation: View {
                 Button(L10n.text("Cancel", language: language), action: cancel)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("control-confirmation-cancel")
                 Button(confirmation.buttonTitle(language: language), action: confirm)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(!confirmation.canConfirm)
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("control-confirmation-apply")
             }
         }
         .padding(9)
@@ -1621,7 +1705,7 @@ private struct StatusBadge: View {
     }
 }
 
-private struct RadioCard: View {
+private struct RadioCard: View, Equatable {
     @Environment(\.appLanguage) private var language
 
     let title: String
@@ -1637,6 +1721,13 @@ private struct RadioCard: View {
     let mcc: String?
     let mnc: String?
     let raw: String?
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.title == rhs.title && lhs.radio == rhs.radio && lhs.surfaceAccent == rhs.surfaceAccent &&
+            lhs.band == rhs.band && lhs.frequency == rhs.frequency && lhs.channelLabel == rhs.channelLabel &&
+            lhs.channel == rhs.channel && lhs.bandwidth == rhs.bandwidth && lhs.signal == rhs.signal &&
+            lhs.globalCellID == rhs.globalCellID && lhs.mcc == rhs.mcc && lhs.mnc == rhs.mnc && lhs.raw == rhs.raw
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1928,7 +2019,7 @@ private struct CarrierAggregationRow: View {
     }
 }
 
-private struct NRCarrierAggregationCard: View {
+private struct NRCarrierAggregationCard: View, Equatable {
     let primaryCell: NRCarrier?
     let secondaryCells: [NRCarrier]
     let mcc: String?
@@ -1949,7 +2040,7 @@ private struct NRCarrierAggregationCard: View {
     }
 }
 
-private struct LTECarrierAggregationCard: View {
+private struct LTECarrierAggregationCard: View, Equatable {
     let primaryCell: LTECarrier?
     let secondaryCells: [LTECarrier]
     let mcc: String?
@@ -2129,20 +2220,20 @@ struct CollapsibleCard<Content: View, Header: View>: View {
 
     private let accessibilityLabel: String
     private let accent: Color?
-    private let content: Content
+    private let content: () -> Content
     private let header: Header
 
     init(
         isExpanded: Binding<Bool>,
         accessibilityLabel: String,
         accent: Color? = nil,
-        @ViewBuilder content: () -> Content,
+        @ViewBuilder content: @escaping () -> Content,
         @ViewBuilder label: () -> Header
     ) {
         _isExpanded = isExpanded
         self.accessibilityLabel = accessibilityLabel
         self.accent = accent
-        self.content = content()
+        self.content = content
         header = label()
     }
 
@@ -2179,7 +2270,7 @@ struct CollapsibleCard<Content: View, Header: View>: View {
             )
 
             if isExpanded {
-                content
+                content()
                     .transition(.opacity)
             }
         }

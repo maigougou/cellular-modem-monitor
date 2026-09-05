@@ -203,3 +203,59 @@ protocol ModemControlSession: Sendable {
     func refresh() async throws -> ModemControlState
     func perform(_ command: ModemControlCommand) async throws -> ModemControlResult
 }
+
+/// A restart acknowledges a request, not a completed reboot. It cannot be
+/// read back or rolled back like radio settings. Implementations authenticate,
+/// recheck the physical identity, and never retry an ambiguous transport error.
+protocol ModemRestartSession: ModemControlSession {
+    func requestRestart() async throws
+}
+
+enum ModemRestartError: LocalizedError, Equatable {
+    case outcomeUnknown
+
+    var errorDescription: String? {
+        "The restart reply was not received. The device may already be restarting. Wait for it to reconnect before trying again."
+    }
+}
+
+struct ModemRestartTarget: Equatable {
+    let modemID: String
+    let endpoint: ScopedEndpoint
+    let settingsGeneration: UInt64
+    let displayName: String
+}
+
+enum PanelFooterAction: String, CaseIterable {
+    case copy, restart, webUI, about, quit
+
+    var title: String {
+        switch self {
+        case .copy: return "Copy"
+        case .restart: return "Restart"
+        case .webUI: return "Web UI"
+        case .about: return "About"
+        case .quit: return "Quit"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .copy: return "doc.on.doc"
+        case .restart: return "arrow.clockwise"
+        case .webUI: return "globe"
+        case .about: return "info.circle"
+        case .quit: return "power"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .copy: return "Copy diagnostics"
+        case .restart: return "Restart device"
+        case .webUI: return "Open Device Web UI"
+        case .about: return "About Cellular Modem Monitor"
+        case .quit: return "Quit Cellular Modem Monitor"
+        }
+    }
+}

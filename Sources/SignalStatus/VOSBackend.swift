@@ -27,7 +27,7 @@ actor VOSBackend: ModemControlBackend {
             .deviceInformation,
             .webUI
         ]
-        if self.controlClient != nil { capabilities.formUnion(.vosControls) }
+        if self.controlClient != nil { capabilities.formUnion(.vosControls.union(.deviceRestart)) }
         self.capabilities = capabilities
     }
 

@@ -63,6 +63,19 @@ enum L10n {
     // intentionally remain in English instead of showing a broken key.
     private static let simplifiedChinese: [String: String] = [
         // App chrome and connection status
+        "Restart": "重启",
+        "Web UI": "管理页面",
+        "About": "关于",
+        "Quit": "退出",
+        "Copy diagnostics": "复制诊断信息",
+        "Restart device": "重启设备",
+        "Restart device?": "重启设备？",
+        "Dismiss": "关闭提示",
+        "Requesting restart…": "正在请求重启…",
+        "The device changed. Open Restart again for the current device.": "当前设备已改变，请重新打开重启确认。",
+        "The modem will disconnect briefly. Monitoring resumes automatically.": "设备将暂时断开连接，监控会自动恢复。",
+        "Restart requested. Monitoring will reconnect automatically.": "已发送重启请求，监控将自动重新连接。",
+        "The restart reply was not received. The device may already be restarting. Wait for it to reconnect before trying again.": "未收到重启响应。设备可能已在重启，请等待重新连接后再尝试。",
         "Cellular Modem Monitor": "蜂窝调制解调器监控",
         "Modem status": "调制解调器状态",
         "Refresh now": "立即刷新",

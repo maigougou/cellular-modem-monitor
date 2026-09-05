@@ -228,11 +228,12 @@ private struct MC7530CellLockRollbackPlan: Equatable, Sendable {
 /// authoritative `nwinfo_get_netinfo` readback. On a failed write or readback,
 /// the exact pre-operation ZTE tokens/band lists are restored where the retail
 /// API exposes a corresponding setter.
-actor MC7530ControlSession: ModemControlSession {
+actor MC7530ControlSession: ModemRestartSession {
     typealias Sleeper = @Sendable (UInt64) async throws -> Void
 
     nonisolated let kind = ModemKind.zteMC7530CA
     nonisolated let capabilities: ModemCapability = [
+        .deviceRestart,
         .operatorSelection,
         .networkScan,
         .radioAccessPreference,
@@ -316,6 +317,21 @@ actor MC7530ControlSession: ModemControlSession {
 
     func invalidate() async {
         invalidated = true
+    }
+
+    func requestRestart() async throws {
+        guard !operationInProgress else {
+            throw ModemControlError.invalidState("Another MC7530CA control operation is already in progress.")
+        }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        try await validateDevice()
+        try Task.checkCancellation()
+        guard !invalidated else { throw ModemControlError.deviceChanged }
+        // The exact vendor Web UI action is device_reboot(moduleName: web).
+        // Retire this session even if its reply is lost; never recover/replay it.
+        invalidated = true
+        try await session.restartDevice()
     }
 
     func refresh() async throws -> ModemControlState {

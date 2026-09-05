@@ -31,6 +31,8 @@ struct ModemCapability: OptionSet, Hashable, Sendable {
     static let nrBandLock = ModemCapability(rawValue: 1 << 6)
     static let lteBandLock = ModemCapability(rawValue: 1 << 7)
     static let neighborMeasurements = ModemCapability(rawValue: 1 << 8)
+    /// Lifecycle action, separate from the network/radio controls card.
+    static let deviceRestart = ModemCapability(rawValue: 1 << 9)
 
     // Descriptive aliases retained for call sites that discuss radio/device
     // data rather than the read operation itself.

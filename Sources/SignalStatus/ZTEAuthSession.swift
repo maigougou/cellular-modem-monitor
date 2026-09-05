@@ -27,6 +27,30 @@ actor ZTEAuthSession {
         _ = try await currentSessionID()
     }
 
+    /// Lifecycle writes deliberately bypass SID recovery/replay. Even a lost
+    /// reply must not cause a second reboot request.
+    func restartDevice() async throws {
+        let sid = try await currentSessionID()
+        try Task.checkCancellation()
+        let result: ZTEUBusCallResult
+        do {
+            result = try await transport.call(
+                sessionID: sid,
+                object: "zwrt_mc.device.manager",
+                method: "device_reboot",
+                parameters: ["moduleName": .string("web")],
+                mode: .read,
+                zTag: ""
+            )
+        } catch let error as ZTEUBusError where error.isAccessDenied {
+            throw error
+        } catch {
+            throw ModemRestartError.outcomeUnknown
+        }
+        guard result.status == 0 else { throw ZTEUBusError.ubusStatus(result.status) }
+        sessionID = nil
+    }
+
     /// Performs an authenticated read. This compatibility wrapper keeps the
     /// original read-only request headers and delegates session recovery to the
     /// generic call path.

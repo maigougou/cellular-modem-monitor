@@ -13,6 +13,7 @@ actor MC7530Backend: ModemControlBackend {
         .statusRead,
         .identityRead,
         .webUI,
+        .deviceRestart,
         .operatorSelection,
         .networkScan,
         .radioAccessPreference,

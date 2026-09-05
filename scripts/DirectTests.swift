@@ -21,6 +21,9 @@ enum DirectTests {
 
     static func main() async {
         var failures: [String] = []
+        failures += await EfficiencyRegression.run()
+        await runRestartTests(failures: &failures)
+        failures += await runRestartModelGuards()
 
         do {
             check(AppLanguage.systemDefault(preferredLanguages: ["zh-Hans-CN", "en-CA"]) == .simplifiedChinese,
@@ -36,11 +39,32 @@ enum DirectTests {
                 failures: &failures
             )
             check(
-                NRArchitectureMode.quickAccessModes == [.saOnly, .nsaOnly, .automatic, .lteOnly]
-                    && NRArchitectureMode.quickAccessModes.map(\.compactLabel) == ["SA", "NSA", "Auto", "LTE"],
+                NRArchitectureMode.quickAccessModes == [.automatic, .saOnly, .nsaOnly, .lteOnly]
+                    && NRArchitectureMode.quickAccessModes.map(\.compactLabel) == ["Auto", "SA", "NSA", "LTE"]
+                    && NRArchitectureMode.quickAccessModes.map(\.label) == ["Auto SA/NSA", "SA only", "NSA only", "LTE only"],
                 "quick radio access menu order and labels",
                 failures: &failures
             )
+            let quickModePhases: [(NRArchitectureMode?, NetworkControlOperation?, String, Bool)] = [
+                (nil, .loading, "—", true),
+                (.automatic, nil, "Auto SA/NSA", false),
+                (.automatic, .changingArchitecture(.saOnly), "SA only…", true),
+                (.saOnly, .changingArchitecture(.saOnly), "SA only…", true),
+                (.saOnly, nil, "SA only", false),
+                (.saOnly, .loading, "SA only", true),
+                (.saOnly, .changingArchitecture(.automatic), "Auto SA/NSA…", true),
+                (.saOnly, nil, "SA only", false), // failed change, verified rollback
+                (.automatic, nil, "Auto SA/NSA", false),
+                (.nsaOnly, nil, "NSA only", false),
+                (.lteOnly, nil, "LTE only", false),
+                (nil, nil, "—", false)
+            ]
+            for (mode, operation, title, busy) in quickModePhases {
+                let state = QuickArchitectureMenuState(confirmedMode: mode, operation: operation)
+                check(state.title == title && state.isBusy == busy,
+                      "quick menu keeps its label during switching, read-back and rollback: \(title)",
+                      failures: &failures)
+            }
             let widthPreferencesWork = await MainActor.run { () -> Bool in
                 let suiteName = "DirectTests.panel-width.\(UUID().uuidString)"
                 let defaults = UserDefaults(suiteName: suiteName)!
@@ -3653,6 +3677,130 @@ enum DirectTests {
         }
     }
 
+    @MainActor
+    private static func runRestartModelGuards() -> [String] {
+        var failures: [String] = []
+        let suite = "DirectTests.restart-guards.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = StatusModel(defaults: defaults, credentialStore: DirectCredentialStore(values: [:]),
+                                speedTestRunner: DirectSpeedTestRunner(suspend: true), startImmediately: false)
+        check(!model.canRestartDevice && model.restartTarget == nil, "restart disabled without active device", failures: &failures)
+        let identity = ModemIdentity(kind: .zteMC7530CA, manufacturer: "ZTE", model: "MC7530CA", stableIdentifier: "offline-restart")
+        let endpoint = ScopedEndpoint(baseURL: URL(string: "http://192.168.254.1")!, interfaceName: "en9", interfaceIndex: 9)
+        var sample = DeviceSnapshot.empty
+        sample.nrBand = "n77"
+        sample.nrSystemMode = .sa
+        sample.updatedAt = Date()
+        func commit(_ capabilities: ModemCapability) {
+            model.applyReadResult(ModemReadResult(
+                activeModem: ActiveModem(identity: identity, endpoint: endpoint, capabilities: capabilities),
+                snapshot: sample, reusedActiveEndpoint: true, discoveryReport: nil
+            ))
+        }
+        commit([.statusRead])
+        check(!model.canRestartDevice, "restart requires advertised capability", failures: &failures)
+        commit([.statusRead, .deviceRestart])
+        check(model.canRestartDevice, "restart available for identified online device", failures: &failures)
+        if let target = model.restartTarget {
+            for stale in [
+                ModemRestartTarget(modemID: "replacement", endpoint: endpoint, settingsGeneration: target.settingsGeneration, displayName: target.displayName),
+                ModemRestartTarget(modemID: target.modemID, endpoint: ScopedEndpoint(baseURL: endpoint.baseURL, interfaceName: "en1", interfaceIndex: 1), settingsGeneration: target.settingsGeneration, displayName: target.displayName),
+                ModemRestartTarget(modemID: target.modemID, endpoint: endpoint, settingsGeneration: target.settingsGeneration + 1, displayName: target.displayName)
+            ] {
+                model.restartDevice(stale)
+                check(!model.isRestartingDevice, "stale device/interface/settings confirmation never queues restart", failures: &failures)
+            }
+            model.speedTestModel.start()
+            check(model.speedTestModel.isRunning && !model.canRestartDevice,
+                  "running speed test disables restart", failures: &failures)
+            model.restartDevice(target)
+            check(!model.isRestartingDevice, "restart cannot race speed test", failures: &failures)
+            model.speedTestModel.cancel()
+        }
+        sample = .empty
+        commit([.statusRead, .deviceRestart])
+        check(!model.canRestartDevice, "restart disabled while connecting", failures: &failures)
+        return failures
+    }
+
+    private static func runRestartTests(failures: inout [String]) async {
+        check(PanelFooterAction.allCases == [.copy, .restart, .webUI, .about, .quit],
+              "footer has five direct actions in requested order", failures: &failures)
+        for item in PanelFooterAction.allCases {
+            check(!item.symbol.isEmpty && !item.title.isEmpty &&
+                    L10n.text(item.title, language: .simplifiedChinese) != item.title,
+                  "footer localized label and symbol for \(item)", failures: &failures)
+        }
+        check(!ModemCapability.deviceRestart.supportsDeviceControlSurface,
+              "restart alone does not expose radio controls", failures: &failures)
+        for scenario in ["accepted", "lost", "denied", "replaced", "retired"] {
+            do {
+                let http = DirectStatefulMC7530HTTPTransport(
+                    state: .baseline,
+                    fingerprintSequence: scenario == "replaced" ? ["fixture-a", "fixture-b"] : ["fixture-a"],
+                    restartBehavior: scenario
+                )
+                let session = try await openMC7530ControlSession(http: http, timing: .production)
+                if scenario == "retired" { await session.invalidate() }
+                do {
+                    try await session.requestRestart()
+                    check(scenario == "accepted", "ZTE restart \(scenario) must not report success", failures: &failures)
+                } catch {
+                    switch scenario {
+                    case "lost": check(error as? ModemRestartError == .outcomeUnknown, "lost restart reply is ambiguous", failures: &failures)
+                    case "denied": check(error as? ZTEUBusError == .ubusStatus(6), "restart denial stays a denial", failures: &failures)
+                    case "replaced", "retired": check(error as? ModemControlError == .deviceChanged, "restart blocks retired/replaced modem", failures: &failures)
+                    default: failures.append("ZTE restart accepted: \(error)")
+                    }
+                }
+                // A retired session cannot issue another action after any result.
+                do {
+                    try await session.requestRestart()
+                    failures.append("ZTE restart reused retired session")
+                } catch { }
+                let records = await http.records()
+                let writes = records.filter { $0.ubusMethod == "device_reboot" }
+                let expected = ["replaced", "retired"].contains(scenario) ? 0 : 1
+                check(writes.count == expected, "ZTE restart is never replayed: \(scenario)", failures: &failures)
+                check(writes.allSatisfy {
+                    $0.object == "zwrt_mc.device.manager" && $0.parameters == ["moduleName": "web"] &&
+                    $0.sessionID == "fixture-session" && $0.header("Z-Mode") == "0"
+                }, "ZTE restart exact authenticated vendor RPC", failures: &failures)
+                check(records.filter { $0.ubusMethod == "web_login" }.count == 1,
+                      "ZTE restart never reauthenticates to replay action", failures: &failures)
+                check(records.allSatisfy { $0.ubusMethod?.hasPrefix("nwinfo_set") != true && $0.ubusMethod != "device_reset" },
+                      "restart does not modify radio settings or factory reset", failures: &failures)
+            } catch { failures.append("ZTE restart \(scenario): \(error)") }
+        }
+        for scenario in ["accepted", "lost", "replaced", "retired"] {
+            do {
+                let transport = DirectVOSControlTransport()
+                let configuration = DeviceConfiguration(host: "192.0.2.1", username: "root", password: "fixture", refreshInterval: 5,
+                                                        sourceAddress: "192.0.2.2", interfaceName: "en9")
+                let session = try await VOSControlSession.open(client: transport, configuration: configuration)
+                await transport.configureRestart(scenario)
+                if scenario == "retired" { await session.invalidate() }
+                do {
+                    try await session.requestRestart()
+                    check(scenario == "accepted", "VOS restart \(scenario) must not report success", failures: &failures)
+                } catch {
+                    check(scenario != "accepted", "VOS accepted restart succeeds", failures: &failures)
+                }
+                do { try await session.requestRestart(); failures.append("VOS restarted twice") } catch { }
+                let requests = await transport.restartRequests()
+                check(requests.count == (["retired", "replaced"].contains(scenario) ? 0 : 1),
+                      "VOS restart identity/retirement/one-shot guard: \(scenario)", failures: &failures)
+                check(requests.allSatisfy { $0.sourceAddress == "192.0.2.2" && $0.interfaceName == "en9" },
+                      "VOS restart retains scoped source address", failures: &failures)
+            } catch { failures.append("VOS restart \(scenario): \(error)") }
+        }
+        check(VOSClient.restartScript.contains("exec /sbin/reboot") &&
+                VOSClient.restartScript.contains("</dev/null >/dev/null 2>&1 &") &&
+                !VOSClient.restartScript.contains("nv") && !VOSClient.restartScript.contains("uci"),
+              "VOS lifecycle request is detached normal reboot only", failures: &failures)
+    }
+
     private static func openMC7530ControlSession(
         http: DirectStatefulMC7530HTTPTransport,
         timing: MC7530ControlTiming
@@ -5004,6 +5152,7 @@ private struct DirectMC7530FixtureState: Equatable, Sendable {
 /// optional ignored-application counters model firmware that accepts a call
 /// but fails to change authoritative `nwinfo_get_netinfo` readback.
 private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
+    private let restartBehavior: String
     private var state: DirectMC7530FixtureState
     private var scanStatuses: [String]
     private let scanContents: String
@@ -5035,9 +5184,11 @@ private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
         ignoredNetSelectWriteApplications: Int = 0,
         lostResetResponsesAfterApplications: Int = 0,
         fingerprintSequence: [String] = ["fixture-device-alpha"],
-        emitNumericPLMNComponents: Bool = false
+        emitNumericPLMNComponents: Bool = false,
+        restartBehavior: String = "accepted"
     ) {
         self.state = state
+        self.restartBehavior = restartBehavior
         self.scanStatuses = scanStatuses
         self.scanContents = scanContents
         self.registrationResults = registrationResults
@@ -5058,6 +5209,12 @@ private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
         requestRecords.append(record)
 
         switch record.ubusMethod {
+        case "device_reboot":
+            if restartBehavior == "lost" { throw URLError(.networkConnectionLost) }
+            if restartBehavior == "denied" {
+                return ZTEHTTPResponse(statusCode: 200, headers: [:], body: Data("[{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":[6]}]".utf8))
+            }
+            return try Self.successResponse()
         case "web_login_info":
             return try Self.response(["zte_web_sault": "fixture-salt"])
         case "web_login":
@@ -5338,6 +5495,14 @@ private actor DirectMockModemBackend: ModemStatusBackend {
 }
 
 private actor DirectVOSControlTransport: VOSControlTransport {
+    private var restartBehavior = "accepted"
+    private var restarts: [DeviceConfiguration] = []
+    func configureRestart(_ scenario: String) { restartBehavior = scenario }
+    func restartRequests() -> [DeviceConfiguration] { restarts }
+    func requestRestart(configuration: DeviceConfiguration) async throws {
+        restarts.append(configuration)
+        if restartBehavior == "lost" { throw ModemRestartError.outcomeUnknown }
+    }
     static let baselinePreferences = NRSystemSelectionPreferences(
         modePreference: 0x0050,
         saBands: NRBandMask(bands: [77, 78])!,
@@ -5379,7 +5544,7 @@ private actor DirectVOSControlTransport: VOSControlTransport {
     }
 
     func fetchDeviceFingerprint(configuration: DeviceConfiguration) async throws -> String {
-        "fixture-vos-control-device"
+        restartBehavior == "replaced" ? "fixture-vos-replacement" : "fixture-vos-control-device"
     }
 
     func fetchOperatorSelection(

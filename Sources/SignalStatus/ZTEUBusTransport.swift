@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Darwin
 
 /// Route metadata passed to an injectable HTTP transport.
 ///
@@ -26,6 +27,122 @@ struct ZTEHTTPResponse: Equatable, Sendable {
 
 protocol ZTEHTTPTransport: Sendable {
     func send(_ request: URLRequest, route: ZTEHTTPRoute) async throws -> ZTEHTTPResponse
+}
+
+struct ZTEAvailableInterface<Value: Sendable>: Sendable {
+    let name: String
+    let index: UInt32
+    let value: Value
+
+    func matches(_ route: ZTEHTTPRoute) -> Bool {
+        (route.interfaceName.map { $0 == name } ?? true) &&
+            (route.interfaceIndex.map { $0 == index } ?? true)
+    }
+}
+
+/// A single live interface snapshot, not a time-based route cache. A new path
+/// event replaces the whole list, including removals. All mutable state is
+/// protected by the lock; continuations are always resumed outside it.
+final class ZTEInterfaceDirectory<Value: Sendable>: @unchecked Sendable {
+    private struct Waiter {
+        let route: ZTEHTTPRoute
+        let continuation: CheckedContinuation<Value, Error>
+        let deadline: DispatchWorkItem
+    }
+    private let lock = NSLock()
+    private var interfaces: [ZTEAvailableInterface<Value>]?
+    private var waiters: [UUID: Waiter] = [:]
+
+    func update(_ next: [ZTEAvailableInterface<Value>]) {
+        lock.lock()
+        interfaces = next
+        let pending = Array(waiters.values)
+        waiters.removeAll()
+        lock.unlock()
+        for waiter in pending {
+            waiter.deadline.cancel()
+            waiter.continuation.resume(with: Self.match(waiter.route, in: next))
+        }
+    }
+
+    func resolve(_ route: ZTEHTTPRoute, timeout: TimeInterval) async throws -> Value {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else if let interfaces {
+                    let result = Self.match(route, in: interfaces)
+                    lock.unlock()
+                    continuation.resume(with: result)
+                } else {
+                    let deadline = DispatchWorkItem { [weak self] in
+                        self?.finish(id, error: ZTEUBusError.interfaceUnavailable)
+                    }
+                    waiters[id] = Waiter(route: route, continuation: continuation, deadline: deadline)
+                    lock.unlock()
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + max(0, timeout), execute: deadline)
+                }
+            }
+        } onCancel: {
+            self.finish(id, error: CancellationError())
+        }
+    }
+
+    private func finish(_ id: UUID, error: Error) {
+        lock.lock()
+        let waiter = waiters.removeValue(forKey: id)
+        lock.unlock()
+        waiter?.deadline.cancel()
+        waiter?.continuation.resume(throwing: error)
+    }
+
+    private static func match(_ route: ZTEHTTPRoute, in interfaces: [ZTEAvailableInterface<Value>]) -> Result<Value, Error> {
+        guard route.interfaceName != nil || route.interfaceIndex != nil,
+              let match = interfaces.first(where: { $0.matches(route) })
+        else { return .failure(ZTEUBusError.interfaceUnavailable) }
+        return .success(match.value)
+    }
+}
+
+private final class ZTELiveInterfaceResolver: @unchecked Sendable {
+    private let monitor = NWPathMonitor()
+    private let directory = ZTEInterfaceDirectory<NWInterface>()
+    private let queue = DispatchQueue(label: "CellularModemMonitor.ZTEInterfaces", qos: .utility)
+    private let lock = NSLock()
+    private var started = false
+
+    init() {
+        let directory = directory
+        monitor.pathUpdateHandler = { path in
+            directory.update(path.availableInterfaces.map {
+                ZTEAvailableInterface(name: $0.name, index: UInt32($0.index), value: $0)
+            })
+        }
+    }
+
+    deinit { monitor.cancel() }
+
+    private func startIfNeeded() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !started else { return }
+        started = true
+        monitor.start(queue: queue)
+    }
+
+    func resolve(_ route: ZTEHTTPRoute, timeout: TimeInterval) async throws -> NWInterface? {
+        guard route.interfaceName != nil || route.interfaceIndex != nil else { return nil }
+        startIfNeeded()
+        let interface = try await directory.resolve(route, timeout: timeout)
+        // Reject a removed/replaced interface even before its path event arrives.
+        guard if_nametoindex(interface.name) == UInt32(interface.index) else {
+            throw ZTEUBusError.interfaceUnavailable
+        }
+        return interface
+    }
 }
 
 final class URLSessionZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable {
@@ -60,6 +177,7 @@ final class NetworkBoundZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable 
     fileprivate static let maximumResponseBytes = 4 * 1024 * 1024
     private let queue = DispatchQueue(label: "CellularModemMonitor.ZTEHTTP")
     private let timeout: TimeInterval
+    private let interfaceResolver = ZTELiveInterfaceResolver()
 
     init(timeout: TimeInterval = 15) {
         self.timeout = timeout
@@ -105,27 +223,7 @@ final class NetworkBoundZTEHTTPTransport: ZTEHTTPTransport, @unchecked Sendable 
     }
 
     private func resolveInterface(for route: ZTEHTTPRoute) async throws -> NWInterface? {
-        guard route.interfaceIndex != nil || route.interfaceName != nil else { return nil }
-
-        return try await withCheckedThrowingContinuation { continuation in
-            let monitor = NWPathMonitor()
-            let gate = ZTEContinuationGate<NWInterface>()
-            monitor.pathUpdateHandler = { path in
-                let match = path.availableInterfaces.first { interface in
-                    let indexMatches = route.interfaceIndex.map { UInt32(interface.index) == $0 } ?? true
-                    let nameMatches = route.interfaceName.map { interface.name == $0 } ?? true
-                    return indexMatches && nameMatches
-                }
-                guard let match else { return }
-                monitor.cancel()
-                gate.resume(.success(match), continuation: continuation)
-            }
-            monitor.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + min(timeout, 3)) {
-                monitor.cancel()
-                gate.resume(.failure(ZTEUBusError.interfaceUnavailable), continuation: continuation)
-            }
-        }
+        try await interfaceResolver.resolve(route, timeout: min(timeout, 3))
     }
 
     private func exchange(_ request: Data, over connection: NWConnection) async throws -> ZTEHTTPResponse {
