@@ -181,10 +181,15 @@ enum L10n {
         "These radio preferences persist across restarts until they are changed or restored. Each change is read back and a failed change is rolled back.": "这些无线模式偏好会跨重启保留，直到再次更改或恢复。每次更改都会读回验证，失败时会自动回滚。",
         "Each radio preference change is read back and a failed change is rolled back. The modem did not report whether the setting persists across restarts.": "每次无线模式偏好更改都会读回验证，失败时会自动回滚。调制解调器未报告该设置是否会跨重启保留。",
         "Automatic defaults were not available to capture. Reconnect or power-cycle the modem, then close and reopen this panel before changing radio access mode.": "未能记录自动模式默认值。请重新连接调制解调器或让其断电重启，然后关闭并重新打开此面板，再切换无线接入模式。",
+        "A saved band baseline is unavailable. Reconnect and reopen this panel to read and save this modem's bands before making changes.": "已保存的频段基线不可用。请重新连接并重新打开此面板，读取并保存本机频段后再更改设置。",
         "Restore automatic defaults": "恢复自动默认设置",
+        "Restore saved bands": "恢复已保存频段",
         "Band locking": "频段锁定",
+        "Device-reported saved bands": "设备回报的已保存频段",
+        "Choices combine band preferences read from this modem and saved on this Mac, so locking a subset does not erase earlier choices. This is not a hardware-capability or network scan. If the modem was already locked on first connection, the list may be incomplete. Restore is available only after this app saves a pre-lock restore point; it cannot reconstruct an earlier external lock.": "可选项汇总本机回读并保存在此 Mac 上的频段偏好，锁定部分频段不会删除先前的选项。这不是硬件能力扫描或网络扫描；若首次连接时设备已锁频，列表可能不完整。只有本应用保存过锁频前恢复点后才能恢复，无法推算此前在其他地方锁频前的设置。",
         "Uncheck bands to restrict the modem. Locks last until the modem loses power; Restore automatic defaults restores the captured masks.": "取消勾选频段即可限制调制解调器。锁定会持续到调制解调器断电；“恢复自动默认设置”会还原已记录的掩码。",
-        "Uncheck bands to restrict the modem. Locks persist across restarts until changed or restored; Restore automatic defaults restores the modem's vendor defaults.": "取消勾选频段即可限制调制解调器。锁定会跨重启保留，直到再次更改或恢复；“恢复自动默认设置”会还原调制解调器的厂商默认值。",
+        "Uncheck bands to restrict the modem. Locks persist across restarts. Restore saved bands restores this modem's saved pre-lock LTE, SA and NSA preferences only; radio mode, operator and cell locks are preserved.": "取消勾选频段即可限制调制解调器，锁定会跨重启保留。“恢复已保存频段”只还原本机已保存的锁频前 LTE、SA 和 NSA 偏好；无线模式、运营商和小区锁保持不变。",
+        "Uncheck bands to restrict the modem. Locks persist across restarts until changed or restored; each change is read back and verified.": "取消勾选频段即可限制调制解调器。锁定会跨重启保留，直到再次更改或恢复；每次更改都会读回验证。",
         "Uncheck bands to restrict the modem. Locks are read back after each change; the modem did not report whether they persist across restarts.": "取消勾选频段即可限制调制解调器。每次更改后都会读回锁定值；调制解调器未报告锁定是否会跨重启保留。",
         "NR bands": "NR 频段",
         "LTE bands": "LTE 频段",
@@ -229,13 +234,14 @@ enum L10n {
         "Applying NR band lock…": "正在应用 NR 频段锁定…",
         "Applying LTE band lock…": "正在应用 LTE 频段锁定…",
         "Restoring automatic defaults…": "正在恢复自动默认设置…",
+        "Restoring saved bands…": "正在恢复已保存频段…",
         "Network scan completed.": "网络扫描完成。",
         "Manual selection verified for %@.": "已验证手动选择：%@。",
         "Automatic network selection was verified.": "已验证自动网络选择。",
         "%@ was applied and verified. %@": "已应用并验证 %@。%@",
         "NR bands %@ were applied and verified. %@": "已应用并验证 NR 频段 %@。%@",
         "LTE bands %@ were applied and verified. %@": "已应用并验证 LTE 频段 %@。%@",
-        "Automatic selection and the MC7530CA band/cell defaults were restored and verified.": "已恢复并验证自动运营商选择以及 MC7530CA 的频段/小区锁定默认值。",
+        "Saved LTE, SA and NSA bands were restored and verified. Radio mode, operator selection and cell locks were preserved.": "已恢复并验证保存的 LTE、SA 和 NSA 频段。无线模式、运营商选择和小区锁保持不变。",
         "Automatic operator selection and the original LTE/NR masks were restored and verified.": "已恢复并验证自动运营商选择以及原始 LTE/NR 掩码。",
         "This setting lasts until the modem loses power.": "此设置会持续到调制解调器断电。",
         "This setting persists until it is changed or restored.": "此设置会一直保留，直到再次更改或恢复。",
@@ -249,6 +255,7 @@ enum L10n {
         "Lock NR bands?": "锁定 NR 频段？",
         "Lock LTE bands?": "锁定 LTE 频段？",
         "Restore automatic defaults?": "恢复自动默认设置？",
+        "Restore saved bands?": "恢复已保存频段？",
         "A full operator scan can take several minutes and may temporarily interrupt cellular data.": "完整的运营商扫描可能需要数分钟，并可能暂时中断蜂窝数据。",
         "On VOS 5G, the app first switches to verified LTE-only mode, performs the scan, and then restores the exact previous LTE/SA/NSA preference. Data will be interrupted during this process.": "在 VOS 5G 上，应用会先切换到经过验证的仅 LTE 模式，执行扫描，然后精确恢复之前的 LTE/SA/NSA 偏好。此过程中数据连接会中断。",
         "The modem will try %@ (%@) using this exact scan result. Registration and data may be interrupted.": "调制解调器将使用这条扫描结果的精确参数尝试连接 %@（%@）。注册和数据连接可能中断。",
@@ -261,7 +268,7 @@ enum L10n {
         "The setting lasts until the modem loses power.": "此设置会持续到调制解调器断电。",
         "The setting persists across restarts until it is changed or restored.": "此设置会跨重启保留，直到再次更改或恢复。",
         "The modem did not report whether the setting persists across restarts.": "调制解调器未报告此设置是否会跨重启保留。",
-        "This clears configured LTE, SA and NSA band locks and LTE/NR cell locks, restores the modem's vendor band defaults, and returns operator selection to automatic. The result will be read back and verified.": "此操作会清除已配置的 LTE、SA 和 NSA 频段锁定以及 LTE/NR 小区锁定，恢复调制解调器的厂商频段默认值，并将运营商选择恢复为自动。最终结果会被读回验证。",
+        "This restores only the LTE, SA and NSA preferences saved for this modem before band locking. Radio mode, operator selection, legacy bands, NRDC and cell locks remain unchanged. This is not a factory reset. Data may be interrupted; exact readback verifies the result.": "此操作只恢复为本机保存的锁频前 LTE、SA 和 NSA 偏好。无线模式、运营商选择、旧制式频段、NRDC 和小区锁保持不变。这不是恢复出厂设置。数据连接可能中断，最终结果会精确读回验证。",
         "This restores the original LTE, SA and NSA masks captured in this app session and returns operator selection to automatic. Both results will be read back and verified.": "此操作会恢复本次应用会话记录的原始 LTE、SA 和 NSA 掩码，并将运营商选择恢复为自动。两项结果都会被读回验证。",
         "The original automatic radio preference was not captured.": "未能记录原始自动无线模式偏好。",
         "Radio access preference control is unavailable.": "无线接入模式控制不可用。",
@@ -346,6 +353,10 @@ enum L10n {
         "Qualcomm NAS did not report separate SA and NSA preferences.": "Qualcomm NAS 未分别报告 SA 和 NSA 偏好。",
         "Enter one or more valid NR bands, for example 77,78.": "请输入一个或多个有效 NR 频段，例如 77,78。",
         "Enter one or more valid LTE bands, for example 2,4,25,66.": "请输入一个或多个有效 LTE 频段，例如 2,4,25,66。",
+        "These %@ bands are not in this device's saved band list: %@.": "以下 %@ 频段不在此设备已保存的频段列表中：%@。",
+        "The band baseline requires a verified modem fingerprint.": "频段基线需要已验证的调制解调器指纹。",
+        "The band baseline contains invalid or inconsistent band data.": "频段基线包含无效或不一致的频段数据。",
+        "The saved band baseline file is invalid. It was not overwritten.": "已保存的频段基线文件无效，原文件未被覆盖。",
         "The original band masks were not captured. Power-cycle VOS, then reopen Network & radio controls.": "未记录原始频段掩码。请让 VOS 断电重启，然后重新打开“网络与无线控制”。",
         "The original automatic radio masks were not captured. Power-cycle VOS, then open Network & radio controls before changing the mode.": "未记录原始自动无线频段掩码。请让 VOS 断电重启，然后打开“网络与无线控制”再切换模式。",
         "Qualcomm NAS did not report an extended LTE band mask to preserve.": "Qualcomm NAS 未报告可保留的扩展 LTE 频段掩码。",
@@ -392,7 +403,7 @@ extension NRArchitectureMode {
 }
 
 extension NetworkControlOperation {
-    func localizedLabel(language: AppLanguage) -> String {
+    func localizedLabel(language: AppLanguage, modemKind: ModemKind? = nil) -> String {
         switch self {
         case .loading:
             return L10n.text("Reading network settings…", language: language)
@@ -409,7 +420,7 @@ extension NetworkControlOperation {
         case .lockingLTEBands:
             return L10n.text("Applying LTE band lock…", language: language)
         case .restoring:
-            return L10n.text("Restoring automatic defaults…", language: language)
+            return L10n.text(modemKind == .zteMC7530CA ? "Restoring saved bands…" : "Restoring automatic defaults…", language: language)
         }
     }
 }

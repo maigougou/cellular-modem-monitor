@@ -1174,7 +1174,7 @@ final class StatusModel: ObservableObject {
         case .restoring:
             if activeModem?.identity.kind == .zteMC7530CA {
                 return L10n.text(
-                    "Automatic selection and the MC7530CA band/cell defaults were restored and verified.",
+                    "Saved LTE, SA and NSA bands were restored and verified. Radio mode, operator selection and cell locks were preserved.",
                     language: language
                 )
             }
@@ -1404,6 +1404,15 @@ final class StatusModel: ObservableObject {
 
     private func localizedError(_ error: Error) -> String {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        if let controlError = error as? ModemControlError,
+           case let .invalidBands(radio, bands) = controlError {
+            return L10n.format(
+                "These %@ bands are not in this device's saved band list: %@.",
+                language: language,
+                radio,
+                bands.map(String.init).joined(separator: ", ")
+            )
+        }
         if let backendError = error as? ModemBackendError {
             switch backendError {
             case .credentialsRequired(.web), .incompatibleCredentials(expected: .web, actual: _):

@@ -32,12 +32,17 @@ actor MC7530Backend: ModemControlBackend {
     }
 
     private let httpTransport: any ZTEHTTPTransport
+    private let bandBaselineStore: any MC7530BandBaselineStore
     private var sessionsByScope: [String: CachedSession] = [:]
 
     private static let requiredModelPrefix = "MC7530CA"
 
-    init(httpTransport: any ZTEHTTPTransport = NetworkBoundZTEHTTPTransport()) {
+    init(
+        httpTransport: any ZTEHTTPTransport = NetworkBoundZTEHTTPTransport(),
+        bandBaselineStore: any MC7530BandBaselineStore = FileMC7530BandBaselineStore.shared
+    ) {
         self.httpTransport = httpTransport
+        self.bandBaselineStore = bandBaselineStore
     }
 
     func identify(
@@ -133,7 +138,9 @@ actor MC7530Backend: ModemControlBackend {
         )
         do {
             try await validateTargetModel(session: context.session)
-            return try await MC7530ControlSession.open(session: context.session)
+            return try await MC7530ControlSession.open(
+                session: context.session, bandBaselineStore: bandBaselineStore
+            )
         } catch {
             rememberAuthenticationFailureIfCurrent(
                 error,

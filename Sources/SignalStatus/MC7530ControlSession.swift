@@ -71,11 +71,13 @@ private struct MC7530RawControlState: Equatable, Sendable {
             saBands: saBands,
             nsaBands: nsaBands,
             lteBands: lteBands,
-            availableNRBands: MC7530ControlSession.defaultNRBands,
-            availableLTEBands: MC7530ControlSession.defaultLTEBands,
-            canRestoreDefaults: true,
+            canRestoreDefaults: false,
             preferenceLifetime: .persistent
         )
+    }
+
+    var bandMasks: MC7530BandMasks {
+        MC7530BandMasks(saBands: saBands, nsaBands: nsaBands, lteBands: lteBands)
     }
 
     static func parse(_ payload: ZTEJSONValue) throws -> MC7530RawControlState {
@@ -242,12 +244,6 @@ actor MC7530ControlSession: ModemRestartSession {
     ]
     nonisolated let stableIdentifier: String
 
-    static let defaultLTEBands: Set<Int> = [
-        2, 4, 5, 7, 12, 13, 17, 25, 26, 29, 30, 38, 41, 42, 43, 48, 66, 71
-    ]
-    static let defaultNRBands: Set<Int> = [
-        2, 5, 7, 12, 25, 29, 30, 38, 41, 66, 71, 77
-    ]
     /// `nr5g_nrdc_band_lock` is a read-only capability/default list on this
     /// retail build: the exposed UBus schema has no corresponding setter.
     /// Restore is therefore allowed only while it already equals this exact
@@ -279,6 +275,7 @@ actor MC7530ControlSession: ModemRestartSession {
     private let expectedFingerprint: String
     private let timing: MC7530ControlTiming
     private let sleep: Sleeper
+    private let bandBaselineStore: any MC7530BandBaselineStore
     private var invalidated = false
     private var operationInProgress = false
     private var operationMutationAttempted = false
@@ -292,18 +289,21 @@ actor MC7530ControlSession: ModemRestartSession {
         session: ZTEAuthSession,
         expectedFingerprint: String,
         timing: MC7530ControlTiming,
+        bandBaselineStore: any MC7530BandBaselineStore,
         sleep: @escaping Sleeper
     ) {
         self.session = session
         self.expectedFingerprint = expectedFingerprint
         self.stableIdentifier = expectedFingerprint
         self.timing = timing
+        self.bandBaselineStore = bandBaselineStore
         self.sleep = sleep
     }
 
     static func open(
         session: ZTEAuthSession,
         timing: MC7530ControlTiming = .production,
+        bandBaselineStore: any MC7530BandBaselineStore = InMemoryMC7530BandBaselineStore(),
         sleep: @escaping Sleeper = { try await Task.sleep(nanoseconds: $0) }
     ) async throws -> MC7530ControlSession {
         let fingerprint = try await fetchFingerprint(session: session)
@@ -311,6 +311,7 @@ actor MC7530ControlSession: ModemRestartSession {
             session: session,
             expectedFingerprint: fingerprint,
             timing: timing,
+            bandBaselineStore: bandBaselineStore,
             sleep: sleep
         )
     }
@@ -339,7 +340,7 @@ actor MC7530ControlSession: ModemRestartSession {
         let raw = try await readRawState()
         try await validateDevice()
         reconcileKnownManualRegistration(with: raw)
-        return raw.controlState
+        return try presentation(for: raw)
     }
 
     func perform(_ command: ModemControlCommand) async throws -> ModemControlResult {
@@ -364,17 +365,66 @@ actor MC7530ControlSession: ModemRestartSession {
             let networks = try await scanNetworks()
             return ModemControlResult(state: try await refresh(), scannedNetworks: networks)
         case let .selectNetwork(network):
-            return ModemControlResult(state: try await selectNetwork(network).controlState)
+            return ModemControlResult(state: try presentation(for: await selectNetwork(network)))
         case .selectAutomaticNetwork:
-            return ModemControlResult(state: try await selectAutomaticNetwork().controlState)
+            return ModemControlResult(state: try presentation(for: await selectAutomaticNetwork()))
         case let .setArchitecture(mode):
-            return ModemControlResult(state: try await setArchitecture(mode).controlState)
+            return ModemControlResult(state: try presentation(for: await setArchitecture(mode)))
         case let .lockNRBands(bands):
-            return ModemControlResult(state: try await lockNRBands(bands).controlState)
+            return ModemControlResult(state: try presentation(for: await lockNRBands(bands)))
         case let .lockLTEBands(bands):
-            return ModemControlResult(state: try await lockLTEBands(bands).controlState)
+            return ModemControlResult(state: try presentation(for: await lockLTEBands(bands)))
         case .restoreDefaults:
-            return ModemControlResult(state: try await restoreDefaults().controlState)
+            return ModemControlResult(state: try presentation(for: await restoreDefaults()))
+        }
+    }
+
+    /// Call only after a read bracketed by physical identity checks, or after
+    /// a mutation's verified final read. Never learn transient poll/rollback values.
+    private func observedBaseline(for raw: MC7530RawControlState) throws -> MC7530BandBaseline {
+        guard raw.bandMasks.isValid else { throw ZTEUBusError.invalidResponse }
+        let saved = try bandBaselineStore.load(for: expectedFingerprint)
+        let now = Date()
+        var next = saved ?? MC7530BandBaseline(
+            observed: raw.bandMasks, restore: nil, capturedAt: now, updatedAt: now
+        )
+        next.observed = next.observed.union(raw.bandMasks)
+        if saved == nil || next.observed != saved?.observed {
+            next.updatedAt = now
+            try bandBaselineStore.save(next, for: expectedFingerprint)
+        }
+        return next
+    }
+
+    private func availableNRBands(
+        for mode: NRArchitectureMode, baseline: MC7530BandBaseline
+    ) -> Set<Int> {
+        switch mode {
+        case .automatic: return baseline.observed.saBands.intersection(baseline.observed.nsaBands)
+        case .saOnly: return baseline.observed.saBands
+        case .nsaOnly: return baseline.observed.nsaBands
+        case .lteOnly, .unavailable: return []
+        }
+    }
+
+    private func presentation(for raw: MC7530RawControlState) throws -> ModemControlState {
+        let baseline = try observedBaseline(for: raw)
+        var state = raw.controlState
+        state.availableNRBands = availableNRBands(for: raw.architecture, baseline: baseline)
+        state.availableLTEBands = baseline.observed.lteBands
+        state.hasSavedBandRestorePoint = baseline.restore != nil
+        state.canRestoreDefaults = true
+        return state
+    }
+
+    private func savePreLockBands(_ raw: MC7530RawControlState) throws {
+        var baseline = try observedBaseline(for: raw)
+        // Successive locks and reconnects must not replace the original wider
+        // selection with the already narrowed mask.
+        if baseline.restore == nil {
+            baseline.restore = raw.bandMasks
+            baseline.updatedAt = Date()
+            try bandBaselineStore.save(baseline, for: expectedFingerprint)
         }
     }
 
@@ -609,8 +659,10 @@ actor MC7530ControlSession: ModemRestartSession {
     }
 
     private func lockNRBands(_ bands: Set<Int>) async throws -> MC7530RawControlState {
-        try validateBands(bands, allowed: Self.defaultNRBands, radio: "NR")
         let previous = try await readRawState()
+        try await validateDevice()
+        let baseline = try observedBaseline(for: previous)
+        try validateBands(bands, allowed: availableNRBands(for: previous.architecture, baseline: baseline), radio: "NR")
         let previousManual = try replayableManualRegistration(
             for: previous,
             operation: "changing NR bands while manual selection is active"
@@ -634,7 +686,8 @@ actor MC7530ControlSession: ModemRestartSession {
             )
         }
         let expected = expectedState
-        let rollbackPlan = try Self.rollbackPlan(for: previous)
+        let rollbackPlan = try Self.rollbackPlan(for: previous, requireResetCompatibleNRDC: false)
+        try savePreLockBands(previous)
 
         do {
             switch previous.architecture {
@@ -668,7 +721,8 @@ actor MC7530ControlSession: ModemRestartSession {
                 try await self.restoreRaw(
                     previous,
                     manualRegistration: previousManual,
-                    rollbackPlan: rollbackPlan
+                    rollbackPlan: rollbackPlan,
+                    resetFirst: false
                 )
             }
             let rollback: String?
@@ -692,8 +746,10 @@ actor MC7530ControlSession: ModemRestartSession {
     }
 
     private func lockLTEBands(_ bands: Set<Int>) async throws -> MC7530RawControlState {
-        try validateBands(bands, allowed: Self.defaultLTEBands, radio: "LTE")
         let previous = try await readRawState()
+        try await validateDevice()
+        let baseline = try observedBaseline(for: previous)
+        try validateBands(bands, allowed: baseline.observed.lteBands, radio: "LTE")
         let previousManual = try replayableManualRegistration(
             for: previous,
             operation: "changing LTE bands while manual selection is active"
@@ -701,7 +757,8 @@ actor MC7530ControlSession: ModemRestartSession {
         var expectedState = previous
         expectedState.lteBands = bands
         let expected = expectedState
-        let rollbackPlan = try Self.rollbackPlan(for: previous)
+        let rollbackPlan = try Self.rollbackPlan(for: previous, requireResetCompatibleNRDC: false)
+        try savePreLockBands(previous)
         do {
             try await setLTEBands(bands)
             let final = try await pollRaw(attempts: timing.verificationAttempts) {
@@ -723,7 +780,8 @@ actor MC7530ControlSession: ModemRestartSession {
                 try await self.restoreRaw(
                     previous,
                     manualRegistration: previousManual,
-                    rollbackPlan: rollbackPlan
+                    rollbackPlan: rollbackPlan,
+                    resetFirst: false
                 )
             }
             let rollback: String?
@@ -748,51 +806,42 @@ actor MC7530ControlSession: ModemRestartSession {
 
     private func restoreDefaults() async throws -> MC7530RawControlState {
         let previous = try await readRawState()
+        try await validateDevice()
+        let baseline = try observedBaseline(for: previous)
+        // Historical observations are selection bounds, never an invented
+        // restore target. No pre-lock backup means there is nothing to undo.
+        guard let target = baseline.restore else { return previous }
+        var expectedState = previous
+        expectedState.saBands = target.saBands
+        expectedState.nsaBands = target.nsaBands
+        expectedState.lteBands = target.lteBands
+        let expected = expectedState
         let previousManual = try replayableManualRegistration(
             for: previous,
-            operation: "restoring vendor defaults while manual selection is active"
+            operation: "restoring saved bands while manual selection is active"
         )
-        // The global reset also owns legacy GW band and cell-lock state. Build
-        // and strictly validate the complete rollback request before the first
-        // write; malformed readback must never be discovered after reset.
-        let rollbackPlan = try Self.rollbackPlan(for: previous)
+        let rollbackPlan = try Self.rollbackPlan(for: previous, requireResetCompatibleNRDC: false)
         do {
-            try await write("nwinfo_reset_band_cell_setting")
-            let locksReset = try await pollRaw(attempts: timing.resetAttempts) { raw in
-                raw.nrdcBands == Self.defaultNRDCBands &&
-                    raw.lteCellLock.isEmpty && raw.nrCellLock.isEmpty
-            }
-            guard let locksReset else {
-                throw ModemControlError.timedOut("Restoring MC7530CA band and cell defaults")
-            }
-            let resetGWBandMask = try Self.rollbackPlan(for: locksReset).gwBandMask
-
-            // Retail MC7530CAV2.6 does not rebuild the SA/NSA allowlists when
-            // nwinfo_reset_band_cell_setting is called. It clears the cell
-            // locks, restores LTE, and changes the legacy GW mask to its own
-            // unlocked value, while leaving an NR lock such as `77` intact.
-            // Treat the reset's GW value as authoritative, but explicitly
-            // restore every writable LTE/NR vendor list before switching back
-            // to automatic SA/NSA mode.
-            try await setLTEBands(Self.defaultLTEBands)
-            try await setNRBands(Self.defaultNRBands, type: "0")
-            try await setNRBands(Self.defaultNRBands, type: "1")
-            try await setNetSelect(Self.automaticNetSelect)
+            // Restoring a band baseline is not a factory/cell reset. In
+            // particular, never replace owner-enabled bands with vendor constants.
+            if previous.lteBands != target.lteBands { try await setLTEBands(target.lteBands) }
+            if previous.saBands != target.saBands { try await setNRBands(target.saBands, type: "0") }
+            if previous.nsaBands != target.nsaBands { try await setNRBands(target.nsaBands, type: "1") }
             let final = try await pollRaw(attempts: timing.verificationAttempts) { raw in
-                raw.netSelect == Self.automaticNetSelect && raw.netSelectMode == "auto_select" &&
-                    raw.lteBands == Self.defaultLTEBands &&
-                    raw.saBands == Self.defaultNRBands &&
-                    raw.nsaBands == Self.defaultNRBands &&
-                    raw.nrdcBands == Self.defaultNRDCBands &&
-                    raw.gwBandLock.lowercased() == resetGWBandMask.lowercased() &&
-                    raw.lteCellLock.isEmpty && raw.nrCellLock.isEmpty
+                Self.persistentConfigurationMatches(raw, expected) &&
+                    (previous.netSelectMode != "manual_select" ||
+                        Self.manualRegistrationMatches(raw, previousManual))
             }
             guard let final else {
                 throw ModemControlError.verificationFailed(
-                    "MC7530CA automatic mode and unlocked band/cell defaults were not all confirmed on readback."
+                    "The saved MC7530CA bands and unchanged radio settings were not confirmed on readback."
                 )
             }
             try await validateDevice()
+            var restored = baseline
+            restored.restore = nil
+            restored.updatedAt = Date()
+            try bandBaselineStore.save(restored, for: expectedFingerprint)
             return final
         } catch {
             let operationError = error
@@ -801,7 +850,8 @@ actor MC7530ControlSession: ModemRestartSession {
                 try await self.restoreRaw(
                     previous,
                     manualRegistration: previousManual,
-                    rollbackPlan: rollbackPlan
+                    rollbackPlan: rollbackPlan,
+                    resetFirst: false
                 )
             }
             let rollback: String?
@@ -944,8 +994,14 @@ actor MC7530ControlSession: ModemRestartSession {
     private func restoreRaw(
         _ state: MC7530RawControlState,
         manualRegistration: MC7530ManualRegistration?,
-        rollbackPlan: MC7530CellLockRollbackPlan
+        rollbackPlan: MC7530CellLockRollbackPlan,
+        resetFirst: Bool = true
     ) async throws -> String? {
+        if !resetFirst {
+            return try await restoreBandOperation(
+                state, manualRegistration: manualRegistration, rollbackPlan: rollbackPlan
+            )
+        }
         var failures: [String] = []
 
         // Reset first so an unexpected collateral cell lock can also be
@@ -1052,6 +1108,86 @@ actor MC7530ControlSession: ModemRestartSession {
         return failures.joined(separator: "; ")
     }
 
+    /// An unsuccessful band setter must not trigger a global factory-band
+    /// reset. Firmware might reject an owner-enabled band; resetting first
+    /// would then unnecessarily erase a still-working expanded configuration.
+    private func restoreBandOperation(
+        _ state: MC7530RawControlState,
+        manualRegistration: MC7530ManualRegistration?,
+        rollbackPlan: MC7530CellLockRollbackPlan
+    ) async throws -> String? {
+        try await validatePhysicalDevice()
+        let current = try await readRawState(allowInvalidatedSession: true)
+        try await validatePhysicalDevice()
+        var steps: [(String, () async throws -> Void)] = []
+        if current.lteBands != state.lteBands {
+            steps.append(("LTE bands", {
+                try await self.setLTEBands(state.lteBands, allowInvalidatedSession: true)
+            }))
+        }
+        if current.saBands != state.saBands {
+            steps.append(("SA bands", {
+                try await self.setNRBands(state.saBands, type: "0", allowInvalidatedSession: true)
+            }))
+        }
+        if current.nsaBands != state.nsaBands {
+            steps.append(("NSA bands", {
+                try await self.setNRBands(state.nsaBands, type: "1", allowInvalidatedSession: true)
+            }))
+        }
+        if current.gwBandLock.lowercased() != state.gwBandLock.lowercased() {
+            steps.append(("legacy GW bands", {
+                try await self.setGWBandMask(rollbackPlan.gwBandMask, allowInvalidatedSession: true)
+            }))
+        }
+        if current.lteCellLock != state.lteCellLock, let parameters = rollbackPlan.lteParameters {
+            steps.append(("LTE cell lock", {
+                try await self.write("nwinfo_lock_lte_cell", parameters: parameters, allowInvalidatedSession: true)
+            }))
+        }
+        if current.nrCellLock != state.nrCellLock, let parameters = rollbackPlan.nrParameters {
+            steps.append(("NR cell lock", {
+                try await self.write("nwinfo_lock_nr_cell", parameters: parameters, allowInvalidatedSession: true)
+            }))
+        }
+        let modeChanged = current.netSelect != state.netSelect || current.netSelectMode != state.netSelectMode
+        if modeChanged {
+            steps.append(("radio access mode", {
+                try await self.setNetSelect(state.netSelect, allowInvalidatedSession: true)
+            }))
+        }
+        if state.netSelectMode == "manual_select",
+           modeChanged || !Self.manualRegistrationMatches(current, manualRegistration) {
+            steps.append(("manual operator", {
+                try await self.restoreManualOperator(
+                    manualRegistration, netSelect: state.netSelect, allowInvalidatedSession: true
+                )
+            }))
+        }
+        var failures: [String] = []
+        for (label, operation) in steps {
+            if let failure = try await recoveryStep(label, operation: operation) {
+                failures.append(failure)
+            }
+        }
+        // There is no verified direct setter for NRDC or clearing an empty
+        // cell lock. Leave unexplained collateral changes visible as failure,
+        // rather than widening recovery into a destructive global reset.
+        let recovered = try await pollRaw(
+            attempts: timing.verificationAttempts, allowInvalidatedSession: true
+        ) { current in
+            Self.persistentConfigurationMatches(current, state) &&
+                (state.netSelectMode != "manual_select" ||
+                    Self.manualRegistrationMatches(current, manualRegistration))
+        }
+        if recovered != nil {
+            try await validatePhysicalDevice()
+            return nil
+        }
+        failures.append("the exact pre-operation state was not confirmed without a global reset")
+        return failures.joined(separator: "; ")
+    }
+
     private func recoveryStep(
         _ label: String,
         operation: () async throws -> Void
@@ -1066,9 +1202,10 @@ actor MC7530ControlSession: ModemRestartSession {
     }
 
     private static func rollbackPlan(
-        for state: MC7530RawControlState
+        for state: MC7530RawControlState,
+        requireResetCompatibleNRDC: Bool = true
     ) throws -> MC7530CellLockRollbackPlan {
-        guard state.nrdcBands == defaultNRDCBands else {
+        guard !requireResetCompatibleNRDC || state.nrdcBands == defaultNRDCBands else {
             throw ModemControlError.invalidState(
                 "The MC7530CA NRDC list is not the verified retail default and has no exposed rollback setter; the control operation was blocked before any write."
             )

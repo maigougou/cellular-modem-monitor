@@ -1207,6 +1207,49 @@ final class SignalStatusTests: XCTestCase {
         }
     }
 
+    func testMC7530ObservedMasksUnionKeepsSAAndNSASeparate() {
+        let original = MC7530BandMasks(saBands: [5, 77], nsaBands: [66, 77], lteBands: [2, 4])
+        let added = MC7530BandMasks(saBands: [48, 78], nsaBands: [78], lteBands: [18, 19])
+        let union = original.union(added)
+
+        XCTAssertEqual(union.saBands, Set([5, 48, 77, 78]))
+        XCTAssertEqual(union.nsaBands, Set([66, 77, 78]))
+        XCTAssertEqual(union.lteBands, Set([2, 4, 18, 19]))
+        XCTAssertTrue(union.isValid)
+        XCTAssertFalse(MC7530BandMasks(saBands: [], nsaBands: [78], lteBands: [18]).isValid)
+        XCTAssertFalse(MC7530BandMasks(saBands: [513], nsaBands: [78], lteBands: [18]).isValid)
+        XCTAssertFalse(MC7530BandMasks(saBands: [78], nsaBands: [0], lteBands: [18]).isValid)
+        XCTAssertFalse(MC7530BandMasks(saBands: [78], nsaBands: [78], lteBands: [257]).isValid)
+    }
+
+    func testMC7530BaselineRequiresObservedRestoreMasksAndConsistentDates() {
+        let masks = MC7530BandMasks(saBands: [48, 78], nsaBands: [48, 78], lteBands: [18, 19])
+        let now = Date()
+        var baseline = MC7530BandBaseline(observed: masks, restore: masks, capturedAt: now, updatedAt: now)
+        XCTAssertTrue(baseline.isValid)
+        baseline.restore = MC7530BandMasks(saBands: [77], nsaBands: [78], lteBands: [18])
+        XCTAssertFalse(baseline.isValid)
+        baseline.restore = nil
+        baseline.updatedAt = now.addingTimeInterval(-1)
+        XCTAssertFalse(baseline.isValid)
+    }
+
+    func testMC7530MemoryBandStoreIsolatesPhysicalDevicesAndRejectsRawIdentifiers() throws {
+        let store = InMemoryMC7530BandBaselineStore()
+        let alpha = try MC7530ControlSession.fingerprint(modemMSN: "fixture-device-alpha")
+        let beta = try MC7530ControlSession.fingerprint(modemMSN: "fixture-device-beta")
+        let masks = MC7530BandMasks(saBands: [48, 78], nsaBands: [48, 78], lteBands: [18, 19])
+        let now = Date()
+        let baseline = MC7530BandBaseline(observed: masks, restore: masks, capturedAt: now, updatedAt: now)
+        try store.save(baseline, for: alpha)
+
+        XCTAssertEqual(try store.load(for: alpha), baseline)
+        XCTAssertNil(try store.load(for: beta))
+        XCTAssertNil(try InMemoryMC7530BandBaselineStore().load(for: alpha))
+        XCTAssertThrowsError(try store.save(baseline, for: "fixture-device-alpha"))
+        XCTAssertThrowsError(try store.load(for: alpha.uppercased()))
+    }
+
     func testMC7530ScanContentsPreserveExactRegistrationTokens() throws {
         let networks = try MC7530ControlSession.parseNetworks(
             "1,Fixture LTE,00101,7;2,Fixture NSA,00102,13;3,Fixture SA,00103,11;"
@@ -1242,6 +1285,7 @@ final class SignalStatusTests: XCTestCase {
                 verificationAttempts: 1,
                 resetAttempts: 1
             ),
+            bandBaselineStore: InMemoryMC7530BandBaselineStore(),
             sleep: { _ in }
         )
 
@@ -1256,6 +1300,8 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(state.lteBands, Set([2, 4, 66]))
         XCTAssertEqual(state.saBands, Set([5, 77]))
         XCTAssertEqual(state.nsaBands, Set([2, 66, 77]))
+        XCTAssertEqual(state.availableNRBands, Set([2, 66, 77]))
+        XCTAssertEqual(state.availableLTEBands, Set([2, 4, 66]))
         XCTAssertEqual(state.preferenceLifetime, .persistent)
 
         let records = await http.records()
@@ -1289,6 +1335,7 @@ final class SignalStatusTests: XCTestCase {
                 verificationAttempts: 1,
                 resetAttempts: 1
             ),
+            bandBaselineStore: InMemoryMC7530BandBaselineStore(),
             sleep: { _ in }
         )
 
@@ -1317,7 +1364,9 @@ final class SignalStatusTests: XCTestCase {
         )
 
         do {
-            _ = try await MC7530ControlSession.open(session: auth)
+            _ = try await MC7530ControlSession.open(
+                session: auth, bandBaselineStore: InMemoryMC7530BandBaselineStore()
+            )
             XCTFail("Only the verified modem_msn field may bind a control session")
         } catch let error as ModemBackendError {
             XCTAssertEqual(error, .identityUnavailable)
@@ -1340,7 +1389,9 @@ final class SignalStatusTests: XCTestCase {
             transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
             password: "fixture-password"
         )
-        let session = try await MC7530ControlSession.open(session: auth)
+        let session = try await MC7530ControlSession.open(
+            session: auth, bandBaselineStore: InMemoryMC7530BandBaselineStore()
+        )
 
         do {
             _ = try await session.perform(.selectAutomaticNetwork)

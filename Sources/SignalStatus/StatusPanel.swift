@@ -506,7 +506,7 @@ struct StatusPanel: View {
                 if let operation = model.controlOperation, !isRadioControlOperation(operation) {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
-                        Text(operation.localizedLabel(language: language))
+                        Text(operation.localizedLabel(language: language, modemKind: model.activeModem?.identity.kind))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -640,19 +640,20 @@ struct StatusPanel: View {
             }
             if model.controlState != nil, !model.canRestoreControlDefaults {
                 Label(
-                    L10n.text("Automatic defaults were not available to capture. Reconnect or power-cycle the modem, then close and reopen this panel before changing radio access mode.", language: language),
+                    L10n.text(
+                        restoresSavedBands
+                            ? "A saved band baseline is unavailable. Reconnect and reopen this panel to read and save this modem's bands before making changes."
+                            : "Automatic defaults were not available to capture. Reconnect or power-cycle the modem, then close and reopen this panel before changing radio access mode.",
+                        language: language
+                    ),
                     systemImage: "info.circle"
                 )
                 .font(.caption2)
                 .foregroundStyle(.orange)
             }
 
-            if supportsRestoreDefaults {
-                Button(L10n.text("Restore automatic defaults", language: language)) {
-                    pendingControl = .restoreDefaults
-                }
-                .buttonStyle(.bordered)
-                .disabled(controlsDisabled || !model.canRestoreControlDefaults)
+            if supportsRestoreDefaults && !restoresSavedBands {
+                restoreControlButton
             }
         }
     }
@@ -674,7 +675,7 @@ struct StatusPanel: View {
         if let operation = model.controlOperation {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
-                Text(operation.localizedLabel(language: language))
+                Text(operation.localizedLabel(language: language, modemKind: model.activeModem?.identity.kind))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -696,6 +697,16 @@ struct StatusPanel: View {
                     .font(.caption.weight(.semibold))
                 Spacer()
                 ContextHelp(message: bandLockPersistenceDescription)
+            }
+
+            if restoresSavedBands {
+                HStack {
+                    Text(L10n.text("Device-reported saved bands", language: language))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    ContextHelp(message: L10n.text("Choices combine band preferences read from this modem and saved on this Mac, so locking a subset does not erase earlier choices. This is not a hardware-capability or network scan. If the modem was already locked on first connection, the list may be incomplete. Restore is available only after this app saves a pre-lock restore point; it cannot reconstruct an earlier external lock.", language: language))
+                }
             }
 
             if model.supportsControl(.nrBandLock) {
@@ -771,7 +782,25 @@ struct StatusPanel: View {
                     )
                 }
             }
+            if supportsRestoreDefaults && restoresSavedBands {
+                restoreControlButton
+            }
         }
+    }
+
+    private var restoresSavedBands: Bool {
+        model.activeModem?.identity.kind == .zteMC7530CA
+    }
+
+    private var restoreControlButton: some View {
+        Button(L10n.text(restoresSavedBands ? "Restore saved bands" : "Restore automatic defaults", language: language)) {
+            pendingControl = .restoreDefaults
+        }
+        .buttonStyle(.bordered)
+        .disabled(
+            controlsDisabled || !model.canRestoreControlDefaults ||
+                (restoresSavedBands && model.controlState?.hasSavedBandRestorePoint == false)
+        )
     }
 
     private var nrBandOptions: [Int] {
@@ -817,11 +846,14 @@ struct StatusPanel: View {
     }
 
     private var bandLockPersistenceDescription: String {
+        if restoresSavedBands {
+            return L10n.text("Uncheck bands to restrict the modem. Locks persist across restarts. Restore saved bands restores this modem's saved pre-lock LTE, SA and NSA preferences only; radio mode, operator and cell locks are preserved.", language: language)
+        }
         switch model.controlState?.preferenceLifetime ?? .unknown {
         case .untilPowerLoss:
             return L10n.text("Uncheck bands to restrict the modem. Locks last until the modem loses power; Restore automatic defaults restores the captured masks.", language: language)
         case .persistent:
-            return L10n.text("Uncheck bands to restrict the modem. Locks persist across restarts until changed or restored; Restore automatic defaults restores the modem's vendor defaults.", language: language)
+            return L10n.text("Uncheck bands to restrict the modem. Locks persist across restarts until changed or restored; each change is read back and verified.", language: language)
         case .unknown:
             return L10n.text("Uncheck bands to restrict the modem. Locks are read back after each change; the modem did not report whether they persist across restarts.", language: language)
         }
@@ -1346,7 +1378,7 @@ private struct InlineControlConfirmation: View {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text(confirmation.title(language: language))
+                Text(confirmation.title(language: language, modemKind: modemKind))
                     .font(.caption.weight(.semibold))
             }
 
@@ -1485,7 +1517,7 @@ private enum ControlConfirmation: Identifiable {
         }
     }
 
-    func title(language: AppLanguage) -> String {
+    func title(language: AppLanguage, modemKind: ModemKind?) -> String {
         switch self {
         case .scan: return L10n.text("Scan cellular networks?", language: language)
         case .manualNetwork: return L10n.text("Select this network manually?", language: language)
@@ -1498,7 +1530,8 @@ private enum ControlConfirmation: Identifiable {
             )
         case .nrBandLock: return L10n.text("Lock NR bands?", language: language)
         case .lteBandLock: return L10n.text("Lock LTE bands?", language: language)
-        case .restoreDefaults: return L10n.text("Restore automatic defaults?", language: language)
+        case .restoreDefaults:
+            return L10n.text(modemKind == .zteMC7530CA ? "Restore saved bands?" : "Restore automatic defaults?", language: language)
         }
     }
 
@@ -1551,7 +1584,7 @@ private enum ControlConfirmation: Identifiable {
                 )
         case .restoreDefaults:
             if modemKind == .zteMC7530CA {
-                return L10n.text("This clears configured LTE, SA and NSA band locks and LTE/NR cell locks, restores the modem's vendor band defaults, and returns operator selection to automatic. The result will be read back and verified.", language: language)
+                return L10n.text("This restores only the LTE, SA and NSA preferences saved for this modem before band locking. Radio mode, operator selection, legacy bands, NRDC and cell locks remain unchanged. This is not a factory reset. Data may be interrupted; exact readback verifies the result.", language: language)
             }
             return L10n.text("This restores the original LTE, SA and NSA masks captured in this app session and returns operator selection to automatic. Both results will be read back and verified.", language: language)
         }

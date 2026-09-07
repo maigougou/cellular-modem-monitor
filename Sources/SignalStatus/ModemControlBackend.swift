@@ -10,11 +10,14 @@ struct ModemControlState: Equatable, Sendable {
     var saBands: Set<Int>
     var nsaBands: Set<Int>
     var lteBands: Set<Int>
-    /// Bands the bound modem can restore/enable. These come from the verified
-    /// vendor defaults (MC7530CA) or the automatic masks captured when the
-    /// control session opened (VOS), rather than from a generic band table.
+    /// Device-derived selection bounds, not a generic/model band table. ZTE
+    /// retains authenticated reported preferences per physical modem; VOS uses
+    /// its captured automatic masks. Neither is a claim about complete RF capability.
     var availableNRBands: Set<Int>? = nil
     var availableLTEBands: Set<Int>? = nil
+    /// nil keeps backends with session-wide restore semantics unchanged. ZTE
+    /// sets this only when a durable, exact pre-band-lock restore point exists.
+    var hasSavedBandRestorePoint: Bool? = nil
     var canRestoreDefaults: Bool
     var preferenceLifetime: ModemPreferenceLifetime
 
@@ -157,7 +160,7 @@ enum ModemControlError: LocalizedError, Equatable, Sendable {
             return message
         case let .invalidBands(radio, bands):
             let values = bands.map(String.init).joined(separator: ", ")
-            return "These \(radio) bands are not enabled by the modem defaults: \(values)."
+            return "These \(radio) bands are not in this device's saved band list: \(values)."
         case let .rollbackFailed(operation, rollback):
             let detail = rollback.trimmingCharacters(in: .whitespacesAndNewlines)
             let terminatedDetail: String

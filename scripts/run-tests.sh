@@ -29,6 +29,7 @@ compile() {
     "$project_dir/Sources/SignalStatus/ZTEUBusTransport.swift" \
     "$project_dir/Sources/SignalStatus/ZTEAuthSession.swift" \
     "$project_dir/Sources/SignalStatus/MC7530Parser.swift" \
+    "$project_dir/Sources/SignalStatus/MC7530BandBaseline.swift" \
     "$project_dir/Sources/SignalStatus/MC7530ControlSession.swift" \
     "$project_dir/Sources/SignalStatus/MC7530Backend.swift" \
     "$project_dir/Sources/SignalStatus/ModemCoordinator.swift" \

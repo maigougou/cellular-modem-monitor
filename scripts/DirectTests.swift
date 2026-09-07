@@ -2952,9 +2952,9 @@ enum DirectTests {
                   "MC7530 netinfo maps all band sets", failures: &failures)
             check(state.canRestoreDefaults && state.preferenceLifetime == .persistent,
                   "MC7530 neutral state reports persistent/restorable controls", failures: &failures)
-            check(state.availableNRBands == MC7530ControlSession.defaultNRBands &&
-                    state.availableLTEBands == MC7530ControlSession.defaultLTEBands,
-                  "MC7530 picker exposes verified vendor band defaults", failures: &failures)
+            check(state.availableNRBands == Set([2, 66, 77]) &&
+                    state.availableLTEBands == Set([2, 4, 66]),
+                  "MC7530 picker exposes the authenticated device's observed bands", failures: &failures)
             let records = await http.records()
             let controlCalls = records.filter { $0.object == "zte_nwinfo_api" }
             check(controlCalls.allSatisfy {
@@ -3260,17 +3260,17 @@ enum DirectTests {
             automatic.netSelect = "WL_AND_NSA"
             let http = DirectStatefulMC7530HTTPTransport(state: automatic)
             let session = try await openMC7530ControlSession(http: http, timing: timing)
-            let nrResult = try await session.perform(.lockNRBands(Set([5, 77])))
+            let nrResult = try await session.perform(.lockNRBands(Set([77])))
             let lteResult = try await session.perform(.lockLTEBands(Set([2, 66])))
-            check(nrResult.state.saBands == Set([5, 77]) && nrResult.state.nsaBands == Set([5, 77]),
+            check(nrResult.state.saBands == Set([77]) && nrResult.state.nsaBands == Set([77]),
                   "MC7530 automatic mode verifies both SA and NSA locks", failures: &failures)
             check(lteResult.state.lteBands == Set([2, 66]),
                   "MC7530 verifies LTE lock readback", failures: &failures)
             let records = await http.records()
             let nrWrites = records.filter { $0.ubusMethod == "nwinfo_set_nrbandlock" }
             check(nrWrites.map(\.parameters) == [
-                ["nr5g_band": "5,77", "nr5g_type": "0"],
-                ["nr5g_band": "5,77", "nr5g_type": "1"]
+                ["nr5g_band": "77", "nr5g_type": "0"],
+                ["nr5g_band": "77", "nr5g_type": "1"]
             ], "MC7530 NR lock writes exact sorted SA/NSA parameters", failures: &failures)
             let lteWrite = records.first { $0.ubusMethod == "nwinfo_set_lte_ext_band" }
             check(lteWrite?.parameters == ["lte_band": "2,66"],
@@ -3284,6 +3284,301 @@ enum DirectTests {
         }
 
         await runMC7530RollbackRestoreAndIdentityTests(timing: timing, failures: &failures)
+        await runMC7530DynamicBandTests(timing: timing, failures: &failures)
+    }
+
+    private static func runMC7530DynamicBandTests(
+        timing: MC7530ControlTiming,
+        failures: inout [String]
+    ) async {
+        do {
+            var expanded = DirectMC7530FixtureState.baseline
+            expanded.netSelect = "WL_AND_NSA"
+            expanded.saBands.formUnion([48, 78])
+            expanded.nsaBands.formUnion([48, 78])
+            expanded.lteBands.formUnion([18, 19])
+            expanded.nrdcBands = [77] // Not used as an SA/NSA capability source.
+            expanded.gwBandLock = "0x123"
+            expanded.lteCellLock = "17,5010"
+            expanded.nrCellLock = "42,640000,77"
+            let store = InMemoryMC7530BandBaselineStore()
+            let http = DirectStatefulMC7530HTTPTransport(state: expanded)
+            let session = try await openMC7530ControlSession(
+                http: http, timing: timing, bandBaselineStore: store
+            )
+            let initial = try await session.refresh()
+            check(initial.availableNRBands == Set([48, 77, 78]) &&
+                    initial.availableLTEBands == expanded.lteBands && initial.hasSavedBandRestorePoint == false,
+                  "MC7530 dynamically discovers n48/n78/B18/B19 from device readback", failures: &failures)
+            _ = try await session.perform(.lockNRBands([78]))
+            _ = try await session.perform(.lockLTEBands([18]))
+            _ = try await session.perform(.lockNRBands([48]))
+            _ = try await session.perform(.lockLTEBands([19]))
+            let saved = try store.load(for: session.stableIdentifier)
+            check(saved?.restore == expanded.bandMasks && saved?.observed == expanded.bandMasks,
+                  "MC7530 subsequent band locks retain the exact first pre-lock snapshot", failures: &failures)
+            let reopened = try await openMC7530ControlSession(
+                http: http, timing: timing, bandBaselineStore: store
+            )
+            let locked = try await reopened.refresh()
+            check(locked.saBands == Set([48]) && locked.nsaBands == Set([48]) &&
+                    locked.lteBands == Set([19]) && locked.availableNRBands == initial.availableNRBands &&
+                    locked.availableLTEBands == expanded.lteBands && locked.hasSavedBandRestorePoint == true,
+                  "MC7530 fresh sessions keep observed choices after narrowing all locks", failures: &failures)
+            var current = await http.currentState()
+            current.netSelect = "LTE_AND_5G"
+            current.netSelectMode = "manual_select"
+            current.gwBandLock = "0x456"
+            await http.replaceState(current)
+            _ = try await reopened.perform(.scanNetworks) // Captures exact current manual RAT token.
+            let restored = try await reopened.perform(.restoreDefaults)
+            var expected = current
+            expected.lteBands = expanded.lteBands
+            expected.saBands = expanded.saBands
+            expected.nsaBands = expanded.nsaBands
+            let actual = await http.currentState()
+            check(actual == expected && restored.state.architecture == .nsaOnly &&
+                    restored.state.operatorSelection?.mode == .manual && restored.state.hasSavedBandRestorePoint == false,
+                  "MC7530 restore preserves the current architecture, NRDC, GW, operator, and cells", failures: &failures)
+            let afterRestore = try store.load(for: reopened.stableIdentifier)
+            check(afterRestore?.restore == nil && afterRestore?.observed == expanded.bandMasks,
+                  "MC7530 verified restore clears only the restore marker, not observed history", failures: &failures)
+            let allRecords = await http.records()
+            let writes = allRecords.compactMap(\.ubusMethod).filter { $0.hasPrefix("nwinfo_set_") }
+            check(writes.allSatisfy { ["nwinfo_set_nrbandlock", "nwinfo_set_lte_ext_band"].contains($0) } &&
+                    !allRecords.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" },
+                  "MC7530 successful dynamic band controls never reset mode or unrelated masks", failures: &failures)
+            _ = try await reopened.perform(.restoreDefaults)
+            let secondRestoreRecords = await http.records()
+            check(secondRestoreRecords.filter { ($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") }.count == writes.count,
+                  "MC7530 repeated restore without a saved restore point is a no-op", failures: &failures)
+        } catch {
+            failures.append("MC7530 expanded-band persistence and targeted restore: \(error)")
+        }
+
+        do {
+            var state = DirectMC7530FixtureState.baseline
+            state.netSelect = "WL_AND_NSA"
+            let http = DirectStatefulMC7530HTTPTransport(state: state)
+            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let automatic = try await session.refresh()
+            check(automatic.availableNRBands == Set([77]),
+                  "MC7530 automatic mode exposes the observed SA/NSA intersection", failures: &failures)
+            for rejectedBand in [5, 48, 78] {
+                do {
+                    _ = try await session.perform(.lockNRBands([rejectedBand]))
+                    failures.append("MC7530 automatic mode must reject unobserved-on-both-paths n\(rejectedBand)")
+                } catch let error as ModemControlError {
+                    check(error == .invalidBands(radio: "NR", bands: [rejectedBand]),
+                          "MC7530 dynamic NR rejection reports the unobserved band", failures: &failures)
+                }
+            }
+            let records = await http.records()
+            check(!records.contains { ($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") },
+                  "MC7530 asymmetric/unobserved NR requests fail before any setter", failures: &failures)
+            state.netSelect = "Only_5G"
+            await http.replaceState(state)
+            let sa = try await session.refresh()
+            check(sa.availableNRBands == state.saBands,
+                  "MC7530 SA-only mode exposes only its observed path", failures: &failures)
+            state.netSelect = "LTE_AND_5G"
+            await http.replaceState(state)
+            let nsa = try await session.refresh()
+            check(nsa.availableNRBands == state.nsaBands,
+                  "MC7530 NSA-only mode exposes only its observed path", failures: &failures)
+            state.saBands.formUnion([48, 78])
+            state.nsaBands.formUnion([48, 78])
+            state.lteBands.formUnion([18, 19])
+            await http.replaceState(state)
+            let expanded = try await session.refresh()
+            await http.replaceState(.baseline)
+            let narrowed = try await session.refresh()
+            check(expanded.availableNRBands == narrowed.availableNRBands &&
+                    narrowed.availableNRBands?.contains(78) == true && narrowed.availableNRBands?.contains(48) == true &&
+                    narrowed.availableLTEBands?.contains(18) == true && narrowed.availableLTEBands?.contains(19) == true,
+                  "MC7530 later authenticated external expansion is learned and not lost on narrower reads", failures: &failures)
+        } catch {
+            failures.append("MC7530 path-specific dynamic band validation: \(error)")
+        }
+
+        do {
+            let store = InMemoryMC7530BandBaselineStore()
+            var expanded = DirectMC7530FixtureState.baseline
+            expanded.saBands.insert(78)
+            expanded.nsaBands.insert(78)
+            expanded.lteBands.formUnion([18, 19])
+            let alphaHTTP = DirectStatefulMC7530HTTPTransport(state: expanded)
+            let alpha = try await openMC7530ControlSession(
+                http: alphaHTTP, timing: timing, bandBaselineStore: store
+            )
+            _ = try await alpha.refresh()
+            var narrow = DirectMC7530FixtureState.baseline
+            narrow.netSelect = "WL_AND_NSA"
+            narrow.saBands = [77]
+            narrow.nsaBands = [77]
+            narrow.lteBands = [2]
+            let betaHTTP = DirectStatefulMC7530HTTPTransport(
+                state: narrow, fingerprintSequence: ["fixture-device-beta"]
+            )
+            let beta = try await openMC7530ControlSession(
+                http: betaHTTP, timing: timing, bandBaselineStore: store
+            )
+            let betaState = try await beta.refresh()
+            check(betaState.availableNRBands == Set([77]) && betaState.availableLTEBands == Set([2]),
+                  "MC7530 first-seen locked modem invents no bands and inherits no other-device history", failures: &failures)
+            _ = try await beta.perform(.restoreDefaults)
+            let betaAfterRestore = await betaHTTP.currentState()
+            check(betaAfterRestore == narrow,
+                  "MC7530 missing pre-lock history makes restore a no-op", failures: &failures)
+            let alphaSaved = try store.load(for: alpha.stableIdentifier)
+            check(alphaSaved?.observed == expanded.bandMasks,
+                  "MC7530 another device's control operations do not change prior observations", failures: &failures)
+        } catch {
+            failures.append("MC7530 missing history and cross-device isolation: \(error)")
+        }
+
+        do {
+            let store = InMemoryMC7530BandBaselineStore()
+            let http = DirectStatefulMC7530HTTPTransport(
+                state: .baseline,
+                fingerprintSequence: ["fixture-device-alpha", "fixture-device-alpha", "fixture-device-beta"]
+            )
+            let session = try await openMC7530ControlSession(
+                http: http, timing: timing, bandBaselineStore: store
+            )
+            do {
+                _ = try await session.refresh()
+                failures.append("MC7530 mid-read device change must fail refresh")
+            } catch let error as ModemControlError {
+                check(error == .deviceChanged, "MC7530 post-read identity mismatch is explicit", failures: &failures)
+            }
+            let saved = try store.load(for: session.stableIdentifier)
+            check(saved == nil,
+                  "MC7530 mismatched post-read fingerprint never contaminates observed history", failures: &failures)
+        } catch {
+            failures.append("MC7530 baseline learning identity gate: \(error)")
+        }
+
+        do {
+            var expanded = DirectMC7530FixtureState.baseline
+            expanded.saBands.insert(78)
+            expanded.nsaBands.insert(78)
+            expanded.lteBands.formUnion([18, 19])
+            let store = InMemoryMC7530BandBaselineStore()
+            let http = DirectStatefulMC7530HTTPTransport(state: expanded)
+            let session = try await openMC7530ControlSession(
+                http: http, timing: timing, bandBaselineStore: store
+            )
+            _ = try await session.perform(.lockNRBands([78]))
+            let before = try store.load(for: session.stableIdentifier)
+            let locked = await http.currentState()
+            await http.ignoreNextLTEWrite()
+            do {
+                _ = try await session.perform(.lockLTEBands([18]))
+                failures.append("MC7530 ignored LTE write must preserve active recovery marker")
+            } catch {}
+            let after = try store.load(for: session.stableIdentifier)
+            let actual = await http.currentState()
+            check(after?.restore == before?.restore && after?.observed == before?.observed && actual == locked,
+                  "MC7530 failed later locks preserve both exact device state and first recovery snapshot", failures: &failures)
+            _ = try await session.perform(.restoreDefaults)
+            let final = await http.currentState()
+            check(final == expanded,
+                  "MC7530 a failed intermediate lock does not prevent restoring newly observed bands", failures: &failures)
+        } catch {
+            failures.append("MC7530 recovery snapshot survives failed locks: \(error)")
+        }
+
+        do {
+            let store = DirectFailingBandBaselineStore()
+            let http = DirectStatefulMC7530HTTPTransport(state: .baseline)
+            let session = try await openMC7530ControlSession(
+                http: http, timing: timing, bandBaselineStore: store
+            )
+            _ = try await session.refresh()
+            store.rejectFutureSaves()
+            do {
+                _ = try await session.perform(.lockLTEBands([2]))
+                failures.append("MC7530 unable-to-save pre-lock backup must block setter")
+            } catch {}
+            let saved = try store.load(for: session.stableIdentifier)
+            let records = await http.records()
+            check(saved?.restore == nil && !records.contains {
+                ($0.ubusMethod ?? "").hasPrefix("nwinfo_set_")
+            }, "MC7530 failed durable pre-lock capture prevents all device mutations", failures: &failures)
+        } catch {
+            failures.append("MC7530 failed backup save gate: \(error)")
+        }
+
+        await runMC7530BandStoreTests(timing: timing, failures: &failures)
+    }
+
+    private static func runMC7530BandStoreTests(
+        timing: MC7530ControlTiming,
+        failures: inout [String]
+    ) async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CMM-band-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        do {
+            let file = directory.appendingPathComponent("band-baselines.json")
+            let store = FileMC7530BandBaselineStore(fileURL: file)
+            let alpha = try MC7530ControlSession.fingerprint(modemMSN: "fixture-device-alpha")
+            let beta = try MC7530ControlSession.fingerprint(modemMSN: "fixture-device-beta")
+            let masks = DirectMC7530FixtureState.baseline.bandMasks
+            let now = Date()
+            let baseline = MC7530BandBaseline(observed: masks, restore: masks, capturedAt: now, updatedAt: now)
+            check(try store.load(for: alpha) == nil,
+                  "MC7530 missing store is an empty history", failures: &failures)
+            try store.save(baseline, for: alpha)
+            let reopened = FileMC7530BandBaselineStore(fileURL: file)
+            check(try reopened.load(for: alpha) == baseline && reopened.load(for: beta) == nil,
+                  "MC7530 file store round-trips separate device recovery records", failures: &failures)
+            let permissions = try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber
+            check(permissions?.intValue == 0o600, "MC7530 recovery file is owner-only", failures: &failures)
+            let encoded = try Data(contentsOf: file)
+            check(!String(decoding: encoded, as: UTF8.self).contains("fixture-device-alpha"),
+                  "MC7530 durable recovery records contain no raw device serial", failures: &failures)
+            for badKey in ["fixture-device-alpha", "192.0.2.1", alpha.uppercased()] {
+                checkThrows("MC7530 store rejects noncanonical device key", failures: &failures) {
+                    try store.save(baseline, for: badKey)
+                }
+            }
+            var invalid = baseline
+            invalid.restore = MC7530BandMasks(saBands: [78], nsaBands: [78], lteBands: [18])
+            checkThrows("MC7530 store rejects restore masks not included in observed history", failures: &failures) {
+                try store.save(invalid, for: alpha)
+            }
+            check(try Data(contentsOf: file) == encoded,
+                  "MC7530 invalid save does not alter recovery bytes", failures: &failures)
+            let corrupt = Data("{not valid recovery data".utf8)
+            try corrupt.write(to: file)
+            checkThrows("MC7530 corrupt baseline load fails closed", failures: &failures) {
+                _ = try store.load(for: alpha)
+            }
+            checkThrows("MC7530 corrupt baseline save fails closed", failures: &failures) {
+                try store.save(baseline, for: alpha)
+            }
+            let http = DirectStatefulMC7530HTTPTransport(state: .baseline)
+            do {
+                let session = try await openMC7530ControlSession(
+                    http: http, timing: timing, bandBaselineStore: store
+                )
+                _ = try await session.perform(.lockLTEBands([2]))
+                failures.append("MC7530 corrupt recovery store must block a band write")
+            } catch {}
+            let records = await http.records()
+            let remainingCorruptData = try Data(contentsOf: file)
+            check(!records.contains { ($0.ubusMethod ?? "").hasPrefix("nwinfo_set_") } &&
+                    remainingCorruptData == corrupt,
+                  "MC7530 corrupt recovery evidence remains intact and blocks device mutation", failures: &failures)
+            try Data(#"{"schemaVersion":999,"devices":{}}"#.utf8).write(to: file)
+            checkThrows("MC7530 unknown recovery schema fails closed", failures: &failures) {
+                try store.save(baseline, for: alpha)
+            }
+        } catch {
+            failures.append("MC7530 durable band store validation: \(error)")
+        }
     }
 
     private static func runMC7530RollbackRestoreAndIdentityTests(
@@ -3308,12 +3603,12 @@ enum DirectTests {
             let records = await http.records()
             let lteWrites = records.filter { $0.ubusMethod == "nwinfo_set_lte_ext_band" }
             check(lteWrites.map(\.parameters) == [
-                ["lte_band": "2,66"], ["lte_band": "2,4,66"]
-            ], "MC7530 accepted-but-unverified LTE write restores original bands", failures: &failures)
-            check(records.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" } &&
-                    records.contains { $0.ubusMethod == "nwinfo_set_nrbandlock" } &&
-                    records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
-                  "MC7530 LTE failure rebuilds every persistent field from the verified baseline",
+                ["lte_band": "2,66"]
+            ], "MC7530 unmodified LTE failure requires no redundant recovery write", failures: &failures)
+            check(!records.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" } &&
+                    !records.contains { $0.ubusMethod == "nwinfo_set_nrbandlock" } &&
+                    !records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
+                  "MC7530 LTE failure does not reset unrelated device preferences",
                   failures: &failures)
             let recovered = await http.currentState()
             check(recovered == baseline,
@@ -3368,12 +3663,12 @@ enum DirectTests {
             let baseline = DirectMC7530FixtureState.baseline
             let http = DirectStatefulMC7530HTTPTransport(
                 state: baseline,
-                ignoredLTEWriteApplications: 1,
+                ignoredNetSelectWriteApplications: 1,
                 lostResetResponsesAfterApplications: 1
             )
             let session = try await openMC7530ControlSession(http: http, timing: timing)
             do {
-                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                _ = try await session.perform(.setArchitecture(.lteOnly))
                 failures.append("MC7530 unverified write with lost reset response must fail")
             } catch let error as ModemControlError {
                 if case .verificationFailed = error {} else {
@@ -3417,10 +3712,10 @@ enum DirectTests {
             }
             let recovered = await http.currentState()
             let records = await http.records()
-            check(recovered == baseline && records.contains {
+            check(recovered == baseline && !records.contains {
                 $0.ubusMethod == "nwinfo_reset_band_cell_setting"
-            },
-                  "MC7530 cancellation runs rollback in an uncancelled cleanup task",
+            } && records.filter { $0.ubusMethod == "nwinfo_set_lte_ext_band" }.count == 2,
+                  "MC7530 cancellation runs targeted rollback in an uncancelled cleanup task",
                   failures: &failures)
         } catch {
             failures.append("MC7530 cancellation-safe rollback: \(error)")
@@ -3435,7 +3730,7 @@ enum DirectTests {
             )
             let session = try await openMC7530ControlSession(http: http, timing: timing)
             do {
-                _ = try await session.perform(.lockNRBands(Set([5, 71])))
+                _ = try await session.perform(.lockNRBands(Set([77])))
                 failures.append("MC7530 partially applied NR setter must fail")
             } catch let error as ModemControlError {
                 if case .verificationFailed = error {} else {
@@ -3445,15 +3740,14 @@ enum DirectTests {
             let records = await http.records()
             let nrWrites = records.filter { $0.ubusMethod == "nwinfo_set_nrbandlock" }
             check(nrWrites.map(\.parameters) == [
-                ["nr5g_band": "5,71", "nr5g_type": "0"],
-                ["nr5g_band": "5,71", "nr5g_type": "1"],
-                ["nr5g_band": "5,77", "nr5g_type": "0"],
-                ["nr5g_band": "2,66,77", "nr5g_type": "1"]
+                ["nr5g_band": "77", "nr5g_type": "0"],
+                ["nr5g_band": "77", "nr5g_type": "1"],
+                ["nr5g_band": "5,77", "nr5g_type": "0"]
             ], "MC7530 partial NR write restores original SA/NSA bands", failures: &failures)
-            check(records.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" } &&
-                    records.contains { $0.ubusMethod == "nwinfo_set_lte_ext_band" } &&
-                    records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
-                  "MC7530 NR failure rebuilds every persistent field from the verified baseline",
+            check(!records.contains { $0.ubusMethod == "nwinfo_reset_band_cell_setting" } &&
+                    !records.contains { $0.ubusMethod == "nwinfo_set_lte_ext_band" } &&
+                    !records.contains { $0.ubusMethod == "nwinfo_set_netselect" },
+                  "MC7530 NR failure recovers only the changed mask without a global reset",
                   failures: &failures)
             let recovered = await http.currentState()
             check(recovered == automatic,
@@ -3495,8 +3789,8 @@ enum DirectTests {
             let http = DirectStatefulMC7530HTTPTransport(state: malformed)
             let session = try await openMC7530ControlSession(http: http, timing: timing)
             do {
-                _ = try await session.perform(.restoreDefaults)
-                failures.append("MC7530 malformed rollback cell state must block restore")
+                _ = try await session.perform(.lockLTEBands([2]))
+                failures.append("MC7530 malformed rollback cell state must block band writes")
             } catch let error as ModemControlError {
                 if case .invalidState = error {} else {
                     failures.append("MC7530 malformed rollback preflight type: \(error)")
@@ -3518,7 +3812,7 @@ enum DirectTests {
             let http = DirectStatefulMC7530HTTPTransport(state: nondefaultNRDC)
             let session = try await openMC7530ControlSession(http: http, timing: timing)
             do {
-                _ = try await session.perform(.lockLTEBands(Set([2, 66])))
+                _ = try await session.perform(.setArchitecture(.lteOnly))
                 failures.append("MC7530 nondefault NRDC must block an unrecoverable write")
             } catch let error as ModemControlError {
                 if case .invalidState = error {} else {
@@ -3545,13 +3839,19 @@ enum DirectTests {
             restricted.lteCellLock = "17,5010"
             restricted.nrCellLock = "42,640000,77"
             let http = DirectStatefulMC7530HTTPTransport(
-                state: restricted,
-                ignoredNetSelectWriteApplications: 1
+                state: .baseline
             )
-            let session = try await openMC7530ControlSession(http: http, timing: timing)
+            let store = InMemoryMC7530BandBaselineStore()
+            let session = try await openMC7530ControlSession(
+                http: http, timing: timing, bandBaselineStore: store
+            )
+            _ = try await session.refresh()
+            _ = try await session.perform(.lockLTEBands([2]))
+            await http.replaceState(restricted)
+            await http.ignoreNextLTEWrite()
             do {
                 _ = try await session.perform(.restoreDefaults)
-                failures.append("MC7530 unverified restore mode must fail")
+                failures.append("MC7530 unverified band restore must fail")
             } catch let error as ModemControlError {
                 if case .verificationFailed = error {} else {
                     failures.append("MC7530 failed restore readback type: \(error)")
@@ -3559,18 +3859,19 @@ enum DirectTests {
             }
             let recovered = await http.currentState()
             check(recovered == restricted,
-                  "MC7530 failed global restore recovers exact GW/band/cell/mode state",
+                  "MC7530 failed band restore recovers exact GW/band/cell/mode state",
                   failures: &failures)
             let rollbackRecords = await http.records()
-            let gwWrite = rollbackRecords.first {
-                $0.ubusMethod == "nwinfo_set_gwl_bandlock"
-            }
-            check(gwWrite?.parameters == [
-                "is_gw_band": "1", "gw_band_mask": "0x123",
-                "is_lte_band": "0", "lte_band_mask": "0"
-            ], "MC7530 rollback uses exact GW UBus schema", failures: &failures)
+            check(!rollbackRecords.contains {
+                $0.ubusMethod == "nwinfo_reset_band_cell_setting" ||
+                    $0.ubusMethod == "nwinfo_set_netselect" ||
+                    $0.ubusMethod == "nwinfo_set_gwl_bandlock"
+            }, "MC7530 failed restore does not reset unrelated state", failures: &failures)
+            let retained = try store.load(for: session.stableIdentifier)
+            check(retained?.observed == DirectMC7530FixtureState.baseline.bandMasks,
+                  "MC7530 failed restore preserves the observed recovery baseline", failures: &failures)
         } catch {
-            failures.append("MC7530 complete global restore rollback: \(error)")
+            failures.append("MC7530 targeted band restore rollback: \(error)")
         }
 
         do {
@@ -3582,26 +3883,25 @@ enum DirectTests {
             restricted.gwBandLock = "0x123"
             restricted.lteCellLock = "17,5010"
             restricted.nrCellLock = "42,640000,77"
-            let http = DirectStatefulMC7530HTTPTransport(state: restricted)
+            let http = DirectStatefulMC7530HTTPTransport(state: .baseline)
             let session = try await openMC7530ControlSession(http: http, timing: timing)
+            _ = try await session.refresh()
+            _ = try await session.perform(.lockLTEBands([2]))
+            await http.replaceState(restricted)
             let result = try await session.perform(.restoreDefaults)
-            check(result.state.architecture == .automatic &&
-                    result.state.lteBands == MC7530ControlSession.defaultLTEBands &&
-                    result.state.saBands == MC7530ControlSession.defaultNRBands &&
-                    result.state.nsaBands == MC7530ControlSession.defaultNRBands,
-                  "MC7530 restore verifies automatic mode and retail default bands", failures: &failures)
+            check(result.state.architecture == .lteOnly &&
+                    result.state.lteBands == DirectMC7530FixtureState.baseline.lteBands &&
+                    result.state.saBands == DirectMC7530FixtureState.baseline.saBands &&
+                    result.state.nsaBands == DirectMC7530FixtureState.baseline.nsaBands,
+                  "MC7530 restore restores device-observed masks and preserves architecture", failures: &failures)
             let restored = await http.currentState()
-            check(restored.gwBandLock == "0x000000000" &&
+            check(restored.gwBandLock == restricted.gwBandLock &&
                     restored.nrdcBands == restricted.nrdcBands &&
-                    restored.lteCellLock.isEmpty && restored.nrCellLock.isEmpty,
-                  "MC7530 restore preserves the reset-authoritative GW value, NRDC invariant, and cleared cell locks",
+                    restored.lteCellLock == restricted.lteCellLock &&
+                    restored.nrCellLock == restricted.nrCellLock,
+                  "MC7530 band restore leaves GW, NRDC, and cell locks unchanged",
                   failures: &failures)
             let records = await http.records()
-            let reset = records.first { $0.ubusMethod == "nwinfo_reset_band_cell_setting" }
-            check(reset?.parameters.isEmpty == true && reset?.header("Z-Mode") == "0" &&
-                    reset?.header("Z-Tag") == "",
-                  "MC7530 restore sends the exact reset with the verified header form",
-                  failures: &failures)
             let restoreWrites = records.compactMap(\.ubusMethod).filter {
                 [
                     "nwinfo_reset_band_cell_setting", "nwinfo_set_lte_ext_band",
@@ -3609,13 +3909,10 @@ enum DirectTests {
                 ].contains($0)
             }
             check(restoreWrites == [
-                "nwinfo_reset_band_cell_setting", "nwinfo_set_lte_ext_band",
-                "nwinfo_set_nrbandlock", "nwinfo_set_nrbandlock", "nwinfo_set_netselect"
-            ], "MC7530 restore explicitly rebuilds LTE, SA, and NSA after the partial retail reset",
+                "nwinfo_set_lte_ext_band", // Initial lock captures the restore point.
+                "nwinfo_set_lte_ext_band", "nwinfo_set_nrbandlock", "nwinfo_set_nrbandlock"
+            ], "MC7530 restore writes LTE, SA, and NSA only without a global reset",
                failures: &failures)
-            let mode = records.last { $0.ubusMethod == "nwinfo_set_netselect" }
-            check(mode?.parameters == ["net_select": "WL_AND_NSA"],
-                  "MC7530 restore finishes with exact WL_AND_NSA token", failures: &failures)
         } catch {
             failures.append("MC7530 restore defaults: \(error)")
         }
@@ -3803,7 +4100,8 @@ enum DirectTests {
 
     private static func openMC7530ControlSession(
         http: DirectStatefulMC7530HTTPTransport,
-        timing: MC7530ControlTiming
+        timing: MC7530ControlTiming,
+        bandBaselineStore: any MC7530BandBaselineStore = InMemoryMC7530BandBaselineStore()
     ) async throws -> MC7530ControlSession {
         let auth = ZTEAuthSession(
             transport: try ZTEUBusTransport(baseURL: URL(string: "http://192.0.2.1")!, http: http),
@@ -3812,6 +4110,7 @@ enum DirectTests {
         return try await MC7530ControlSession.open(
             session: auth,
             timing: timing,
+            bandBaselineStore: bandBaselineStore,
             sleep: { _ in }
         )
     }
@@ -5116,7 +5415,34 @@ private actor DirectScriptedZTEHTTPTransport: ZTEHTTPTransport {
     }
 }
 
+private final class DirectFailingBandBaselineStore: MC7530BandBaselineStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private let store = InMemoryMC7530BandBaselineStore()
+    private var rejectingSaves = false
+
+    func rejectFutureSaves() {
+        lock.lock()
+        defer { lock.unlock() }
+        rejectingSaves = true
+    }
+
+    func load(for fingerprint: String) throws -> MC7530BandBaseline? {
+        try store.load(for: fingerprint)
+    }
+
+    func save(_ baseline: MC7530BandBaseline, for fingerprint: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        if rejectingSaves { throw CocoaError(.fileWriteNoPermission) }
+        try store.save(baseline, for: fingerprint)
+    }
+}
+
 private struct DirectMC7530FixtureState: Equatable, Sendable {
+    // Historical factory values are fixture behavior only, never picker policy.
+    static let factoryLTEBands: Set<Int> = [
+        2, 4, 5, 7, 12, 13, 17, 25, 26, 29, 30, 38, 41, 42, 43, 48, 66, 71
+    ]
     var netSelect: String
     var netSelectMode: String
     var operatorName: String
@@ -5130,6 +5456,10 @@ private struct DirectMC7530FixtureState: Equatable, Sendable {
     var gwBandLock: String
     var lteCellLock: String
     var nrCellLock: String
+
+    var bandMasks: MC7530BandMasks {
+        MC7530BandMasks(saBands: saBands, nsaBands: nsaBands, lteBands: lteBands)
+    }
 
     static let baseline = DirectMC7530FixtureState(
         netSelect: "LTE_AND_5G",
@@ -5287,7 +5617,7 @@ private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
             state.gwBandLock = value
             return try Self.successResponse()
         case "nwinfo_reset_band_cell_setting":
-            state.lteBands = MC7530ControlSession.defaultLTEBands
+            state.lteBands = DirectMC7530FixtureState.factoryLTEBands
             // Verified MC7530CAV2.6 behavior: the global reset clears cell
             // locks and restores LTE/GW state, but leaves SA/NSA band locks
             // untouched. Production must rebuild both NR lists explicitly.
@@ -5319,6 +5649,8 @@ private actor DirectStatefulMC7530HTTPTransport: ZTEHTTPTransport {
 
     func records() -> [DirectZTERequestRecord] { requestRecords }
     func currentState() -> DirectMC7530FixtureState { state }
+    func replaceState(_ replacement: DirectMC7530FixtureState) { state = replacement }
+    func ignoreNextLTEWrite() { ignoredLTEWriteApplications += 1 }
 
     private func netinfoObject() -> [String: Any] {
         [

@@ -137,7 +137,7 @@ The LTE B2 serving card corresponds to the active B2 20 MHz PCell below. B66 20 
 <details>
 <summary><strong>Network & radio controls</strong></summary>
 
-Scan or select operators, switch radio modes, select allowed NR/LTE bands and restore automatic defaults. Controls are enabled according to the selected modem's capabilities.
+Scan or select operators, switch radio modes and select allowed NR/LTE bands. ZTE restores saved pre-lock bands; VOS restores its captured automatic defaults. Controls are enabled according to the selected modem's capabilities.
 
 <table>
   <tr><th align="center">Light</th><th align="center">Dark</th></tr>
@@ -227,7 +227,8 @@ Choose a modem backend, enter its existing credentials, and configure polling, l
 - Auto SA/NSA, SA only, NSA only and LTE only preferences with exact read-back
 - A quick Auto SA/NSA → SA only → NSA only → LTE only menu in the Current connection card, using the same
   confirmation and verified backend operation as the full controls panel
-- NR and LTE band locks with allowlist validation and automatic rollback
+- NR and LTE band locks with validation and automatic rollback; ZTE choices are
+  read from the device and retained per physical modem, not a hardcoded model list
 - A backend-specific restore operation with final read-back verification
 - Physical-device identity verification before every write
 - Read-only LTE neighbor measurements when the active backend reports them
@@ -530,7 +531,7 @@ the active modem, endpoint or credential invalidates that session.
   state. Run **Scan Networks** first; the backend captures the token only when
   one unique `current` scan row matches the active PLMN. Until then it fails
   closed before changing the manual operator, returning to automatic selection,
-  changing radio mode, locking LTE/NR bands or restoring defaults. A saved RAT
+  changing radio mode, locking LTE/NR bands or restoring saved bands. A saved RAT
   is also rejected before any write when it is incompatible with the target
   `net_select` mode.
 - Auto SA/NSA, NSA only, SA only and LTE only write the exact retail tokens
@@ -538,30 +539,45 @@ the active modem, endpoint or credential invalidates that session.
   `nwinfo_set_netselect`.
 - LTE locking uses `nwinfo_set_lte_ext_band`. SA and NSA locking both use
   `nwinfo_set_nrbandlock`, with the documented type `0` and `1` respectively.
-  The verified product allowlists are LTE
-  `2,4,5,7,12,13,17,25,26,29,30,38,41,42,43,48,66,71` and NR
-  `2,5,7,12,25,29,30,38,41,66,71,77`.
+  Allowed choices come from authenticated device-reported LTE/SA/NSA preferences,
+  accumulated separately for each physical modem. New bands reported by the
+  device appear after reloading controls, without changing a model-specific
+  allowlist. Current checkmarks remain separate from these accumulated choices:
+  locking a subset does not remove earlier bands from the picker, including
+  after an app restart. Input is checked against the saved observations for the
+  applicable radio mode and the wire-format limits.
+- **Device-reported saved bands** is not a DMS hardware-capability query or a
+  scan of nearby networks. It does not prove that a listed band supports RF
+  registration, aggregation or a particular Web setter on this firmware. If
+  the modem was already locked when first connected, the observed list may be
+  incomplete. A later genuine device read can extend the list; the app does not
+  invent missing bands or use another modem's observations.
 - These ZTE preferences persist across power loss until changed or restored.
-  Before any persistent control write, the backend validates a complete recovery
-  image: mode/operator replay data, GW/LTE/SA/NSA values, cell locks, and the
-  exact verified default NRDC list. The retail schema exposes no NRDC setter, so
-  a non-default NRDC list blocks the operation before its first write. Successful
-  commands verify that every persistent field outside the requested change stayed
-  unchanged; collateral firmware changes are treated as failures.
-  **Restore automatic defaults** calls the dedicated
-  `nwinfo_reset_band_cell_setting` to clear LTE/NR cell locks and let the retail
-  firmware restore its authoritative legacy GW state. The verified
-  MC7530CAV2.6 reset leaves existing SA/NSA locks untouched, so the backend then
-  explicitly writes the exact LTE, SA and NSA vendor lists before restoring and
-  verifying `WL_AND_NSA` automatic mode. Final readback also verifies the reset
-  GW value, cleared cell locks and exact default NRDC list. Before the first
-  reset write, every recoverable pre-operation value is parsed and validated.
-  After any ambiguous write,
-  verification failure, cancellation or collateral change, an uncancelled
-  recovery task runs the reset and then rebuilds and verifies the previous
-  GW/LTE/SA/NSA/cell/operator state with the exact retail setters. Independent
-  recovery steps continue after a lost response, and exact final readback decides
-  success. It is not a factory reset and does not read or modify APN profiles.
+  Before any control write, the backend validates the recoverable pre-operation
+  state. Commands verify that every persistent field outside the requested
+  change stayed unchanged; collateral firmware changes are treated as failures.
+- Band locks and **Restore saved bands** use targeted recovery, without the
+  vendor's global band/cell reset. After an ambiguous write, verification failure
+  or cancellation, an uncancelled task restores changed, known recoverable
+  fields and verifies the full result. Unrecoverable cell-lock or NRDC changes
+  are reported rather than handled with a speculative global reset. The retail
+  schema has no NRDC setter, but a valid non-default NRDC list does not prevent
+  a band-only change when it remains unchanged. Malformed legacy GW or cell-lock
+  states still block writes because they cannot be safely recovered.
+  **Restore saved bands** restores only this physical modem's saved pre-lock
+  LTE, SA and NSA preferences. It does not invoke the vendor's global
+  band/cell reset or write a factory/model band list, and does not switch radio
+  mode or operator selection. Legacy GW preferences, NRDC and LTE/NR cell
+  locks must remain unchanged; exact readback verifies both restored and
+  preserved fields. This is not a factory reset. Before its first write, every
+  recoverable pre-operation value is parsed and validated.
+- Operator-selection and radio-mode changes retain their existing full-state
+  recovery path. That path requires the exact verified default NRDC list before
+  its first write, because it may use `nwinfo_reset_band_cell_setting` followed
+  by the retail setters to rebuild the previous GW/LTE/SA/NSA/cell/operator
+  state. Independent recovery steps continue after a lost response, and exact
+  final readback decides success. This is not a factory reset. None of these
+  controls reads or modifies APN profiles.
 - Before every write, the authenticated session reads the modem MSN and compares
   only its SHA-256 digest with the session identity. The raw MSN is neither
   exposed nor stored. Once a mismatch is observed, that session refuses all
@@ -569,6 +585,34 @@ the active modem, endpoint or credential invalidates that session.
 - The firmware reports LTE/NR neighbor fields, but the tested unit has not
   provided a non-empty sample whose format can be validated. The app therefore
   does not claim ZTE neighbor-measurement visualization.
+
+#### Saved-band backup and recovery
+
+ZTE observations and restore points are saved locally in
+`~/Library/Application Support/Cellular Modem Monitor/band-baselines.json`,
+keyed by the SHA-256 physical-device fingerprint, not the management IP. The
+file contains band sets and timestamps, not passwords or the raw modem serial.
+It is written atomically with owner-only file permissions (`0600`).
+
+An initial successful read records the observed choices. Before the first band
+lock, the app saves the exact current LTE/SA/NSA tuple as a separate restore
+point. Further locks and reads can expand the observed choices without
+overwriting that pre-lock restore point. **Restore saved bands** restores this
+point and verifies the result; a new lock cycle captures a fresh restore point.
+The accumulated choices are not themselves the restore target.
+Until the app has saved a pre-lock restore point, the restore button is disabled;
+it cannot undo an earlier external lock or reconstruct unknown wider capabilities.
+
+To keep an independent backup, quit CMM and copy `band-baselines.json` to a safe
+location before replacing or removing app data. If the local file is damaged,
+retain it for diagnosis and restore a known-good copy with CMM closed, then
+reopen Network & radio controls on the same physical modem. Corrupt or unknown
+file formats are not silently overwritten. A local-file backup alone does not
+change the modem: restoring its bands still requires the explicit in-app
+confirmation and authoritative readback. If no matching backup exists and the
+modem is already restricted, reconnecting or rebooting cannot recover an
+unobserved wider band list; use a known device-specific recovery record rather
+than guessing factory defaults.
 
 ## Connection and security notes
 
@@ -657,8 +701,9 @@ UBus authentication/session/header behavior, radio read-payload parsing,
 payload-free action-result handling, exact
 control methods and parameters, asynchronous polling, read-back verification,
 strict PLMN/RAT parsing, full-state rollback after collateral changes, lost
-responses and cancellation, verified restore and physical-device mismatch rejection; credential
-policies and non-secret preferences; backend registry/coordinator selection;
+responses and cancellation, verified restore and physical-device mismatch rejection;
+device-reported band history, per-modem persistent baselines and band-only restore;
+credential policies and non-secret preferences; backend registry/coordinator selection;
 malformed responses; and
 synthetic discovery layouts for USB ECM, RJ45/Ethernet, routed-router paths,
 same-IP multi-interface isolation, interface exclusion, priorities,
@@ -687,6 +732,9 @@ authoritative readback described above were validated on physical hardware on
   or individual signal metrics, which remain `—` instead of being inferred.
 - VOS radio preferences are power-cycle scoped. MC7530CA radio preferences are
   persistent and remain in effect until changed or explicitly restored.
+- ZTE band choices are accumulated device-reported preferences, not a complete
+  hardware-capability list. A modem first observed while locked can have an
+  incomplete list; keep its saved-band file when migrating the app to another Mac.
 
 ## Acknowledgements
 
