@@ -22,7 +22,7 @@ enum ReadmeScreenshotGenerator {
         let language: AppLanguage = arguments.contains("--chinese") ? .simplifiedChinese : .english
         let width: PanelWidth = arguments.contains("--compact") ? .compact : arguments.contains("--wide") ? .wide : .standard
         let initialSize = NSSize(width: width.points, height: scene == .overview ? 1_180 : 1_600)
-        let fixture = ReadmeFixture(scene: scene)
+        let fixture = ReadmeFixture(scene: scene, alignmentStress: arguments.contains("--alignment-stress"))
         fixture.validate()
 
         let defaults = UserDefaults(suiteName: "CellularModemMonitorReadmeFixture")!
@@ -133,7 +133,7 @@ private struct ReadmeFixture {
     let modem: ActiveModem
     let controls: ModemControlState
 
-    init(scene: ReadmeScene) {
+    init(scene: ReadmeScene, alignmentStress: Bool = false) {
         let isSA = scene == .sa
         let hasCA = ![ReadmeScene.sa, .nsa, .connection, .radio].contains(scene)
         var value = DeviceSnapshot.empty
@@ -194,6 +194,19 @@ private struct ReadmeFixture {
                         uplinkConfiguration: .disabled
                     )
                 ]
+            }
+        }
+        if alignmentStress {
+            // Longest valid identifiers next to short PCI labels, and all three
+            // UL labels: row content must never move the shared column edges.
+            value.nrGlobalCellID = (1 << 36) - 1
+            value.nrPrimaryCell?.globalCellID = value.nrGlobalCellID
+            if value.ltePrimaryCell != nil {
+                value.lteGlobalCellID = (1 << 28) - 1
+                value.ltePrimaryCell?.globalCellID = value.lteGlobalCellID
+            }
+            if !value.nrSecondaryCells.isEmpty {
+                value.nrSecondaryCells[0].uplinkConfiguration = .disabled
             }
         }
         value.updatedAt = Date()

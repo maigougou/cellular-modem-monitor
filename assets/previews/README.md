@@ -32,3 +32,16 @@ For a smaller iteration, compile with `--compile-only`, then use for example:
 ```sh
 README_SCENES='sa nsa ca' ./scripts/generate-readme-screenshots.sh --render-only
 ```
+
+## Carrier column alignment regression
+
+Pass `--alignment-stress` to `ReadmeScreenshotGenerator` with `--scene ca` to
+render maximum-length Cell IDs next to short PCI values and all three UL labels.
+Exercise `--compact`, the default standard width, and `--wide`, in both themes
+and languages. Keep `-zh-` in Chinese output filenames for the OCR language selector.
+
+Compile `scripts/VerifyCarrierAlignment.swift` with `swiftc -parse-as-library`
+and pass the resulting screenshots as arguments. It uses macOS Vision to locate
+labels, refines those boxes to actual glyph pixels, checks UL's left edge against
+every other row and SINR/SNR (3 px tolerance), and verifies that the full 11-digit
+NR Cell ID is still visible. It requires access to macOS Vision services.

@@ -2016,29 +2016,38 @@ private struct CarrierAggregationRow: View {
             .lineLimit(1)
 
             HStack(spacing: 8) {
-                Text(row.frequencyMHz.map(DeviceSnapshot.frequencyText) ?? "— MHz")
-                Spacer(minLength: 0)
-                Text(row.uplinkConfiguration.localizedLabel(language: language))
-                    .foregroundStyle(row.uplinkConfiguration == .enabled ? accent : .secondary)
-                    .accessibilityLabel(L10n.text("UL Configured", language: language))
-                    .accessibilityValue(row.uplinkConfiguration.localizedLabel(language: language))
-                    .help(L10n.text("Uplink configuration, not instantaneous uplink traffic.", language: language))
-                Spacer(minLength: 0)
-                switch row.cellReference {
-                case let .global(cellID):
-                    CellIDLink(cellID: cellID, radio: row.radio, mcc: mcc, mnc: mnc)
-                case let .physical(pci):
-                    Text("PCI \(pci)")
-                case .unavailable:
-                    Text(L10n.text("Cell ID —", language: language))
+                // Two equal half-rows; split the left half into two equal
+                // columns. These align with the four signal columns below.
+                // Intrinsic Cell ID/PCI or UL label widths never move a column.
+                HStack(spacing: 8) {
+                    Text(row.frequencyMHz.map(DeviceSnapshot.frequencyText) ?? "— MHz")
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    Text(row.uplinkConfiguration.localizedLabel(language: language))
+                        .foregroundStyle(row.uplinkConfiguration == .enabled ? accent : .secondary)
+                        .accessibilityLabel(L10n.text("UL Configured", language: language))
+                        .accessibilityValue(row.uplinkConfiguration.localizedLabel(language: language))
+                        .help(L10n.text("Uplink configuration, not instantaneous uplink traffic.", language: language))
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(minWidth: 0, maxWidth: .infinity)
+                Group {
+                    switch row.cellReference {
+                    case let .global(cellID):
+                        CellIDLink(cellID: cellID, radio: row.radio, mcc: mcc, mnc: mnc)
+                    case let .physical(pci):
+                        Text("PCI \(pci)")
+                    case .unavailable:
+                        Text(L10n.text("Cell ID —", language: language))
+                    }
+                }
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .trailing)
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .minimumScaleFactor(0.85)
 
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 4), spacing: 6) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .leading), count: 4), spacing: 6) {
                 SignalMetric(label: "RSRP", value: row.signal.rsrpDBm.map(String.init), unit: "dBm")
                 SignalMetric(label: row.radio == .nr ? "SINR" : "SNR", value: row.signal.snrDB.map(Self.metricText), unit: "dB")
                 SignalMetric(label: "RSRQ", value: row.signal.rsrqDB.map(Self.metricText), unit: "dB")
