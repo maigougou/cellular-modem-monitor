@@ -142,7 +142,10 @@ enum MC7530Parser {
                     physicalCellID: nrPCI,
                     state: .active,
                     globalCellID: nrGlobalCellID,
-                    signal: nrSignal
+                    signal: nrSignal,
+                    // Retail network_info.js marks a valid PCell UL-enabled;
+                    // netinfo has no independent primary UL flag.
+                    uplinkConfiguration: .enabled
                 )
             }
         }
@@ -168,7 +171,8 @@ enum MC7530Parser {
                     object["cell_id"],
                     maximum: maximumLTECellID
                 ),
-                signal: lteSignal
+                signal: lteSignal,
+                uplinkConfiguration: .enabled
             )
         }
         if var identifiedPrimary = primary {
@@ -269,11 +273,11 @@ enum MC7530Parser {
         var primary: LTECarrier?
         var secondary: [LTECarrier] = []
         let signalEntries = secondarySignalRaw?
-            .split(separator: ";", omittingEmptySubsequences: true)
+            .split(separator: ";", omittingEmptySubsequences: false)
             .map(String.init) ?? []
 
         for (entryIndex, entry) in raw
-            .split(separator: ";", omittingEmptySubsequences: true)
+            .split(separator: ";", omittingEmptySubsequences: false)
             .enumerated() {
             let fields = entry.split(separator: ",", omittingEmptySubsequences: false)
                 .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -296,7 +300,9 @@ enum MC7530Parser {
                     bandwidthMHz: bandwidth,
                     physicalCellID: pci,
                     state: .active,
-                    signal: primarySignal
+                    signal: primarySignal,
+                    // Same PCell convention as the retail network information page.
+                    uplinkConfiguration: .enabled
                 )
             } else if role != 0 {
                 let signal = parseLTESecondarySignal(
@@ -311,7 +317,8 @@ enum MC7530Parser {
                     bandwidthMHz: bandwidth,
                     physicalCellID: pci,
                     state: signal.state,
-                    signal: signal.metrics
+                    signal: signal.metrics,
+                    uplinkConfiguration: signal.uplinkConfiguration
                 ))
             }
         }
@@ -323,36 +330,38 @@ enum MC7530Parser {
     /// The retail Web UI defines state 2 as active and state 1 as non-active.
     private static func parseLTESecondarySignal(
         _ raw: String?
-    ) -> (state: RadioCarrierState, metrics: RadioSignal) {
-        guard let raw else { return (.unknown, .empty) }
+    ) -> (state: RadioCarrierState, metrics: RadioSignal, uplinkConfiguration: RadioUplinkConfiguration) {
+        guard let raw else { return (.unknown, .empty, .unknown) }
         let fields = raw.split(separator: ",", omittingEmptySubsequences: false)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard fields.count >= 6 else { return (.unknown, .empty) }
 
-        let state: RadioCarrierState = switch Int(fields[5]) {
+        let state: RadioCarrierState = switch field(fields, at: 5).flatMap(Int.init) {
         case 2: .active
         case 1: .configured
         default: .unknown
         }
-        let rsrp = Double(fields[0])
-        let rssi = Double(fields[3])
+        let uplink = parseUplinkConfiguration(field(fields, at: 4))
+        let rsrp = field(fields, at: 0).flatMap(Double.init)
+        let rssi = field(fields, at: 3).flatMap(Double.init)
         if rsrp.map({ $0 <= -255 }) == true || rssi == 0 {
-            return (state, .empty)
+            return (state, .empty, uplink)
         }
         return (
             state,
             RadioSignal(
-                rsrpDBm: roundedIntegerText(fields[0], range: -160 ... -40),
-                rsrqDB: doubleText(fields[1], range: -40 ... 0),
-                rssiDBm: roundedIntegerText(fields[3], range: -140 ... -20),
-                snrDB: doubleText(fields[2], range: -30 ... 50)
-            )
+                rsrpDBm: roundedIntegerText(field(fields, at: 0), range: -160 ... -40),
+                rsrqDB: doubleText(field(fields, at: 1), range: -40 ... 0),
+                rssiDBm: roundedIntegerText(field(fields, at: 3), range: -140 ... -20),
+                snrDB: doubleText(field(fields, at: 2), range: -30 ... 50)
+            ),
+            uplink
         )
     }
 
     /// MC7530CA reports NR component carriers as semicolon-separated
     /// records. A verified unit reports SCells in this layout:
-    /// `vendor,pci,state,band,nrarfcn,bandwidth,vendor,rsrp,rsrq,snr,rssi;`.
+    /// `vendor,pci,state,band,nrarfcn,bandwidth,ulConfigured,rsrp,rsrq,snr,rssi;`.
+    /// Retail `/web/js/auth/adm/network_info.js` maps UL 1/0 to enabled/disabled.
     /// The retail Web UI defines state 2 as active and state 1 as non-active.
     /// Only the stable identity fields are mandatory; unavailable signal
     /// columns are ignored independently so one bad metric cannot hide a CC.
@@ -389,12 +398,21 @@ enum MC7530Parser {
                 bandwidthMHz: bandwidth,
                 physicalCellID: pci,
                 state: state,
-                signal: signal
+                signal: signal,
+                uplinkConfiguration: parseUplinkConfiguration(field(fields, at: 6))
             )
 
             secondary.append(carrier)
         }
         return secondary
+    }
+
+    private static func parseUplinkConfiguration(_ raw: String?) -> RadioUplinkConfiguration {
+        switch raw {
+        case "1": .enabled
+        case "0": .disabled
+        default: .unknown
+        }
     }
 
     private static func parseNRSecondarySignal(_ fields: [String]) -> RadioSignal {

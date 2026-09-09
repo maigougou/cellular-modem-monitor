@@ -151,14 +151,16 @@ private struct ReadmeFixture {
         value.nrSignal = RadioSignal(rsrpDBm: -88, rsrqDB: -11, rssiDBm: -65, snrDB: 22)
         value.nrPrimaryCell = NRCarrier(
             role: .primary, band: "n77", nrarfcn: 640608, bandwidthMHz: 50,
-            physicalCellID: 821, state: .active, globalCellID: value.nrGlobalCellID, signal: value.nrSignal
+            physicalCellID: 821, state: .active, globalCellID: value.nrGlobalCellID, signal: value.nrSignal,
+            uplinkConfiguration: .enabled
         )
         if hasCA {
             value.nrSecondaryCells = [
                 NRCarrier(
                     role: .secondary(index: 1), band: "n77", nrarfcn: 634000, bandwidthMHz: 30,
                     physicalCellID: 822, state: .active,
-                    signal: RadioSignal(rsrpDBm: -91, rsrqDB: -12, rssiDBm: -68, snrDB: 19)
+                    signal: RadioSignal(rsrpDBm: -91, rsrqDB: -12, rssiDBm: -68, snrDB: 19),
+                    uplinkConfiguration: .enabled
                 ),
                 NRCarrier(
                     role: .secondary(index: 2), band: "n71", nrarfcn: 126500, bandwidthMHz: 10,
@@ -175,18 +177,21 @@ private struct ReadmeFixture {
             value.lteSignal = RadioSignal(rsrpDBm: -91, rsrqDB: -10, rssiDBm: -64, snrDB: 16)
             value.ltePrimaryCell = LTECarrier(
                 role: .primary, band: "B2", earfcn: 900, bandwidthMHz: 20, physicalCellID: 203,
-                state: .active, globalCellID: value.lteGlobalCellID, signal: value.lteSignal
+                state: .active, globalCellID: value.lteGlobalCellID, signal: value.lteSignal,
+                uplinkConfiguration: .enabled
             )
             if hasCA {
                 value.lteSecondaryCells = [
                     LTECarrier(
                         role: .secondary(index: 1), band: "B66", earfcn: 66786, bandwidthMHz: 20,
                         physicalCellID: 203, state: .active,
-                        signal: RadioSignal(rsrpDBm: -94, rsrqDB: -12, rssiDBm: -67, snrDB: 14)
+                        signal: RadioSignal(rsrpDBm: -94, rsrqDB: -12, rssiDBm: -67, snrDB: 14),
+                        uplinkConfiguration: .disabled
                     ),
                     LTECarrier(
                         role: .secondary(index: 2), band: "B7", earfcn: 2850, bandwidthMHz: 20,
-                        physicalCellID: 203, state: .configured, signal: .empty
+                        physicalCellID: 203, state: .configured, signal: .empty,
+                        uplinkConfiguration: .disabled
                     )
                 ]
             }

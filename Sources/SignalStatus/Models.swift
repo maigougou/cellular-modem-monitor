@@ -829,6 +829,22 @@ enum RadioCarrierState: Equatable, Sendable {
     }
 }
 
+/// Uplink configuration is independent of SCell activation and signal availability.
+/// Unknown must not be presented as disabled or inferred from modem capabilities.
+enum RadioUplinkConfiguration: Equatable, Sendable {
+    case enabled
+    case disabled
+    case unknown
+
+    var label: String {
+        switch self {
+        case .enabled: return "UL Enabled"
+        case .disabled: return "UL Disabled"
+        case .unknown: return "UL Unknown"
+        }
+    }
+}
+
 struct LTECarrier: Equatable, Sendable {
     var role: RadioCarrierRole
     var band: String?
@@ -838,6 +854,7 @@ struct LTECarrier: Equatable, Sendable {
     var state: RadioCarrierState?
     var globalCellID: UInt64? = nil
     var signal: RadioSignal = .empty
+    var uplinkConfiguration: RadioUplinkConfiguration = .unknown
 
     var isActive: Bool { state == .active }
 
@@ -856,6 +873,7 @@ struct NRCarrier: Equatable, Sendable {
     var state: RadioCarrierState?
     var globalCellID: UInt64? = nil
     var signal: RadioSignal = .empty
+    var uplinkConfiguration: RadioUplinkConfiguration = .unknown
 
     var isActive: Bool { state == .active }
 
@@ -1073,6 +1091,7 @@ struct DeviceSnapshot: Equatable, Sendable {
             values.append(frequencyText(frequency))
         }
         if let state = carrier.state { values.append(state.label) }
+        values.append(carrier.uplinkConfiguration.label)
         values.append(signalText(carrier.signal))
         return values.joined(separator: ", ")
     }
@@ -1087,6 +1106,7 @@ struct DeviceSnapshot: Equatable, Sendable {
             values.append(frequencyText(frequency))
         }
         if let state = carrier.state { values.append(state.label) }
+        values.append(carrier.uplinkConfiguration.label)
         values.append(signalText(carrier.signal))
         return values.joined(separator: ", ")
     }

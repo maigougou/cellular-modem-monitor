@@ -220,6 +220,11 @@ enum L10n {
         "Unavailable": "不可用",
         "Active": "活动",
         "Inactive": "未激活",
+        "UL Enabled": "上行启用",
+        "UL Disabled": "上行禁用",
+        "UL Unknown": "上行未知",
+        "UL Configured": "上行配置",
+        "Uplink configuration, not instantaneous uplink traffic.": "表示上行配置，不代表此刻正在传输上行数据。",
         "Deconfigured": "已取消配置",
         "Detailed": "详细",
         "Compact": "紧凑",
@@ -433,6 +438,12 @@ extension RadioCarrierRole {
 }
 
 extension RadioCarrierState {
+    func localizedLabel(language: AppLanguage) -> String {
+        L10n.text(label, language: language)
+    }
+}
+
+extension RadioUplinkConfiguration {
     func localizedLabel(language: AppLanguage) -> String {
         L10n.text(label, language: language)
     }

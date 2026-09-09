@@ -442,6 +442,16 @@ single 80 MHz channel. The reported per-carrier state is also preserved for
 both radios: state `2` is shown as **Active**, while state `1` remains visible as
 **Inactive** and is excluded from the active-carrier summary.
 
+Each carrier also shows **UL Enabled / UL Disabled / UL Unknown**, independently
+of Active/Inactive. On MC7530CA, this corresponds to the retail Web UI's
+**UL Configured**: LTE SCells use `ltecasig` column 5 and NR SCells use `nrca`
+column 7 (both one-based, `1` enabled / `0` disabled). Valid primary carriers
+follow the retail page's fixed Enabled convention; netinfo does not expose a
+separate primary UL flag. Missing or unrecognized SCell flags, and backends
+without a mapped UL field, remain Unknown. Copied diagnostics include the same
+status. This describes uplink configuration, not simultaneous live uplink traffic;
+the existing CC/bandwidth summary is not an UL CA or uplink-bandwidth total.
+
 When the control panel is opened, the same scoped authenticated session exposes
 only the radio methods declared by the backend. Every MC7530CA radio RPC uses the
 device-verified SID-authenticated request form, `Z-Mode: 0` with an empty

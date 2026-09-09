@@ -1883,6 +1883,7 @@ private struct CarrierAggregationRowModel: Identifiable {
     let globalCellID: UInt64?
     let physicalCellID: UInt16?
     let state: RadioCarrierState?
+    let uplinkConfiguration: RadioUplinkConfiguration
     let signal: RadioSignal
 
     init(nr carrier: NRCarrier, position: Int) {
@@ -1897,6 +1898,7 @@ private struct CarrierAggregationRowModel: Identifiable {
         globalCellID = carrier.globalCellID
         physicalCellID = carrier.physicalCellID
         state = carrier.state
+        uplinkConfiguration = carrier.uplinkConfiguration
         signal = carrier.signal
     }
 
@@ -1912,6 +1914,7 @@ private struct CarrierAggregationRowModel: Identifiable {
         globalCellID = carrier.globalCellID
         physicalCellID = carrier.physicalCellID
         state = carrier.state
+        uplinkConfiguration = carrier.uplinkConfiguration
         signal = carrier.signal
     }
 
@@ -2014,6 +2017,12 @@ private struct CarrierAggregationRow: View {
 
             HStack(spacing: 8) {
                 Text(row.frequencyMHz.map(DeviceSnapshot.frequencyText) ?? "— MHz")
+                Spacer(minLength: 0)
+                Text(row.uplinkConfiguration.localizedLabel(language: language))
+                    .foregroundStyle(row.uplinkConfiguration == .enabled ? accent : .secondary)
+                    .accessibilityLabel(L10n.text("UL Configured", language: language))
+                    .accessibilityValue(row.uplinkConfiguration.localizedLabel(language: language))
+                    .help(L10n.text("Uplink configuration, not instantaneous uplink traffic.", language: language))
                 Spacer(minLength: 0)
                 switch row.cellReference {
                 case let .global(cellID):

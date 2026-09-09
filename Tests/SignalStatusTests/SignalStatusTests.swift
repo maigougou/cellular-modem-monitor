@@ -860,6 +860,10 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertThrowsError(try MC7530Parser.parse(data: Data("[]".utf8)))
     }
 
+    func testUplinkConfigurationRegression() {
+        XCTAssertEqual(UplinkConfigurationRegression.run(), [])
+    }
+
     func testZTEAnonymousSchemaAndCSRFCompatibilityHeaders() async throws {
         let http = TestScriptedZTEHTTPTransport(responses: [
             testZTEResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#)
