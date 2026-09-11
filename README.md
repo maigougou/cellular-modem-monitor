@@ -10,6 +10,17 @@ Normal status collection is read-only on both devices. An optional, explicitly
 opened **Network & radio controls** panel provides verified controls through
 either the VOS SSH/QMI backend or the ZTE authenticated Web UBus backend.
 
+<!-- BEGIN MENU BAR PREVIEW -->
+## Menu-bar CA at a glance
+
+All menu-bar scenarios in one English-only preview, with **light on the left and
+dark on the right**. NR and LTE have separate, aligned CC columns; SA shows only
+one centered NR line. Counts are active carriers per RAT, not a combined NR+LTE
+total. All values below are illustrative.
+
+<a href="assets/previews/menu-bar-ca-preview.png"><img src="assets/previews/menu-bar-ca-preview.png" width="670" alt="Menu-bar CA scenarios: NSA, SA, LTE only, compact, no CA, stale or unknown, unequal band and CC widths, and icon only; light and dark appearances"></a>
+<!-- END MENU BAR PREVIEW -->
+
 <!-- BEGIN README PREVIEWS -->
 ## Full interface preview
 
@@ -203,7 +214,10 @@ Choose a modem backend, enter its existing credentials, and configure polling, l
   assuming that a modem's management address is the default gateway
 - Per-interface candidate identity keeps repeated private management addresses
   on different links separate during discovery
-- Live primary 5G NR and LTE bands in the menu bar
+- Two-line menu-bar CA status: NR mode/band and active carrier count above,
+  LTE band and count below; SA hides the entire LTE line with no empty row
+- Per-RAT counts include active PCell/SCells, not unique bands or a combined
+  NR+LTE total; `1CC` means no aggregation and unknown/stale counts show `—`
 - SA/NSA mode only when the selected backend reports it unambiguously
 - RSRP, RSRQ, RSSI and SNR when each metric is available
 - Human-readable downlink frequency and channel bandwidth; raw ARFCN remains

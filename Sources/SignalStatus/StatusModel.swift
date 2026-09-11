@@ -113,7 +113,8 @@ final class StatusModel: ObservableObject {
             if refreshActivity.isRefreshing != newValue { refreshActivity.isRefreshing = newValue }
         }
     }
-    @Published private(set) var menuBarTitle = "Cellular …"
+    @Published private(set) var menuBarText = MenuBarText(primary: "Cellular …")
+    var menuBarTitle: String { menuBarText.primary }
     @Published private(set) var operatorSelection: OperatorSelection?
     @Published private(set) var scannedNetworks: [CellularNetwork] = []
     @Published private(set) var controlState: ModemControlState?
@@ -142,7 +143,9 @@ final class StatusModel: ObservableObject {
     @Published var zteHost: String
     @Published var ztePassword: String
     @Published var refreshInterval: Double
-    @Published var menuBarStyle: MenuBarStyle
+    @Published var menuBarStyle: MenuBarStyle {
+        didSet { updateMenuTitle(force: true) }
+    }
     @Published var panelWidth: PanelWidth {
         didSet { defaults.set(panelWidth.rawValue, forKey: Key.panelWidth) }
     }
@@ -162,7 +165,7 @@ final class StatusModel: ObservableObject {
     private var settingsGeneration: UInt64 = 0
     private var refreshCoalescer = RefreshCoalescer()
     private var consecutiveFailures = 0
-    private var candidateTitle: String?
+    private var candidateTitle: MenuBarText?
     private var candidateTitleCount = 0
     private let demoMode: Bool
     private var lastSuccessfulScopeKey: String?
@@ -361,7 +364,7 @@ final class StatusModel: ObservableObject {
                 capabilities: [.statusRead, .identityRead, .webUI, .vosControls]
             )
             connectionState = .online
-            menuBarTitle = snapshot.detailedMenuTitle
+            updateMenuTitle(force: true)
             speedTestModel.updateActiveModem(
                 activeModem,
                 settingsGeneration: settingsGeneration
@@ -411,7 +414,7 @@ final class StatusModel: ObservableObject {
             return
         }
 
-        menuBarTitle = L10n.text("Cellular …", language: language)
+        updateMenuTitle(force: true)
 
         if startImmediately { start() }
     }
@@ -715,10 +718,10 @@ final class StatusModel: ObservableObject {
         } else if !changedEndpointKinds.isEmpty {
             clearLastSuccessfulEndpoint()
         }
-        updateMenuTitle(force: true)
         settingsGeneration &+= 1
         consecutiveFailures = 0
         connectionState = .connecting
+        updateMenuTitle(force: true)
         lastError = nil
         activeModem = nil
         clearControlState()
@@ -900,9 +903,9 @@ final class StatusModel: ObservableObject {
             } else {
                 connectionState = .connecting
             }
-            if consecutiveFailures >= 3 || !snapshot.hasRadioData {
-                updateMenuTitle(force: true)
-            }
+            // Clear stale CA counts on the first failed read, not only after
+            // the connection is declared disconnected three failures later.
+            updateMenuTitle(force: true)
         }
     }
 
@@ -911,6 +914,9 @@ final class StatusModel: ObservableObject {
     func applyReadResult(_ result: ModemReadResult) {
         let latest = result.snapshot
         let radioAvailabilityChanged = snapshot.hasRadioData != latest.hasRadioData
+        let aggregationChanged = snapshot.menuBarCarrierCounts != latest.menuBarCarrierCounts
+        let modeChanged = snapshot.nrSystemMode != latest.nrSystemMode
+        let recoveringFreshData = connectionState != .online
         let invalidation = ControlPresentationInvalidation.transition(
             previousModemID: activeModem?.id, nextModemID: result.activeModem.id,
             previousEndpoint: activeModem?.endpoint, nextEndpoint: result.activeModem.endpoint,
@@ -930,7 +936,8 @@ final class StatusModel: ObservableObject {
         let nextConnectionState: ConnectionState = latest.hasRadioData ? .online : .connecting
         if connectionState != nextConnectionState { connectionState = nextConnectionState }
         if lastError != nil { lastError = nil }
-        updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged)
+        updateMenuTitle(force: snapshot.updatedAt == .distantPast || radioAvailabilityChanged
+                        || aggregationChanged || modeChanged || recoveringFreshData)
     }
 
     private func runControl(
@@ -1224,21 +1231,20 @@ final class StatusModel: ObservableObject {
     }
 
     private func updateMenuTitle(force: Bool) {
-        let proposed: String
-        if connectionState == .disconnected || connectionState == .authenticationFailed || connectionState == .qmiUnavailable {
-            proposed = L10n.text("Cellular —", language: language)
-        } else if !snapshot.hasRadioData {
-            proposed = L10n.text("Cellular …", language: language)
+        let proposed: MenuBarText
+        if menuBarStyle == .iconOnly {
+            proposed = MenuBarText(primary: "")
+        } else if connectionState == .disconnected || connectionState == .authenticationFailed || connectionState == .qmiUnavailable {
+            proposed = MenuBarText(primary: L10n.text("Cellular —", language: language))
+        } else if connectionState == .connecting || !snapshot.hasRadioData {
+            proposed = MenuBarText(primary: L10n.text("Cellular …", language: language))
         } else {
-            switch menuBarStyle {
-            case .detailed: proposed = snapshot.detailedMenuTitle
-            case .compact: proposed = snapshot.compactMenuTitle
-            case .iconOnly: proposed = ""
-            }
+            let text = snapshot.menuBarText(style: menuBarStyle, countsAreFresh: connectionState == .online)
+            proposed = MenuBarText(primary: L10n.text(text.primary, language: language), secondary: text.secondary)
         }
 
         if force || menuBarTitle.hasPrefix("Cellular") || menuBarTitle.hasPrefix("蜂窝网络") {
-            if menuBarTitle != proposed { menuBarTitle = proposed }
+            if menuBarText != proposed { menuBarText = proposed }
             candidateTitle = nil
             candidateTitleCount = 0
             return
@@ -1251,7 +1257,7 @@ final class StatusModel: ObservableObject {
             candidateTitleCount = 1
         }
         if candidateTitleCount >= 2 {
-            if menuBarTitle != proposed { menuBarTitle = proposed }
+            if menuBarText != proposed { menuBarText = proposed }
             candidateTitle = nil
             candidateTitleCount = 0
         }

@@ -38,6 +38,7 @@ compile() {
     "$project_dir/Sources/SignalStatus/StatusModel.swift" \
     "$project_dir/Tests/SignalStatusTests/EfficiencyRegression.swift" \
     "$project_dir/Tests/SignalStatusTests/UplinkConfigurationRegression.swift" \
+    "$project_dir/Tests/SignalStatusTests/MenuBarCARegression.swift" \
     "$project_dir/scripts/DirectTests.swift" \
     -o "$build_dir/SignalStatusTests"
 }

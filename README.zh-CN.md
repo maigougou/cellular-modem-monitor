@@ -8,6 +8,17 @@
 两种设备的常规状态采集都只读。需要用户主动展开的**网络与无线控制**面板，
 可通过 VOS SSH/QMI 后端或 ZTE 认证 Web UBus 后端执行带验证的控制。
 
+<!-- BEGIN MENU BAR PREVIEW -->
+## Menu-bar CA at a glance
+
+All menu-bar scenarios in one English-only preview, with **light on the left and
+dark on the right**. NR and LTE have separate, aligned CC columns; SA shows only
+one centered NR line. Counts are active carriers per RAT, not a combined NR+LTE
+total. All values below are illustrative.
+
+<a href="assets/previews/menu-bar-ca-preview.png"><img src="assets/previews/menu-bar-ca-preview.png" width="670" alt="Menu-bar CA scenarios: NSA, SA, LTE only, compact, no CA, stale or unknown, unequal band and CC widths, and icon only; light and dark appearances"></a>
+<!-- END MENU BAR PREVIEW -->
+
 <!-- BEGIN README PREVIEWS -->
 ## 完整界面预览
 
@@ -199,7 +210,10 @@ LTE 服务卡中的 B2 对应这里活动的 B2 20 MHz PCell；B66 20 MHz 是活
 
 - 在每个活动的物理 IPv4 接口上自动发现设备，不假设 modem 管理地址就是默认网关
 - 发现阶段按接口区分候选，使不同链路上的相同私网管理地址保持独立
-- 在菜单栏实时显示主要 5G NR 与 LTE 频段
+- 菜单栏双行显示 CA 状态：上行为 NR 模式／主频段／活动载波数，下行为 LTE
+  主频段／活动载波数；SA 时整行隐藏 LTE，不留空行
+- NR、LTE 各自统计活动 PCell/SCell，不按不同频段去重，也不跨制式相加；
+  `1CC` 表示无聚合，未知或过期的数量显示 `—`
 - 仅在当前后端明确报告时显示 SA/NSA 模式
 - 显示设备实际提供的 RSRP、RSRQ、RSSI 与 SNR
 - 显示更直观的下行频率和信道带宽，原始 ARFCN 保留在诊断信息中

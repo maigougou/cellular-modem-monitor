@@ -13,15 +13,11 @@ struct CellularModemMonitorApp: App {
                 .environment(\.appLanguage, model.language)
                 .environment(\.locale, model.language.locale)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: model.statusSymbol)
-                if !model.menuBarTitle.isEmpty {
-                    Text(model.menuBarTitle)
-                }
-            }
+            Image(nsImage: MenuBarImageRenderer.image(symbol: model.statusSymbol, text: model.menuBarText))
             .accessibilityLabel(
-                "Cellular Modem Monitor, \(model.menuBarTitle), \(L10n.text(model.connectionState.label, language: model.language))"
+                "Cellular Modem Monitor, \(model.menuBarText.accessibilityValue), \(L10n.text(model.connectionState.label, language: model.language))"
             )
+            .help("\(model.menuBarText.accessibilityValue) · \(L10n.text(model.connectionState.label, language: model.language))")
         }
         .menuBarExtraStyle(.window)
     }

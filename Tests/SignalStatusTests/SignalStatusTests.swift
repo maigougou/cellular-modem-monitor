@@ -864,6 +864,11 @@ final class SignalStatusTests: XCTestCase {
         XCTAssertEqual(UplinkConfigurationRegression.run(), [])
     }
 
+    func testMenuBarCARegression() async {
+        let failures = await MainActor.run { MenuBarCARegression.run() }
+        XCTAssertEqual(failures, [])
+    }
+
     func testZTEAnonymousSchemaAndCSRFCompatibilityHeaders() async throws {
         let http = TestScriptedZTEHTTPTransport(responses: [
             testZTEResponse(#"[{"jsonrpc":"2.0","id":1,"result":{"zte_nwinfo_api":{"nwinfo_get_netinfo":{}}}}]"#)

@@ -22,6 +22,7 @@ enum DirectTests {
     static func main() async {
         var failures: [String] = []
         failures += UplinkConfigurationRegression.run()
+        failures += await MainActor.run { MenuBarCARegression.run() }
         failures += await EfficiencyRegression.run()
         await runRestartTests(failures: &failures)
         failures += await runRestartModelGuards()

@@ -1,5 +1,25 @@
 # README preview assets
 
+## Menu-bar CA preview
+
+`menu-bar-ca-preview.png` captures the production `MenuBarImageRenderer` inside
+a real `NSStatusBarButton` in light and dark appearances. It covers NSA, SA,
+LTE-only, compact, single-carrier, stale/unknown, long-value and icon-only labels.
+SA and LTE-only are centered single-line labels; NSA uses two 9 pt lines in
+the native 22 pt menu-bar height. The two RATs share identity, separator and
+right-aligned count columns; their CC suffixes align even when one count has
+more digits. Native captures assert equal count right-edge pixels for every
+two-line scenario in both appearances. Images are Retina template images, so macOS
+handles foreground contrast. The values are illustrative, not live modem data.
+
+Compile `scripts/MenuBarScreenshotGenerator.swift` together with the files in
+`Sources/SignalStatus` except `SignalStatusApp.swift`, then run the executable
+with an output directory argument. It needs access to macOS WindowServer and
+temporarily adds one status item, removed when the capture finishes. It does not
+construct `StatusModel`, read stored credentials, or contact a modem.
+
+## Panel previews
+
 The main READMEs use 12 pairs per language, always light on the left and dark on the right. Both images in a pair use the same fixture, width and card state. English images live in `en/`; Simplified Chinese images live in `zh-CN/`.
 
 These are renders of the app's actual SwiftUI views, not separately drawn mockups. All device identities, Cell IDs, radio measurements and speed results in this gallery are illustrative. They are not device benchmarks or a claim that every shown band combination is available on every network.

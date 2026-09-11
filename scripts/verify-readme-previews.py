@@ -54,6 +54,12 @@ def dimensions(path):
 
 for filename, language in [("README.md", "en"), ("README.zh-CN.md", "zh-CN")]:
     document = (ROOT / filename).read_text()
+    menu_block = document.split("<!-- BEGIN MENU BAR PREVIEW -->", 1)[1].split("<!-- END MENU BAR PREVIEW -->", 1)[0]
+    menu_asset = "assets/previews/menu-bar-ca-preview.png"
+    assert menu_block.isascii(), "Menu-bar preview and its caption must be English-only"
+    assert menu_block.count("<img ") == 1, "Menu-bar scenarios must share one image"
+    assert f'href="{menu_asset}"' in menu_block and f'src="{menu_asset}"' in menu_block
+    assert dimensions(ROOT / menu_asset) == (1340, 992), "Unexpected menu-bar contact-sheet size"
     block = document.split("<!-- BEGIN README PREVIEWS -->", 1)[1].split("<!-- END README PREVIEWS -->", 1)[0]
     assert block.count("<details>") == block.count("</details>") == len(SCENES) - 1
     gallery = Gallery()
@@ -67,4 +73,4 @@ for filename, language in [("README.md", "en"), ("README.zh-CN.md", "zh-CN")]:
         assert sizes[0][0] == 840 and sizes[0][1] > 100, f"Unexpected export size: {scene}"
     print(f"{filename}: {len(SCENES)} light/dark pairs verified")
 
-print("48 localized PNGs verified; all images are linked, paired and top-aligned.")
+print("48 localized panel PNGs and one shared English-only menu-bar contact sheet verified.")

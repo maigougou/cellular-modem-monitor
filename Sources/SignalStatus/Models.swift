@@ -75,6 +75,22 @@ enum MenuBarStyle: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+struct MenuBarText: Equatable, Sendable {
+    var primary: String
+    var secondary: String = ""
+
+    var accessibilityValue: String {
+        [primary, secondary].filter { !$0.isEmpty }.joined(separator: ", ")
+    }
+}
+
+/// Nil means the RAT is absent; zero means no active carrier was reported.
+/// Counts are per RAT, never NR + LTE combined into a claimed CA total.
+struct MenuBarCarrierCounts: Equatable, Sendable {
+    var nr: Int?
+    var lte: Int?
+}
+
 enum PanelWidth: String, CaseIterable, Identifiable, Sendable {
     case compact, standard, wide
 
@@ -1012,6 +1028,34 @@ struct DeviceSnapshot: Equatable, Sendable {
 
     var compactMenuTitle: String {
         hasRadioData ? bandCombination : "Cellular —"
+    }
+
+    var menuBarCarrierCounts: MenuBarCarrierCounts {
+        MenuBarCarrierCounts(
+            nr: nrBand == nil ? nil : ([nrPrimaryCell].compactMap { $0 } + nrSecondaryCells)
+                .filter(\.isActive).count,
+            // SA must never expose a stale LTE anchor, including its menu row.
+            lte: nrSystemMode == .sa || lteBand == nil ? nil
+                : ([ltePrimaryCell].compactMap { $0 } + lteSecondaryCells).filter(\.isActive).count
+        )
+    }
+
+    func menuBarText(style: MenuBarStyle, countsAreFresh: Bool = true) -> MenuBarText {
+        guard style != .iconOnly else { return MenuBarText(primary: "") }
+        let counts = menuBarCarrierCounts
+        func line(prefix: String, band: String, count: Int?) -> String {
+            let countText = count.flatMap { countsAreFresh && $0 > 0 ? "\($0)CC" : nil } ?? "—"
+            let identity = style == .detailed ? "\(prefix) \(band)" : band
+            return "\(identity) · \(countText)"
+        }
+        var lines: [String] = []
+        if let nrBand {
+            lines.append(line(prefix: nrSystemMode?.rawValue ?? "NR", band: nrBand, count: counts.nr))
+        }
+        if nrSystemMode != .sa, let lteBand {
+            lines.append(line(prefix: "LTE", band: lteBand, count: counts.lte))
+        }
+        return MenuBarText(primary: lines.first ?? "Cellular …", secondary: lines.dropFirst().first ?? "")
     }
 
     var plmn: String? {
